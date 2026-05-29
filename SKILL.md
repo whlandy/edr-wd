@@ -37,48 +37,140 @@ HiSecEndpoint (Windows EDR 客户端)
 
 ## 部署步骤
 
-### Step 1: Windows 上安装 MCP Server
+## 部署步骤
+
+### Step 0: 环境要求
+
+- **Python 3.10+**（fastmcp 要求，pywinauto 支持 3.9）
+- **Windows 开启 SSH Server**（远程控制必需）
+- **管理员权限 PowerShell**
+
+### Step 1: 克隆项目
 
 ```powershell
-# 克隆仓库（如果还没有）
 git clone https://github.com/whlandy/edr-wd.git
 cd edr-wd
-
-# 运行部署脚本（需要管理员权限）
-.\deploy.ps1 -Port 8765
 ```
 
-**或者手动安装：**
+### Step 2: Windows 开启 SSH Server
+
+以**管理员**运行 PowerShell：
+
+```powershell
+# 添加 SSH Server 功能
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+
+# 启动并设置开机自启
+Start-Service sshd
+Set-Service -Name sshd -StartupType Automatic
+
+# 确认 22 端口监听
+netstat -an | findstr 22
+```
+
+### Step 3: 安装依赖
 
 ```powershell
 pip install fastmcp pywinauto psutil Pillow
+```
+
+> ⚠️ `fastmcp` 需要 Python 3.10+，旧版本 Python 需先升级。
+
+### Step 4: 配置防火墙
+
+以**管理员**运行 PowerShell：
+
+```powershell
+# 放行 SSH 端口 22
+New-NetFirewallRule -Name "SSH" -DisplayName "SSH" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+
+# 放行 EDR-WD MCP 端口（如果需要直接连接，不走 SSH tunnel）
+New-NetFirewallRule -Name "EDR-WD-8765" -DisplayName "EDR-WD MCP" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 8765
+```
+
+### Step 5: 启动 MCP Server
+
+**方式 A：直接连接（测试用）**
+```powershell
+# 绑定 0.0.0.0，允许外部连接
+python -m edr_wd.server --http --host 0.0.0.0 --port 8765
+```
+
+**方式 B：SSH Tunnel（生产推荐）**
+```powershell
+# 仅监听本地，SSH tunnel 转发
 python -m edr_wd.server --http --port 8765
 ```
 
-验证服务运行：
+**方式 C：开机自启后台服务**
+```powershell
+# 后台运行，开机自启
+Start-Process -FilePath python -ArgumentList "-m edr_wd.server --http --host 0.0.0.0 --port 8765" -WindowStyle Hidden
+```
+
+### Step 6: 验证服务
 
 ```powershell
-# 应该看到 HTTP 服务在 8765 端口监听
+# 检查端口监听
 netstat -an | findstr 8765
+
+# 本机测试
+curl http://127.0.0.1:8765
+# 返回 404 是正常的（MCP 协议不响应普通 GET）
 ```
 
 ### Step 2: Mac 上配置 SSH Tunnel
 
+> ⚠️ **已知问题：** Windows SSH Server 默认不许可空密码登录。如果 `admin` 用户无密码，需先设置密码或修改 SSH 配置。
+
+#### 2.1 配置 SSH config
+
 ```bash
 # 添加到 ~/.ssh/config
 Host edr-win
-    HostName <WINDOWS_IP>
-    User <WINDOWS_USERNAME>
+    HostName <WINDOWS_IP>        # 例如 170.170.11.26
+    User <WINDOWS_USERNAME>      # 例如 admin
     LocalForward 18765 127.0.0.1:8765
     ServerAliveInterval 60
 ```
 
+#### 2.2 启动隧道
+
 ```bash
-# 启动隧道
+# 启动（后台运行）
 ssh -N -f edr-win
 
 # 验证隧道连通
-python edr-wd/client.py --test --tunnel-port 18765
+curl http://127.0.0.1:18765
+# 返回 404 说明隧道正常
+```
+
+#### 2.3 Windows SSH 空密码处理
+
+如果连接被拒（"Too many authentication failures" 或 "Permission denied"）：
+
+```powershell
+# 在 Windows 上为 admin 用户设置密码
+net user admin <密码>
+
+# 或修改 SSH 配置允许空密码
+# 编辑 C:\ProgramData\ssh\sshd_config
+# 找到 PasswordAuthentication yes
+# 找到 PermitEmptyPasswords yes
+# 重启 sshd: Restart-Service sshd
+```
+
+#### 2.4 常用隧道命令
+
+```bash
+# 查看活跃隧道
+lsof -i :18765
+
+# 关闭隧道
+pkill -f "ssh -N -f edr-win"
+
+# 重新连接
+ssh -N -f edr-win
 ```
 
 ### Step 3: 配置 Hermes MCP Client
