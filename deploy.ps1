@@ -34,7 +34,7 @@ Write-Host "  依赖安装完成" -ForegroundColor Green
 Write-Host "[3/4] 验证包..."
 $mods = @("fastmcp", "pywinauto", "psutil", "PIL")
 foreach ($mod in $mods) {
-    python -c "import $mod; print(f'  $mod: OK')" 2>&1
+    python -c "import ${mod}; print('  ${mod}: OK')" 2>&1
 }
 
 # 4. 启动服务
