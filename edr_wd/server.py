@@ -21,7 +21,7 @@ import logging
 
 from fastmcp import FastMCP
 
-from pywinauto_client import WindowsGUI
+from .pywinauto_client import WindowsGUI
 
 # ---------------------------------------------------------------------------
 # Logging
