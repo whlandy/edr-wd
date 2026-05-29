@@ -90,8 +90,8 @@ Write-Host "[3/5] Installing Python packages..." -ForegroundColor Cyan
 $pkgs = @("fastmcp", "pywinauto", "psutil", "Pillow")
 $failed = @()
 foreach ($p in $pkgs) {
-    # Check if importable (suppress all output, check exit code only)
-    $null = python -c "import ${p}; exit(0)" 2>$null
+    # Use pip show to check if installed (no traceback risk)
+    $status = & pip show $p 2>$null
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  [OK] $p already installed" -ForegroundColor Green
     } else {
