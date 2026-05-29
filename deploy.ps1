@@ -40,18 +40,18 @@ if (-not $NoSsh) {
     Write-Host "[1/5] Configuring SSH Server..." -ForegroundColor Cyan
     $cap = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
     if (-not $cap) {
-        Write-Host "  Adding SSH Server capability..."
-        Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Out-Null
+        Write-Host "  Adding SSH Server capability..." -ForegroundColor Yellow
+        $null = Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 2>$null
     }
     $svc = Get-Service -Name sshd -ErrorAction SilentlyContinue
     if ($svc.Status -ne 'Running') {
-        Start-Service sshd
+        $null = Start-Service sshd 2>$null
         Write-Host "  [OK] sshd started" -ForegroundColor Green
     } else {
         Write-Host "  [OK] sshd already running" -ForegroundColor Green
     }
     if ($AutoStart -or $svc.StartType -ne 'Automatic') {
-        Set-Service -Name sshd -StartupType Automatic
+        $null = Set-Service -Name sshd -StartupType Automatic 2>$null
         Write-Host "  [OK] auto-start enabled" -ForegroundColor Green
     }
 } else {
@@ -90,12 +90,13 @@ Write-Host "[3/5] Installing Python packages..." -ForegroundColor Cyan
 $pkgs = @("fastmcp", "pywinauto", "psutil", "Pillow")
 $failed = @()
 foreach ($p in $pkgs) {
-    python -c "import ${p}" 2>&1 | Out-Null
+    # Check if importable (suppress all output, check exit code only)
+    $null = python -c "import ${p}; exit(0)" 2>$null
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  [OK] $p already installed" -ForegroundColor Green
     } else {
         Write-Host "  Installing $p..." -ForegroundColor Yellow
-        pip install $p --quiet
+        $null = pip install $p --quiet 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  [OK] $p installed" -ForegroundColor Green
         } else {
