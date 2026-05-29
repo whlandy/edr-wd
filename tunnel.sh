@@ -23,7 +23,7 @@ case "${1:-status}" in
             echo "✅ Tunnel 已在运行 (端口 $LOCAL_PORT)"
         else
             echo "启动 SSH tunnel..."
-            ssh -N -f "$HOST_ALIAS"
+            nohup sshpass -f "$HOME/.ssh/.tunnelpass" ssh -N -o StrictHostKeyChecking=no admin@170.170.11.26 -L18765:127.0.0.1:8765 > /dev/null 2>&1 &
             sleep 1
             if check_tunnel; then
                 echo "✅ Tunnel 启动成功 (端口 $LOCAL_PORT)"
