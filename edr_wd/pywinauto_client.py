@@ -13,7 +13,9 @@ import logging
 import time
 from typing import Optional
 
-from pywinauto import Application, timings
+from pywinauto import Application
+
+import psutil
 
 logger = logging.getLogger("edr_wd.pywinauto_client")
 
@@ -21,7 +23,11 @@ logger = logging.getLogger("edr_wd.pywinauto_client")
 class WindowsGUI:
     """Windows GUI 自动化客户端（pywinauto 封装）"""
 
-    def __init__(self, backend: str = "win32"):
+    def __init__(self, backend: str = "uia"):
+        """Windows GUI 自动化客户端（pywinauto 封装）
+
+        backend: "win32"（标准Win32）或 "uia"（UIA，Chromium/Electron应用推荐）
+        """
         self.backend = backend
         self.app: Optional[Application] = None
         self.main_window = None
@@ -44,13 +50,31 @@ class WindowsGUI:
             return {"ok": False, "error": str(e)}
 
     def connect_by_process(self, process_name: str, timeout: float = 10.0) -> dict:
-        """通过进程名连接应用"""
+        """通过进程名连接应用（自动解析为 PID）"""
         try:
-            self.app = Application(backend=self.backend).connect(
-                process_name=process_name, timeout=timeout
-            )
-            self.main_window = self.app.windows()[0]
-            return {"ok": True, "process": process_name}
+            # 解析进程名为 PID（支持 .exe 后缀）
+            name = process_name
+            if not name.lower().endswith(".exe"):
+                name = name + ".exe"
+            pids = []
+            for p in psutil.process_iter(["pid", "name"]):
+                if p.info["name"].lower() == name.lower():
+                    pids.append(p.info["pid"])
+            if not pids:
+                return {"ok": False, "error": f"Process '{process_name}' not found"}
+            # 尝试每个 PID，找一个有窗口的
+            last_err = None
+            for pid in pids:
+                try:
+                    self.app = Application(backend=self.backend).connect(process=pid, timeout=timeout)
+                    wins = self.app.windows()
+                    if wins:
+                        self.main_window = wins[0]
+                        return {"ok": True, "process": process_name, "pid": pid}
+                except Exception as e:
+                    last_err = e
+                    continue
+            return {"ok": False, "error": str(last_err) if last_err else "No window found for process"}
         except Exception as e:
             logger.exception("connect_by_process failed")
             return {"ok": False, "error": str(e)}
@@ -58,7 +82,7 @@ class WindowsGUI:
     def connect_by_pid(self, pid: int) -> dict:
         """通过 PID 连接"""
         try:
-            self.app = Application(backend=self.backend).connect(process_id=pid)
+            self.app = Application(backend=self.backend).connect(process=pid)
             self.main_window = self.app.window()
             return {"ok": True, "pid": pid}
         except Exception as e:
