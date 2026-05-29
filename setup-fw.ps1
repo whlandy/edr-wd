@@ -1,0 +1,33 @@
+#!/usr/bin/env -pwsh
+# setup-fw.ps1 — Windows 防火墙配置
+# 以管理员权限运行
+
+$ErrorActionPreference = "Stop"
+
+Write-Host "=== Windows 防火墙配置 ===" -ForegroundColor Cyan
+
+# 规则名列表（幂等：重复运行不会重复创建）
+$rules = @(
+    @{ Name="EDR-WD-SSH"; DisplayName="EDR-WD SSH (22)"; Port=22; Desc="SSH remote access for EDR-WD" },
+    @{ Name="EDR-WD-MCP"; DisplayName="EDR-WD MCP (8765)"; Port=8765; Desc="MCP server direct access for EDR-WD" }
+)
+
+foreach ($rule in $rules) {
+    $existing = Get-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Host "  [跳过] $($rule.DisplayName) 已存在" -ForegroundColor Yellow
+    } else {
+        New-NetFirewallRule -Name $rule.Name `
+            -DisplayName $rule.DisplayName `
+            -Description $rule.Desc `
+            -Enabled True `
+            -Direction Inbound `
+            -Protocol TCP `
+            -Action Allow `
+            -LocalPort $rule.Port | Out-Null
+        Write-Host "  [创建] $($rule.DisplayName)" -ForegroundColor Green
+    }
+}
+
+Write-Host ""
+Write-Host "完成。端口 22 (SSH) 和 8765 (MCP) 已放行。" -ForegroundColor Cyan

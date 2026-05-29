@@ -50,65 +50,38 @@ HiSecEndpoint (Windows EDR 客户端)
 ```powershell
 git clone https://github.com/whlandy/edr-wd.git
 cd edr-wd
+git pull  # 更新到最新版本
 ```
 
-### Step 2: Windows 开启 SSH Server
+### Step 2: 一键部署（推荐）
 
 以**管理员**运行 PowerShell：
 
 ```powershell
-# 添加 SSH Server 功能
-Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+# 完整部署（SSH Server + 防火墙 + 依赖 + 启动服务）
+.\deploy.ps1 -Port 8765 -AutoStart
 
-# 启动并设置开机自启
-Start-Service sshd
-Set-Service -Name sshd -StartupType Automatic
-
-# 确认 22 端口监听
-netstat -an | findstr 22
+# 跳过 SSH Server 配置（如果已配置）
+.\deploy.ps1 -Port 8765 -NoSsh -AutoStart
 ```
 
-### Step 3: 安装依赖
+**或分步执行：**
 
 ```powershell
+# 2.1 配置 SSH Server（可选，已有可跳过）
+.\setup-ssh.ps1 -AutoStart
+
+# 2.2 配置防火墙（可选，已有可跳过）
+.\setup-fw.ps1
+
+# 2.3 安装依赖
 pip install fastmcp pywinauto psutil Pillow
-```
 
-> ⚠️ `fastmcp` 需要 Python 3.10+，旧版本 Python 需先升级。
-
-### Step 4: 配置防火墙
-
-以**管理员**运行 PowerShell：
-
-```powershell
-# 放行 SSH 端口 22
-New-NetFirewallRule -Name "SSH" -DisplayName "SSH" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
-
-# 放行 EDR-WD MCP 端口（如果需要直接连接，不走 SSH tunnel）
-New-NetFirewallRule -Name "EDR-WD-8765" -DisplayName "EDR-WD MCP" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 8765
-```
-
-### Step 5: 启动 MCP Server
-
-**方式 A：直接连接（测试用）**
-```powershell
-# 绑定 0.0.0.0，允许外部连接
+# 2.4 启动服务
 python -m edr_wd.server --http --host 0.0.0.0 --port 8765
 ```
 
-**方式 B：SSH Tunnel（生产推荐）**
-```powershell
-# 仅监听本地，SSH tunnel 转发
-python -m edr_wd.server --http --port 8765
-```
-
-**方式 C：开机自启后台服务**
-```powershell
-# 后台运行，开机自启
-Start-Process -FilePath python -ArgumentList "-m edr_wd.server --http --host 0.0.0.0 --port 8765" -WindowStyle Hidden
-```
-
-### Step 6: 验证服务
+### Step 3: 验证服务
 
 ```powershell
 # 检查端口监听
@@ -119,58 +92,32 @@ curl http://127.0.0.1:8765
 # 返回 404 是正常的（MCP 协议不响应普通 GET）
 ```
 
-### Step 2: Mac 上配置 SSH Tunnel
+### Step 2: Mac 配置
 
-> ⚠️ **已知问题：** Windows SSH Server 默认不许可空密码登录。如果 `admin` 用户无密码，需先设置密码或修改 SSH 配置。
-
-#### 2.1 配置 SSH config
+#### 方式 A：一键配置（推荐）
 
 ```bash
-# 添加到 ~/.ssh/config
-Host edr-win
-    HostName <WINDOWS_IP>        # 例如 170.170.11.26
-    User <WINDOWS_USERNAME>      # 例如 admin
-    LocalForward 18765 127.0.0.1:8765
-    ServerAliveInterval 60
+# 传入 Windows IP 和用户名
+bash setup-mac.sh 170.170.11.26 admin
 ```
 
-#### 2.2 启动隧道
+#### 方式 B：分步手动配置
 
 ```bash
-# 启动（后台运行）
-ssh -N -f edr-win
+# 1. 配置 SSH tunnel
+bash tunnel.sh start
 
-# 验证隧道连通
-curl http://127.0.0.1:18765
-# 返回 404 说明隧道正常
+# 2. 测试连接
+bash tunnel.sh test
 ```
 
-#### 2.3 Windows SSH 空密码处理
-
-如果连接被拒（"Too many authentication failures" 或 "Permission denied"）：
-
-```powershell
-# 在 Windows 上为 admin 用户设置密码
-net user admin <密码>
-
-# 或修改 SSH 配置允许空密码
-# 编辑 C:\ProgramData\ssh\sshd_config
-# 找到 PasswordAuthentication yes
-# 找到 PermitEmptyPasswords yes
-# 重启 sshd: Restart-Service sshd
-```
-
-#### 2.4 常用隧道命令
+#### 常用 tunnel 命令
 
 ```bash
-# 查看活跃隧道
-lsof -i :18765
-
-# 关闭隧道
-pkill -f "ssh -N -f edr-win"
-
-# 重新连接
-ssh -N -f edr-win
+bash tunnel.sh start   # 启动隧道
+bash tunnel.sh status  # 查看状态
+bash tunnel.sh stop    # 停止隧道
+bash tunnel.sh test    # 测试连接
 ```
 
 ### Step 3: 配置 Hermes MCP Client
@@ -280,14 +227,35 @@ screenshot(path="C:\\temp\\capture.png")
 
 ```
 edr-wd/
-├── SKILL.md              ← 本文档
+├── SKILL.md              ← 部署文档
 ├── pyproject.toml         ← Python 包配置
-├── deploy.ps1             ← Windows 部署脚本
-├── client.py              ← Mac 端 SSH tunnel 工具
+├── deploy.ps1             ← Windows 一键部署脚本（推荐）
+├── setup-ssh.ps1         ← Windows SSH Server 独立配置脚本
+├── setup-fw.ps1          ← Windows 防火墙独立配置脚本
+├── setup-mac.sh          ← Mac 一键配置脚本（SSH tunnel + Hermes）
+├── tunnel.sh             ← Mac SSH tunnel 管理脚本
+├── client.py             ← Mac 端 tunnel 测试工具
 └── edr_wd/
     ├── __init__.py
     ├── server.py          ← fastmcp HTTP/stdio Server
     └── pywinauto_client.py ← pywinauto 封装
+```
+
+## 快速上手
+
+**Windows（管理员 PowerShell）：**
+```powershell
+git clone https://github.com/whlandy/edr-wd.git
+cd edr-wd
+.\deploy.ps1 -Port 8765 -AutoStart
+```
+
+**Mac：**
+```bash
+git clone https://github.com/whlandy/edr-wd.git
+cd edr-wd
+bash setup-mac.sh 170.170.11.26 admin
+bash tunnel.sh start
 ```
 
 ## 已知限制
