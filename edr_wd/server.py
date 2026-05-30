@@ -76,8 +76,8 @@ def connect(
         "is_visible, is_enabled. Use control_id as the unique identifier for click/select operations."
     ),
 )
-def dump_tree(window_title_re: str = None) -> str:
-    result = _gui.dump_tree(window_title_re)
+def dump_tree(window_title_re: str = None, max_depth: int = 15) -> str:
+    result = _gui.dump_tree(window_title_re, max_depth=max_depth)
     return json.dumps(result, ensure_ascii=False)
 
 

@@ -37,8 +37,6 @@ HiSecEndpoint (Windows EDR 客户端)
 
 ## 部署步骤
 
-## 部署步骤
-
 ### Step 0: 环境要求
 
 - **Python 3.10+**（fastmcp 要求，pywinauto 支持 3.9）
@@ -152,19 +150,21 @@ connect(title_re=".*HiSecEndpoint.*")
 ### 2. 查看控件树
 
 ```json
-dump_tree()
+dump_tree(window_title_re=".*华为.*", max_depth=10)
 ```
 
 返回控件列表：
 
 ```
 [
-  {"class_name": "TabControl", "text": "", "control_id": 1001, "rectangle": {"x": 0, "y": 0, "w": 800, "h": 600}, "is_visible": true, "is_enabled": true, "depth": 0},
-  {"class_name": "Button", "text": "确定", "control_id": 1002, "rectangle": {"x": 700, "y": 560, "w": 80, "h": 30}, "is_visible": true, "is_enabled": true, "depth": 1},
-  {"class_name": "ComboBox", "text": "", "control_id": 1003, "rectangle": {"x": 100, "y": 100, "w": 200, "h": 25}, "is_visible": true, "is_enabled": true, "depth": 1},
+  {"class_name": "Dialog", "text": "华为智能终端安全系统", "control_id": null, "rectangle": {"x": 2, "y": 1, "w": 920, "b": 600}, "is_visible": true, "is_enabled": true, "depth": 0, "automation_id": "SafraUIMainWindow", "control_type": "Window"},
+  {"class_name": "Button", "text": "快速扫描", "control_id": null, "rectangle": {"x": 185, "y": 337, "w": 212, "h": 204}, "is_visible": true, "is_enabled": true, "depth": 4, "automation_id": "...quickScanBtn", "control_type": "Button"},
+  {"class_name": "Button", "text": "全盘扫描", "control_id": null, "rectangle": {"x": 417, "y": 337, "w": 212, "h": 204}, "is_visible": true, "is_enabled": true, "depth": 4, "automation_id": "...fullScanBtn", "control_type": "Button"},
   ...
 ]
 ```
+
+> **注意**：`automation_id` 和 `control_type` 字段只有在 `backend='uia'` 时才存在（默认）。`control_id` 对 Qt 控件通常为 null，应使用 `automation_id` 或 `text` 作为控件标识。
 
 ### 3. 操作控件
 
@@ -194,8 +194,8 @@ screenshot(path="C:\\temp\\capture.png")
 | 工具 | 说明 | 关键参数 |
 |------|------|---------|
 | `connect` | 连接 Windows 应用 | `title_re`（窗口标题正则）、`process_name`、`pid` |
-| `dump_tree` | 导出控件树 | `window_title_re`（可选，模糊匹配） |
-| `click` | 点击控件 | `control_id`（首选）、`text`、`class_name` |
+| `dump_tree` | 导出控件树 | `window_title_re`（可选）、`max_depth`（默认15） |
+| `click` | 点击控件 | `control_id`（首选）、`text`（文字）、`class_name` |
 | `type_text` | 向输入框写入文本 | `control_id`、`string` |
 | `select` | 下拉框选择 | `control_id`、`item`（文字）或 `index`（序号） |
 | `get_text` | 读取控件文本 | `control_id`、`text`、`class_name` |
@@ -203,11 +203,12 @@ screenshot(path="C:\\temp\\capture.png")
 
 ## 控件标识优先级
 
-1. **`control_id`** — 最可靠，同一窗口内唯一
-2. **`text`** — 控件显示的文字（支持正则）
-3. **`class_name`** — Windows 窗口类名
+1. **`automation_id`** — 最可靠，Qt 控件的 `AutomationId` 全局唯一（`backend='uia'` 才有）
+2. **`text`** — 控件显示的文字（支持正则），最常用
+3. **`control_id`** — Windows 原生控件有效，Qt 控件通常为 null
+4. **`class_name`** — Windows 窗口类名
 
-**推荐始终使用 `control_id`**，最稳定。
+**Qt 窗口推荐用 `text` 或 `automation_id`**，最稳定。
 
 ## HiSecEndpoint 典型操作
 
