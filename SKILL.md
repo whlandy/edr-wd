@@ -67,16 +67,16 @@ git pull  # 更新到最新版本
 
 ```powershell
 # 2.1 配置 SSH Server（可选，已有可跳过）
-.\windows\setup-ssh.ps1 -AutoStart
+.\target\setup-ssh.ps1 -AutoStart
 
 # 2.2 配置防火墙（可选，已有可跳过）
-.\windows\setup-fw.ps1
+.\target\setup-fw.ps1
 
 # 2.3 安装依赖
 pip install fastmcp pywinauto psutil Pillow
 
 # 2.4 启动服务
-cd windows
+cd target
 python -m edr_wd.server --http --host 0.0.0.0 --port 8765
 ```
 
@@ -232,7 +232,7 @@ edr-wd/
 ├── SKILL.md                  ← 部署文档
 ├── pyproject.toml             ← Python 包配置
 ├── screenshots/              ← 截图输出目录
-├── windows/
+├── target/                   ← Windows 目标机器（MCP Server + EDR 软件）
 │   ├── deploy.ps1             ← Windows 一键部署脚本（推荐）
 │   ├── setup-ssh.ps1         ← Windows SSH Server 独立配置脚本
 │   ├── setup-fw.ps1          ← Windows 防火墙独立配置脚本
@@ -242,17 +242,16 @@ edr-wd/
 │   │   ├── server.py          ← fastmcp HTTP Server（MCP Server 主体）
 │   │   └── pywinauto_client.py ← pywinauto 封装
 │   └── tests/                ← 调试脚本（dump_hisec*.py, enum_*.py, test_*.py...）
-└── mac/
+└── agent/                    ← Mac 控制端（AI Agent，通过 tunnel 调用 remote）
     ├── tunnel.sh              ← Mac SSH tunnel 管理脚本
     ├── setup-mac.sh           ← Mac 一键配置脚本（SSH tunnel + Hermes）
     ├── start_tunnel.py        ← Python tunnel 启动脚本
     └── client.py              ← Mac 端 MCP client 测试工具
 ```
 
-**职责划分：**
-- `windows/` — 跑在 Windows 上的 MCP server 及所有调试脚本
-- `mac/` — 跑在 Mac 上的 tunnel/client 工具
-- 根目录 — 仅保留文档和配置
+**架构：**
+- `agent/` — Mac，AI Agent 所在，调度和接收信息
+- `target/` — Windows，目标机器，运行 MCP Server 和 EDR 软件
 
 ## 快速上手
 
@@ -260,15 +259,15 @@ edr-wd/
 ```powershell
 git clone https://github.com/whlandy/edr-wd.git
 cd edr-wd
-.\windows\deploy.ps1 -Port 8765 -AutoStart
+.\target\deploy.ps1 -Port 8765 -AutoStart
 ```
 
 **Mac：**
 ```bash
 git clone https://github.com/whlandy/edr-wd.git
 cd edr-wd
-bash mac/setup-mac.sh 170.170.11.26 admin
-bash mac/tunnel.sh start
+bash agent/setup-mac.sh 170.170.11.26 admin
+bash agent/tunnel.sh start
 ```
 
 ## 已知限制
@@ -282,7 +281,7 @@ bash mac/tunnel.sh start
 
 ```powershell
 # Windows 上查看 MCP server 日志
-cd windows
+cd target
 python -m edr_wd.server --http --port 8765
 # 查看实时日志输出
 
