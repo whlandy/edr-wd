@@ -67,15 +67,16 @@ git pull  # 更新到最新版本
 
 ```powershell
 # 2.1 配置 SSH Server（可选，已有可跳过）
-.\setup-ssh.ps1 -AutoStart
+.\windows\setup-ssh.ps1 -AutoStart
 
 # 2.2 配置防火墙（可选，已有可跳过）
-.\setup-fw.ps1
+.\windows\setup-fw.ps1
 
 # 2.3 安装依赖
 pip install fastmcp pywinauto psutil Pillow
 
 # 2.4 启动服务
+cd windows
 python -m edr_wd.server --http --host 0.0.0.0 --port 8765
 ```
 
@@ -228,19 +229,30 @@ screenshot(path="C:\\temp\\capture.png")
 
 ```
 edr-wd/
-├── SKILL.md              ← 部署文档
-├── pyproject.toml         ← Python 包配置
-├── deploy.ps1             ← Windows 一键部署脚本（推荐）
-├── setup-ssh.ps1         ← Windows SSH Server 独立配置脚本
-├── setup-fw.ps1          ← Windows 防火墙独立配置脚本
-├── setup-mac.sh          ← Mac 一键配置脚本（SSH tunnel + Hermes）
-├── tunnel.sh             ← Mac SSH tunnel 管理脚本
-├── client.py             ← Mac 端 tunnel 测试工具
-└── edr_wd/
-    ├── __init__.py
-    ├── server.py          ← fastmcp HTTP/stdio Server
-    └── pywinauto_client.py ← pywinauto 封装
+├── SKILL.md                  ← 部署文档
+├── pyproject.toml             ← Python 包配置
+├── screenshots/              ← 截图输出目录
+├── windows/
+│   ├── deploy.ps1             ← Windows 一键部署脚本（推荐）
+│   ├── setup-ssh.ps1         ← Windows SSH Server 独立配置脚本
+│   ├── setup-fw.ps1          ← Windows 防火墙独立配置脚本
+│   ├── check_session.ps1     ← RDP Session 检查脚本
+│   ├── edr_wd/
+│   │   ├── __init__.py
+│   │   ├── server.py          ← fastmcp HTTP Server（MCP Server 主体）
+│   │   └── pywinauto_client.py ← pywinauto 封装
+│   └── tests/                ← 调试脚本（dump_hisec*.py, enum_*.py, test_*.py...）
+└── mac/
+    ├── tunnel.sh              ← Mac SSH tunnel 管理脚本
+    ├── setup-mac.sh           ← Mac 一键配置脚本（SSH tunnel + Hermes）
+    ├── start_tunnel.py        ← Python tunnel 启动脚本
+    └── client.py              ← Mac 端 MCP client 测试工具
 ```
+
+**职责划分：**
+- `windows/` — 跑在 Windows 上的 MCP server 及所有调试脚本
+- `mac/` — 跑在 Mac 上的 tunnel/client 工具
+- 根目录 — 仅保留文档和配置
 
 ## 快速上手
 
@@ -248,15 +260,15 @@ edr-wd/
 ```powershell
 git clone https://github.com/whlandy/edr-wd.git
 cd edr-wd
-.\deploy.ps1 -Port 8765 -AutoStart
+.\windows\deploy.ps1 -Port 8765 -AutoStart
 ```
 
 **Mac：**
 ```bash
 git clone https://github.com/whlandy/edr-wd.git
 cd edr-wd
-bash setup-mac.sh 170.170.11.26 admin
-bash tunnel.sh start
+bash mac/setup-mac.sh 170.170.11.26 admin
+bash mac/tunnel.sh start
 ```
 
 ## 已知限制
@@ -270,6 +282,7 @@ bash tunnel.sh start
 
 ```powershell
 # Windows 上查看 MCP server 日志
+cd windows
 python -m edr_wd.server --http --port 8765
 # 查看实时日志输出
 
