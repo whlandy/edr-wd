@@ -58,7 +58,7 @@ class WindowsGUI:
     def connect_by_pid(self, pid: int) -> dict:
         """通过 PID 连接"""
         try:
-            self.app = Application(backend=self.backend).connect(process_id=pid)
+            self.app = Application(backend=self.backend).connect(process=pid)
             self.main_window = self.app.window()
             return {"ok": True, "pid": pid}
         except Exception as e:
