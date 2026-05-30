@@ -21,7 +21,7 @@ logger = logging.getLogger("edr_wd.pywinauto_client")
 class WindowsGUI:
     """Windows GUI 自动化客户端（pywinauto 封装）"""
 
-    def __init__(self, backend: str = "win32"):
+    def __init__(self, backend: str = "uia"):
         self.backend = backend
         self.app: Optional[Application] = None
         self.main_window = None
@@ -125,7 +125,7 @@ class WindowsGUI:
             except Exception:
                 cid = None
             try:
-                cls = ctrl.class_name()
+                cls = ctrl.friendly_class_name()
             except Exception:
                 cls = ""
             try:
@@ -141,6 +141,17 @@ class WindowsGUI:
                 is_enabled = ctrl.is_enabled()
             except Exception:
                 is_enabled = False
+            # UIA-specific fields (may not exist on win32 backend)
+            automation_id = ""
+            control_type = ""
+            try:
+                automation_id = ctrl.automation_id()
+            except Exception:
+                pass
+            try:
+                control_type = str(ctrl.control_type())
+            except Exception:
+                pass
 
             results.append({
                 "class_name": cls,
@@ -150,6 +161,8 @@ class WindowsGUI:
                 "is_visible": is_visible,
                 "is_enabled": is_enabled,
                 "depth": depth,
+                "automation_id": automation_id,
+                "control_type": control_type,
             })
         except Exception:
             pass
