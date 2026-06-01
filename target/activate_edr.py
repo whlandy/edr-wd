@@ -35,6 +35,9 @@ if edr_hwnd:
     user32.ShowWindow(edr_hwnd, SW_RESTORE)
     time.sleep(0.3)
     user32.SetForegroundWindow(edr_hwnd)
+    # 强制重绘
+    user32.InvalidateRect(edr_hwnd, None, True)
+    user32.UpdateWindow(edr_hwnd)
     print(f"[OK] 已激活 HWND={edr_hwnd}")
 else:
     print("[INFO] 未找到标准 EDR 窗口，尝试点击系统托盘...")
