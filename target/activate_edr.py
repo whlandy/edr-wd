@@ -63,7 +63,10 @@ else:
         win32gui.EnumChildWindows(tray_hwnd, tray_enum, None)
 
         for child in childs:
-            cls = win32gui.GetClassName(child)
+            try:
+                cls = win32gui.GetClassName(child)
+            except Exception:
+                continue
             if "ToolbarWindow32" in cls:
                 count = user32.SendMessage(child, TB_BUTTONCOUNT, 0, 0)
                 print(f"[DBG] Toolbar HWND={child}, 按钮数={count}")
