@@ -25,7 +25,7 @@ win32gui.EnumWindows(enum_cb, None)
 # 2. 找 EDR 主窗口（排除 cmd.exe / powershell 等自身窗口）
 edr_hwnd = None
 for hwnd, title, cls in windows:
-    if any(kw in title.lower() for kw in ["hisec", "华为", "endpoint"]):
+    if any(kw in title.lower() for kw in ["hisecendpointagent", "hisec", "华为", "endpoint"]):
         edr_hwnd = hwnd
         print(f"[OK] 找到 EDR 窗口: HWND={hwnd}, title={repr(title)}, class={cls}")
         break
@@ -64,7 +64,7 @@ else:
                     btn_buf = ctypes.create_unicode_buffer(256)
                     ret = user32.SendMessageW(child, TB_GETBUTTONTEXTW, i, ctypes.byref(btn_buf))
                     text = btn_buf.value
-                    if text and any(kw in text.lower() for kw in ["hisec", "华为", "endpoint", "安全中心"]):
+                    if text and any(kw in text.lower() for kw in ["hisecendpointagent", "hisec", "华为", "endpoint", "安全中心"]):
                         user32.SendMessage(child, TB_PRESSBUTTON, i, 1)
                         time.sleep(0.8)
                         print(f"[OK] 点击了托盘按钮: {repr(text)}")
