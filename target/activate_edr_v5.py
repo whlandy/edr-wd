@@ -138,7 +138,6 @@ def click_overflow_chevron():
 
     # 方式2：直接找屏幕右下角托盘区的 chevron 按钮
     # 通常在 (屏幕宽-50, 托盘高度中间) 位置
-    sm = ctypes.create_struct(wintypes.SM)
     cx = user32.GetSystemMetrics(76)  # SM_CXSCREEN
     cy = user32.GetSystemMetrics(77)  # SM_CYSCREEN
     print(f"[DBG] 屏幕分辨率: {cx}x{cy}")
