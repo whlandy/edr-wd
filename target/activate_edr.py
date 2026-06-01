@@ -5,6 +5,9 @@ import win32con
 import win32api
 
 user32 = ctypes.windll.user32
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SendMessageW.restype = wintypes.LPARAM
+user32.SendMessage = user32.SendMessageW
 
 SW_RESTORE = 9
 TB_BUTTONCOUNT = 0x0411
