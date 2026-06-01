@@ -69,7 +69,7 @@ else:
                 print(f"[DBG] Toolbar HWND={child}, 按钮数={count}")
                 for i in range(count):
                     btn_buf = ctypes.create_unicode_buffer(256)
-                    ret = user32.SendMessageW(child, TB_GETBUTTONTEXTW, i, ctypes.byref(btn_buf))
+                    ret = user32.SendMessageW(child, TB_GETBUTTONTEXTW, i, ctypes.addressof(btn_buf))
                     text = btn_buf.value
                     if text and any(kw in text.lower() for kw in ["hisecendpointagent", "hisec", "华为", "endpoint", "安全中心"]):
                         user32.SendMessage(child, TB_PRESSBUTTON, i, 1)
