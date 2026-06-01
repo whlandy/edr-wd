@@ -6,7 +6,6 @@ import time
 import win32gui
 import win32con
 from pywinauto import Application, Desktop
-from pywinauto.win32hwnd import WrapHandle
 
 # 用 pywinauto 的 Application 连接到 system tray
 # pywinauto 可以用铜鼓 tray 图标的窗口类名找到它
