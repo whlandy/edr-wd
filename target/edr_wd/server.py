@@ -9,7 +9,7 @@ Usage:
     # HTTP mode (for SSH tunnel / remote access)
     python -m edr_wd.server --http --port 8765
 
-    # Custom host
+    # Expose beyond localhost only when direct LAN access is required
     python -m edr_wd.server --http --host 0.0.0.0 --port 8765
 """
 
@@ -216,21 +216,9 @@ def _run_ps_sync(command: str, timeout: int, cwd: str) -> dict:
                 "duration_ms": int((time.time() - started) * 1000)}
 
 
-def _run_ps_async(command: str, timeout: int, cwd: str, job_id: str) -> None:
-    """Background run — stores result into _jobs when done. Called by Popen."""
+def _collect_ps_async(proc: subprocess.Popen, timeout: int, job_id: str) -> None:
+    """Collect a background PowerShell process result and store it in _jobs."""
     started = time.time()
-    proc = subprocess.Popen(
-        ["powershell.exe", "-NoProfile", "-NonInteractive",
-         "-ExecutionPolicy", "Bypass", "-Command", command],
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False,  # bytes for communicate()
-    )
-    # Update stored proc reference so cancel can reach it
-    with _jobs_lock:
-        if job_id in _jobs:
-            _jobs[job_id]["proc"] = proc
     try:
         stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
         duration_ms = int((time.time() - started) * 1000)
@@ -317,9 +305,9 @@ def start_powershell(command: str, timeout: int = 300, cwd: str = None) -> str:
     with _jobs_lock:
         _jobs[job_id] = {"proc": proc, "command": command,
                           "started_at": time.time(), "timeout": timeout}
-    # Fire-and-forget background runner
-    t = threading.Thread(target=_run_ps_async,
-                        args=(command, timeout, cwd, job_id), daemon=True)
+    # Fire-and-forget collector for the process we just started.
+    t = threading.Thread(target=_collect_ps_async,
+                        args=(proc, timeout, job_id), daemon=True)
     t.start()
     return json.dumps({"ok": True, "job_id": job_id}, ensure_ascii=False)
 

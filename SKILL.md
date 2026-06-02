@@ -28,7 +28,7 @@ description: |
                    │  MCP over SSH tunnel (LocalForward 18765→Windows:8765)
                    ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Windows EDR MCP Server (fastmcp + pywinauto, 0.0.0.0:8765)│
+│  Windows EDR MCP Server (fastmcp + pywinauto, 127.0.0.1:8765)│
 │  └── run_powershell / start_powershell / get_job / cancel_job│
 │  └── connect / dump_tree / click / type_text / screenshot     │
 └──────────────────┬────────────────────────────────────────────┘
