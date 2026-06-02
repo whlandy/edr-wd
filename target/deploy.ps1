@@ -4,7 +4,7 @@
 # Usage: .\deploy.ps1 [-Host <bind_host>] [-Port <port>] [-NoSsh] [-NoFw] [-AutoStart]
 
 param(
-    [string]$Host = "127.0.0.1",
+    [string]$BindHost = "127.0.0.1",
     [string]$Port = "8765",
     [switch]$NoSsh,
     [switch]$NoFw,
@@ -14,7 +14,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 Write-Host "=== EDR-WD Deployment ===" -ForegroundColor Cyan
-Write-Host "Host: $Host" -ForegroundColor Gray
+Write-Host "Host: $BindHost" -ForegroundColor Gray
 Write-Host "Port: $Port" -ForegroundColor Gray
 Write-Host ""
 
@@ -64,10 +64,10 @@ if (-not $NoSsh) {
 if (-not $NoFw) {
     Write-Host "[2/5] Configuring Firewall..." -ForegroundColor Cyan
     $rules = @(@{ Name="EDR-WD-SSH"; Port=22 })
-    if ($Host -ne "127.0.0.1" -and $Host -ne "localhost") {
+    if ($BindHost -ne "127.0.0.1" -and $BindHost -ne "localhost") {
         $rules += @{ Name="EDR-WD-MCP"; Port=$Port }
     } else {
-        Write-Host "  [SKIP] MCP firewall rule not needed for loopback bind ($Host)" -ForegroundColor Gray
+        Write-Host "  [SKIP] MCP firewall rule not needed for loopback bind ($BindHost)" -ForegroundColor Gray
     }
     foreach ($r in $rules) {
         $ex = Get-NetFirewallRule -Name $r.Name -ErrorAction SilentlyContinue
@@ -117,7 +117,7 @@ if ($failed.Count -gt 0) {
 
 # Verify
 Write-Host "[4/5] Ready to start MCP Server..." -ForegroundColor Cyan
-Write-Host "  Run: python -m edr_wd.server --http --host $Host --port $Port"
+Write-Host "  Run: python -m edr_wd.server --http --host $BindHost --port $Port"
 Write-Host ""
 
 # Start
@@ -126,7 +126,7 @@ Write-Host "[5/5] Starting MCP Server..." -ForegroundColor Cyan
 if ($AutoStart) {
     $env:EDR_WD_ENABLE_POWERSHELL = "1"
     $proc = Start-Process -FilePath python `
-        -ArgumentList "-m edr_wd.server --http --host $Host --port $Port" `
+        -ArgumentList "-m edr_wd.server --http --host $BindHost --port $Port" `
         -EnvironmentVariables @{ EDR_WD_ENABLE_POWERSHELL = "1" } `
         -WindowStyle Hidden `
         -PassThru
@@ -143,5 +143,5 @@ if ($AutoStart) {
     Write-Host "  EDR_WD_ENABLE_POWERSHELL=1 (PowerShell tools enabled)" -ForegroundColor Gray
     Write-Host "  Press Ctrl+C to stop" -ForegroundColor Yellow
     Write-Host ""
-    python -m edr_wd.server --http --host $Host --port $Port
+    python -m edr_wd.server --http --host $BindHost --port $Port
 }

@@ -53,7 +53,8 @@ mcp = FastMCP("edr-wd")
     name="connect",
     description=(
         "Connect to a Windows application by window title (regex), process name, or PID. "
-        "Must be called before any other operation."
+        "Must be called before any other operation. "
+        "auto_activate: if True and first connect attempt fails, try activate_edr() once then retry."
     ),
 )
 def connect(
@@ -61,15 +62,23 @@ def connect(
     process_name: str = None,
     pid: int = None,
     timeout: float = 10.0,
+    auto_activate: bool = False,
 ) -> str:
-    if title_re:
-        result = _gui.connect_by_title(title_re, timeout)
-    elif process_name:
-        result = _gui.connect_by_process(process_name, timeout)
-    elif pid:
-        result = _gui.connect_by_pid(pid)
-    else:
-        result = {"ok": False, "error": "Must specify title_re, process_name, or pid"}
+    def do_connect():
+        if title_re:
+            return _gui.connect_by_title(title_re, timeout)
+        elif process_name:
+            return _gui.connect_by_process(process_name, timeout)
+        elif pid:
+            return _gui.connect_by_pid(pid)
+        else:
+            return {"ok": False, "error": "Must specify title_re, process_name, or pid"}
+
+    result = do_connect()
+    if not result["ok"] and auto_activate and ENABLE_POWERSHELL:
+        _gui.activate_edr()
+        time.sleep(3)
+        result = do_connect()
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -136,10 +145,26 @@ def click_target(
 
 @mcp.tool(
     name="click_at",
-    description="Click absolute screen coordinates, usually derived from dump_tree rectangle center.",
+    description=(
+        "Click absolute screen coordinates (x, y on the screen). "
+        "Use when you have screen-space coordinates, e.g. from dump_tree window_rectangle + control rectangle center."
+    ),
 )
 def click_at(x: int, y: int) -> str:
     result = _gui.click_at(x, y)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="click_window_at",
+    description=(
+        "Click window-relative coordinates (x, y) converted to screen space using the connected window's rectangle. "
+        "Use when you have coordinates relative to the window's top-left corner. "
+        "If window_title_re is not given, uses the currently connected window."
+    ),
+)
+def click_window_at(x: int, y: int, window_title_re: str = None) -> str:
+    result = _gui.click_window_at(x, y, window_title_re)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -206,12 +231,25 @@ def screenshot(path: str = None) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-# -----------------------------------------------------------------------
+@mcp.tool(
+    name="activate_edr",
+    description=(
+        "Activate the EDR GUI by launching HisecEndpointAgent with 'cmd ui'. "
+        "Requires EDR_WD_ENABLE_POWERSHELL=1 on the server. "
+        "exe_path can override the default EDR executable path."
+    ),
+)
+def activate_edr(exe_path: str = None) -> str:
+    if not ENABLE_POWERSHELL:
+        return json.dumps({"ok": False, "error": "PowerShell disabled: set EDR_WD_ENABLE_POWERSHELL=1 to enable"})
+    result = _gui.activate_edr(exe_path)
+    return json.dumps(result, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
 # PowerShell Execution (Popen + Terminate-Process, cancellable)
 # Security: set EDR_WD_ENABLE_POWERSHELL=1 to enable (default: disabled)
-# -----------------------------------------------------------------------
-
-import os
+# ---------------------------------------------------------------------------
 
 ENABLE_POWERSHELL = os.environ.get("EDR_WD_ENABLE_POWERSHELL", "0") == "1"
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import os
+import subprocess
 import time
 from typing import Optional
 
@@ -17,6 +19,9 @@ from pywinauto import Application, timings
 from pywinauto import mouse
 
 logger = logging.getLogger("edr_wd.pywinauto_client")
+
+# Default EDR executable path (can be overridden via EDR_WD_EDR_EXE env var)
+DEFAULT_EDR_EXE = r"C:\Program Files\HiSec-Endpoint\core\safra\HisecEndpointAgent.exe"
 
 
 class WindowsGUI:
@@ -66,6 +71,35 @@ class WindowsGUI:
             logger.exception("connect_by_pid failed")
             return {"ok": False, "error": str(e)}
 
+    def activate_edr(self, exe_path: str = None) -> dict:
+        """
+        激活 EDR GUI（通过启动 HisecEndpointAgent cmd ui）。
+        路径可通过 EDR_WD_EDR_EXE 环境变量覆盖。
+        """
+        exe = exe_path or os.environ.get("EDR_WD_EDR_EXE", DEFAULT_EDR_EXE)
+        try:
+            subprocess.Popen([exe, "cmd", "ui"])
+            time.sleep(2)
+            return {"ok": True, "exe_path": exe}
+        except Exception as e:
+            logger.exception("activate_edr failed")
+            return {"ok": False, "error": str(e)}
+
+    def _window_rect(self, window_title_re: str = None) -> dict:
+        """获取窗口在屏幕上的绝对矩形坐标。"""
+        try:
+            if window_title_re and self.app:
+                win = self.app.window(title_re=window_title_re)
+            elif self.main_window:
+                win = self.main_window
+            else:
+                return {}
+            r = win.rectangle()
+            return {"left": r.left, "top": r.top, "right": r.right, "bottom": r.bottom,
+                    "width": r.width(), "height": r.height()}
+        except Exception:
+            return {}
+
     # ------------------------------------------------------------------
     # Dump tree
     # ------------------------------------------------------------------
@@ -74,10 +108,16 @@ class WindowsGUI:
         """
         导出控件树。
 
+        rectangle_mode:
+          "screen" — ctrl.rectangle() 返回屏幕绝对坐标（pywinauto UIA 标准行为）
+          "relative" — 控件位于子窗口内，坐标相对于子窗口
+
         返回结构:
         {
           "ok": True,
           "title": "窗口标题",
+          "window_rectangle": {"x": 0, "y": 0, "w": 800, "h": 600},
+          "rectangle_mode": "screen",
           "controls": [
             {
               "class_name": "Button",
@@ -100,10 +140,17 @@ class WindowsGUI:
             else:
                 return {"ok": False, "error": "No window connected"}
 
+            win_rect = win.rectangle()
+            win_rect_dict = {
+                "x": win_rect.left, "y": win_rect.top,
+                "w": win_rect.width(), "h": win_rect.height()
+            }
             tree = self._build_tree(win, depth=0, max_depth=max_depth)
             return {
                 "ok": True,
                 "title": win.window_text(),
+                "window_rectangle": win_rect_dict,
+                "rectangle_mode": "screen",
                 "controls": tree
             }
         except Exception as e:
@@ -231,13 +278,47 @@ class WindowsGUI:
             return {"ok": False, "error": str(e)}
 
     def click_at(self, x: int, y: int) -> dict:
-        """Click absolute screen coordinates."""
+        """
+        Click absolute screen coordinates (x, y on the screen).
+
+        Use this when you already have screen-space coordinates, e.g. from
+        dump_tree's window_rectangle + control rectangle center.
+        """
         try:
             mouse.click(button="left", coords=(int(x), int(y)))
             time.sleep(0.1)
             return {"ok": True, "method": "mouse.click", "x": int(x), "y": int(y)}
         except Exception as e:
             logger.exception("click_at failed")
+            return {"ok": False, "error": str(e)}
+
+    def click_window_at(self, x: int, y: int, window_title_re: str = None) -> dict:
+        """
+        Click window-relative coordinates.
+
+        Converts (x, y) from window-relative space to screen absolute space,
+        then performs the click.
+
+        Use this when you have coordinates relative to the window's top-left
+        corner and dump_tree's rectangle_mode is "relative".
+        """
+        try:
+            win_rect = self._window_rect(window_title_re)
+            if not win_rect:
+                return {"ok": False, "error": "No window connected"}
+            screen_x = win_rect["left"] + int(x)
+            screen_y = win_rect["top"] + int(y)
+            mouse.click(button="left", coords=(screen_x, screen_y))
+            time.sleep(0.1)
+            return {
+                "ok": True,
+                "method": "mouse.click",
+                "window_relative": {"x": x, "y": y},
+                "screen": {"x": screen_x, "y": screen_y},
+                "window_rect": win_rect,
+            }
+        except Exception as e:
+            logger.exception("click_window_at failed")
             return {"ok": False, "error": str(e)}
 
     def double_click(self, control_id: int = None, text: str = None,
