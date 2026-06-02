@@ -18,11 +18,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 
 from fastmcp import FastMCP
 
@@ -167,17 +167,22 @@ def screenshot(path: str = None) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-# ---------------------------------------------------------------------------
-# PowerShell Execution (sync + async job mode)
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
+# PowerShell Execution (Popen + Terminate-Process, cancellable)
+# Security: set EDR_WD_ENABLE_POWERSHELL=1 to enable (default: disabled)
+# -----------------------------------------------------------------------
 
-# In-memory job store (jobs persist for 10 minutes after completion)
+import os
+
+ENABLE_POWERSHELL = os.environ.get("EDR_WD_ENABLE_POWERSHELL", "0") == "1"
+
+# Job store: job_id -> {"proc": Popen, "command": str, "started_at": float}
 _jobs: dict = {}
 _jobs_lock = threading.Lock()
-_executor = ThreadPoolExecutor(max_workers=4)
 
 
-def _run_ps(command: str, timeout: int, cwd: str) -> dict:
+def _run_ps_sync(command: str, timeout: int, cwd: str) -> dict:
+    """Synchronous run via subprocess.run (for run_powershell)."""
     started = time.time()
     try:
         proc = subprocess.run(
@@ -200,77 +205,152 @@ def _run_ps(command: str, timeout: int, cwd: str) -> dict:
         }
     except subprocess.TimeoutExpired as e:
         return {
-            "ok": False,
-            "error": "timeout",
+            "ok": False, "error": "timeout",
             "stdout": (e.stdout or "")[-20000:],
             "stderr": (e.stderr or "")[-20000:],
             "returncode": None,
             "duration_ms": int((time.time() - started) * 1000),
         }
     except Exception as e:
-        return {"ok": False, "error": str(e), "returncode": None, "duration_ms": int((time.time() - started) * 1000)}
+        return {"ok": False, "error": str(e), "returncode": None,
+                "duration_ms": int((time.time() - started) * 1000)}
+
+
+def _run_ps_async(command: str, timeout: int, cwd: str, job_id: str) -> None:
+    """Background run — stores result into _jobs when done. Called by Popen."""
+    started = time.time()
+    proc = subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-NonInteractive",
+         "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,  # bytes for communicate()
+    )
+    # Update stored proc reference so cancel can reach it
+    with _jobs_lock:
+        if job_id in _jobs:
+            _jobs[job_id]["proc"] = proc
+    try:
+        stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
+        duration_ms = int((time.time() - started) * 1000)
+        result = {
+            "ok": proc.returncode == 0,
+            "stdout": stdout_bytes.decode("utf-8", errors="replace")[-20000:],
+            "stderr": stderr_bytes.decode("utf-8", errors="replace")[-20000:],
+            "returncode": proc.returncode,
+            "duration_ms": duration_ms,
+        }
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        duration_ms = int((time.time() - started) * 1000)
+        result = {
+            "ok": False, "error": "timeout", "returncode": None,
+            "duration_ms": duration_ms,
+        }
+    except Exception as e:
+        result = {"ok": False, "error": str(e), "returncode": None,
+                  "duration_ms": int((time.time() - started) * 1000)}
+    with _jobs_lock:
+        if job_id in _jobs:
+            _jobs[job_id]["result"] = result
+            _jobs[job_id]["completed_at"] = time.time()
+
+
+def _check_ps_enabled() -> bool:
+    if not ENABLE_POWERSHELL:
+        logger.warning("PowerShell tools disabled (EDR_WD_ENABLE_POWERSHELL != 1)")
+    return ENABLE_POWERSHELL
+
+
+def _terminate_job(proc) -> None:
+    """Terminate a running PowerShell process tree."""
+    try:
+        # Windows: use taskkill to kill process tree
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
 
 
 @mcp.tool(
     name="run_powershell",
     description=(
         "Run a PowerShell command synchronously and return stdout/stderr/returncode. "
-        "Use for short commands (output < 20 KB, timeout < 30 s). "
-        "Long-running commands should use start_powershell job mode instead."
+        "Short commands only (output < 20 KB, timeout < 30 s). "
+        "Requires EDR_WD_ENABLE_POWERSHELL=1 environment variable on the server."
     ),
 )
 def run_powershell(command: str, timeout: int = 30, cwd: str = None) -> str:
-    result = _run_ps(command, timeout, cwd)
+    if not _check_ps_enabled():
+        return json.dumps({"ok": False, "error": "PowerShell disabled: set EDR_WD_ENABLE_POWERSHELL=1 to enable"})
+    result = _run_ps_sync(command, timeout, cwd)
     return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool(
     name="start_powershell",
-    description="Start a PowerShell command as an async job. Returns job_id for polling with get_job.",
+    description=(
+        "Start a PowerShell command as a background job. "
+        "Poll with get_job(job_id=...). Cancel with cancel_job(job_id=...). "
+        "Requires EDR_WD_ENABLE_POWERSHELL=1 environment variable on the server."
+    ),
 )
-def start_powershell(command: str, cwd: str = None) -> str:
+def start_powershell(command: str, timeout: int = 300, cwd: str = None) -> str:
+    if not _check_ps_enabled():
+        return json.dumps({"ok": False, "error": "PowerShell disabled: set EDR_WD_ENABLE_POWERSHELL=1 to enable"})
     job_id = uuid.uuid4().hex[:12]
-    future = _executor.submit(_run_ps, command, 300, cwd)
+    proc = subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-NonInteractive",
+         "-ExecutionPolicy", "Bypass", "-Command", command],
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+    )
     with _jobs_lock:
-        _jobs[job_id] = {"future": future, "command": command, "started_at": time.time()}
+        _jobs[job_id] = {"proc": proc, "command": command,
+                          "started_at": time.time(), "timeout": timeout}
+    # Fire-and-forget background runner
+    t = threading.Thread(target=_run_ps_async,
+                        args=(command, timeout, cwd, job_id), daemon=True)
+    t.start()
     return json.dumps({"ok": True, "job_id": job_id}, ensure_ascii=False)
 
 
 @mcp.tool(
     name="get_job",
-    description="Poll a running PowerShell job status. Returns stdout/stderr/returncode when done.",
+    description="Poll a PowerShell job status. Returns result when done.",
 )
 def get_job(job_id: str) -> str:
     with _jobs_lock:
         if job_id not in _jobs:
             return json.dumps({"ok": False, "error": "job_id not found"})
         job = _jobs[job_id]
-        future = job["future"]
-
-    if future.done():
-        try:
-            result = future.result()
-        except Exception as e:
-            result = {"ok": False, "error": str(e)}
-        with _jobs_lock:
-            _jobs[job_id]["result"] = result
-            _jobs[job_id]["completed_at"] = time.time()
-        return json.dumps({"ok": True, "status": "done", **result}, ensure_ascii=False)
-    else:
-        return json.dumps({"ok": True, "status": "running"}, ensure_ascii=False)
+        proc = job["proc"]
+    if proc.poll() is None:
+        return json.dumps({"ok": True, "status": "running"})
+    result = job.get("result", {"ok": False, "error": "no result"})
+    return json.dumps({"ok": True, "status": "done", **result}, ensure_ascii=False)
 
 
 @mcp.tool(
     name="cancel_job",
-    description="Cancel a running PowerShell job by job_id.",
+    description="Cancel a running PowerShell job by terminating its process tree.",
 )
 def cancel_job(job_id: str) -> str:
     with _jobs_lock:
         if job_id not in _jobs:
             return json.dumps({"ok": False, "error": "job_id not found"})
         job = _jobs[job_id]
-        if not job["future"].done():
-            job["future"].cancel()
+        proc = job["proc"]
+        _terminate_job(proc)
         del _jobs[job_id]
     return json.dumps({"ok": True}, ensure_ascii=False)
 

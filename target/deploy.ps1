@@ -120,8 +120,10 @@ Write-Host ""
 Write-Host "[5/5] Starting MCP Server..." -ForegroundColor Cyan
 
 if ($AutoStart) {
+    $env:EDR_WD_ENABLE_POWERSHELL = "1"
     $proc = Start-Process -FilePath python `
         -ArgumentList "-m edr_wd.server --http --host 0.0.0.0 --port $Port" `
+        -EnvironmentVariables @{ EDR_WD_ENABLE_POWERSHELL = "1" } `
         -WindowStyle Hidden `
         -PassThru
     Start-Sleep -Seconds 2
@@ -131,7 +133,10 @@ if ($AutoStart) {
     }
     Write-Host "  [OK] Server started in background (PID: $($proc.Id))" -ForegroundColor Green
     Write-Host "  Stop: Stop-Process -Id $($proc.Id)" -ForegroundColor Gray
+    Write-Host "  Note: EDR_WD_ENABLE_POWERSHELL=1 (PowerShell tools enabled)" -ForegroundColor Gray
 } else {
+    $env:EDR_WD_ENABLE_POWERSHELL = "1"
+    Write-Host "  EDR_WD_ENABLE_POWERSHELL=1 (PowerShell tools enabled)" -ForegroundColor Gray
     Write-Host "  Press Ctrl+C to stop" -ForegroundColor Yellow
     Write-Host ""
     python -m edr_wd.server --http --host 0.0.0.0 --port $Port
