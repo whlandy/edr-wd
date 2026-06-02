@@ -127,7 +127,6 @@ if ($AutoStart) {
     $env:EDR_WD_ENABLE_POWERSHELL = "1"
     $proc = Start-Process -FilePath python `
         -ArgumentList "-m edr_wd.server --http --host $BindHost --port $Port" `
-        -EnvironmentVariables @{ EDR_WD_ENABLE_POWERSHELL = "1" } `
         -WindowStyle Hidden `
         -PassThru
     Start-Sleep -Seconds 2
