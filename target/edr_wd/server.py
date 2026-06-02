@@ -363,7 +363,9 @@ def get_job(job_id: str) -> str:
         proc = job["proc"]
     if proc.poll() is None:
         return json.dumps({"ok": True, "status": "running"})
-    result = job.get("result", {"ok": False, "error": "no result"})
+    if "result" not in job:
+        return json.dumps({"ok": True, "status": "collecting"})
+    result = job["result"]
     return json.dumps({"ok": True, "status": "done", **result}, ensure_ascii=False)
 
 

@@ -99,7 +99,7 @@ Restart your MCP client if it does not hot-reload server configs.
 git clone https://github.com/whlandy/edr-wd.git
 cd edr-wd
 
-# 完整部署（SSH + 防火墙 + 依赖 + 启动服务）
+# 完整部署（SSH + 依赖 + 启动服务）
 .\deploy.ps1 -Host 127.0.0.1 -Port 8765 -AutoStart
 ```
 
@@ -107,6 +107,15 @@ cd edr-wd
 ```powershell
 $env:EDR_WD_ENABLE_POWERSHELL = "1"
 python -m edr_wd.server --http --host 127.0.0.1 --port 8765
+```
+
+**重要：GUI 自动化必须在 Windows RDP/本地交互式桌面会话中启动 server。**
+不要用 `Start-Job`、Windows service、纯 SSH 后台会话启动 pywinauto server；这些会话通常没有 GUI desktop context，`dump_tree` 会返回空树或找不到窗口。
+
+如需开放直连 MCP 端口，而不是 SSH tunnel，再显式运行：
+```powershell
+.\target\setup-fw.ps1 -ExposeMcp
+python -m edr_wd.server --http --host 0.0.0.0 --port 8765
 ```
 
 ### Step 2: Mac/Linux 配置 SSH tunnel
@@ -199,7 +208,9 @@ result = do_rpc("tools/call", {
 |------|------|---------|
 | `connect` | 连接 Windows 应用 | `title_re`、`process_name`、`pid` |
 | `dump_tree` | 导出控件树 | `window_title_re`（可选）、`max_depth`（默认15） |
-| `click` | 点击控件 | `control_id`（首选）、`text`（文字）、`class_name` |
+| `click` | 点击控件 | `automation_id`、`control_id`、`text`、`class_name` |
+| `click_target` | 点击控件矩形中心 | `automation_id`、`text`、`class_name`、`x_offset`、`y_offset` |
+| `click_at` | 点击绝对屏幕坐标 | `x`、`y` |
 | `type_text` | 向输入框写入文本 | `control_id`、`string` |
 | `select` | 下拉框选择 | `control_id`、`item`（文字）或 `index`（序号） |
 | `get_text` | 读取控件文本 | `control_id`、`text`、`class_name` |
@@ -244,8 +255,7 @@ edr-wd/
 │   └── tests/
 └── agent/                    ← Mac/Linux 控制端脚本
     ├── tunnel.sh              ← SSH tunnel 管理（参数化，唯一必需）
-    ├── register-openclaw.sh   ← 可选：OpenClaw MCP 注册
-    └── register-hermes.sh     ← 可选：Hermes MCP 注册
+    └── setup-mac.sh           ← SSH config + tunnel setup
 ```
 
 ## 已知限制
