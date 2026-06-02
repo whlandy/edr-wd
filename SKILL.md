@@ -8,7 +8,7 @@ description: |
   (1) 需要自动化 Windows 桌面应用（HiSecEndpoint 等）
   (2) 需要读取窗口控件树并选择控件操作
   (3) 通过 MCP over SSH tunnel 远程控制 Windows GUI
-  (4) OpenClaw / OpenCode / Hermes / 任意 MCP Client 跨平台 GUI 自动化
+  (4) 任意 MCP Client（OpenClaw / Hermes / Codex / Claude Desktop / 自己写的）跨平台 GUI 自动化
 
   适用平台：
   - Windows (MCP Server 部署端)
@@ -17,35 +17,81 @@ description: |
 
 # EDR-WD — Windows EDR GUI 自动化
 
-通过 pywinauto + fastmcp 实现控件级 Windows GUI 自动化，作为通用 MCP Server 供任意 MCP Client 调用。
+通用 MCP Server，任何支持 MCP streamable HTTP 的 agent 都能连接。
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Agent / OpenClaw / Hermes / Codex / 任意 MCP Client        │
-└──────────────────┬──────────────────────────────────────────┘
-                   │  MCP over SSH tunnel (LocalForward 18765→Windows:8765)
-                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Windows EDR MCP Server (fastmcp + pywinauto, 127.0.0.1:8765)│
-│  └── run_powershell / start_powershell / get_job / cancel_job│
-│  └── connect / dump_tree / click / type_text / screenshot     │
-└──────────────────┬────────────────────────────────────────────┘
-                   │  pywinauto UIA / Win32 API
-                   ▼
-        HiSecEndpoint GUI 窗口 (华为智能终端安全系统)
+┌──────────────────────────────────────────────────────────┐
+│  Any MCP Client / Agent                                  │
+│  (OpenClaw / Hermes / Codex / Claude Desktop / 其他)    │
+└─────────────────────┬────────────────────────────────────┘
+                      │  MCP streamable-http
+                      ▼
+            http://127.0.0.1:18765/mcp
+                      │
+                      │  SSH LocalForward
+                      │  (Mac :18765 → Windows :8765)
+                      ▼
+┌──────────────────────────────────────────────────────────┐
+│  Windows EDR MCP Server (fastmcp + pywinauto)            │
+│  127.0.0.1:8765                                          │
+│                                                          │
+│  GUI: connect / dump_tree / click / type_text /          │
+│       select / get_text / screenshot                     │
+│  PS:  run_powershell / start_powershell /                │
+│       get_job / cancel_job                              │
+└─────────────────────┬────────────────────────────────────┘
+                      │  pywinauto UIA
+                      ▼
+        HiSecEndpoint GUI (华为智能终端安全系统)
 ```
 
-**edr-wd 不属于任何特定 Agent**。Hermes、OpenClaw、Codex 只是不同的 MCP Client。
+**edr-wd 不属于任何特定 Agent**。所有 MCP Client 都是等价的连接方式。
+
+## Client Setup
+
+MCP endpoint:
+
+```
+http://127.0.0.1:18765/mcp
+Transport: streamable-http
+```
+
+配置你的 MCP client 指向这个 endpoint。以下是任选示例：
+
+**Generic MCP client:**
+```yaml
+url: http://127.0.0.1:18765/mcp
+transport: streamable-http
+```
+
+**OpenClaw:**
+```bash
+openclaw mcp set edr-wd '{"url":"http://127.0.0.1:18765/mcp","transport":"streamable-http"}'
+```
+
+**Claude Desktop (macOS):**
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "edr-wd": {
+      "url": "http://127.0.0.1:18765/mcp",
+      "transport": "streamable-http"
+    }
+  }
+}
+```
+
+**自己写的 MCP client:**
+```python
+# standard MCP HTTP client connecting to the same endpoint
+```
+
+Restart your MCP client if it does not hot-reload server configs.
 
 ## 部署步骤
-
-### Step 0: 环境要求
-
-- **Python 3.10+**（fastmcp 要求）
-- **Windows 开启 SSH Server**（远程控制必需）
-- **管理员权限 PowerShell**
 
 ### Step 1: Windows 部署
 
@@ -53,86 +99,38 @@ description: |
 git clone https://github.com/whlandy/edr-wd.git
 cd edr-wd
 
-# 完整部署（SSH Server + 防火墙 + 依赖 + 启动服务）
-.\deploy.ps1 -Port 8765 -AutoStart
+# 完整部署（SSH + 防火墙 + 依赖 + 启动服务）
+.\deploy.ps1 -Host 127.0.0.1 -Port 8765 -AutoStart
 ```
 
-### Step 2: Mac/Linux 配置 tunnel
+**单独启动 server：**
+```powershell
+$env:EDR_WD_ENABLE_POWERSHELL = "1"
+python -m edr_wd.server --http --host 127.0.0.1 --port 8765
+```
+
+### Step 2: Mac/Linux 配置 SSH tunnel
 
 ```bash
 git clone https://github.com/whlandy/edr-wd.git
 cd edr-wd
-bash agent/setup-mac.sh 170.170.11.26 admin
+bash agent/tunnel.sh start
 ```
 
-**tunnel 常用命令**：
-
+**tunnel 命令：**
 ```bash
-bash agent/tunnel.sh start   # 启动隧道（参数可环境变量覆盖）
-bash agent/tunnel.sh status  # 查看状态
-bash agent/tunnel.sh stop    # 停止隧道
-bash agent/tunnel.sh test     # 测试连接
+bash agent/tunnel.sh start   # 启动
+bash agent/tunnel.sh status   # 查看状态
+bash agent/tunnel.sh stop     # 停止
 ```
 
-**参数化**（环境变量或命令行）：
-
+**参数化（环境变量）：**
 ```bash
 EDR_WD_HOST=170.170.11.26 \
 EDR_WD_USER=admin \
 EDR_WD_LOCAL_PORT=18765 \
 EDR_WD_REMOTE_PORT=8765 \
 bash agent/tunnel.sh start
-```
-
-### Step 3: 配置 MCP Client
-
-#### OpenClaw（推荐主路径）
-
-```bash
-openclaw mcp set edr-wd '{
-  "url": "http://127.0.0.1:18765/mcp",
-  "transport": "streamable-http",
-  "connectionTimeoutMs": 10000
-}'
-openclaw mcp show edr-wd --json
-```
-
-#### Hermes（可选，需要显式 opt-in）
-
-```bash
-# 启动 setup 时指定 hermes client
-bash agent/setup-mac.sh 170.170.11.26 admin --client hermes
-```
-
-或在 `~/.hermes/config.yaml` 中添加：
-
-```yaml
-mcp_servers:
-  edr-wd:
-    url: "http://127.0.0.1:18765/mcp"
-```
-
-重启 Hermes Agent。
-
-#### 其他 MCP Client
-
-通用 HTTP MCP Client 均可连接：
-
-```
-URL: http://127.0.0.1:18765/mcp
-Transport: streamable-http
-```
-
-### Step 4: 验证服务
-
-```powershell
-# Windows 上检查端口
-netstat -an | findstr 8765
-```
-
-```bash
-# Mac 上测试
-bash agent/tunnel.sh test
 ```
 
 ## MCP 协议细节（FastMCP 3.3.1）
@@ -187,7 +185,7 @@ do_get()          # 建立 session
 do_rpc("initialize", {
     "protocolVersion": "2025-11-25",
     "capabilities": {},
-    "clientInfo": {"name": "openclaw", "version": "1.0"}
+    "clientInfo": {"name": "test", "version": "1.0"}
 })
 result = do_rpc("tools/call", {
     "name": "run_powershell",
@@ -245,8 +243,9 @@ edr-wd/
 │   │   └── pywinauto_client.py
 │   └── tests/
 └── agent/                    ← Mac/Linux 控制端脚本
-    ├── tunnel.sh              ← SSH tunnel 管理（参数化）
-    └── setup-mac.sh           ← 配置脚本（可选 --client openclaw/hermes/none）
+    ├── tunnel.sh              ← SSH tunnel 管理（参数化，唯一必需）
+    ├── register-openclaw.sh   ← 可选：OpenClaw MCP 注册
+    └── register-hermes.sh     ← 可选：Hermes MCP 注册
 ```
 
 ## 已知限制
