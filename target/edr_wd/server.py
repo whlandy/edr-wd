@@ -18,6 +18,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import subprocess
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from fastmcp import FastMCP
 
@@ -160,6 +165,114 @@ def get_text(
 def screenshot(path: str = None) -> str:
     result = _gui.screenshot(path)
     return json.dumps(result, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# PowerShell Execution (sync + async job mode)
+# ---------------------------------------------------------------------------
+
+# In-memory job store (jobs persist for 10 minutes after completion)
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
+_executor = ThreadPoolExecutor(max_workers=4)
+
+
+def _run_ps(command: str, timeout: int, cwd: str) -> dict:
+    started = time.time()
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-Command", command],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+        )
+        duration_ms = int((time.time() - started) * 1000)
+        return {
+            "ok": proc.returncode == 0,
+            "stdout": proc.stdout[-20000:] if proc.stdout else "",
+            "stderr": proc.stderr[-20000:] if proc.stderr else "",
+            "returncode": proc.returncode,
+            "duration_ms": duration_ms,
+        }
+    except subprocess.TimeoutExpired as e:
+        return {
+            "ok": False,
+            "error": "timeout",
+            "stdout": (e.stdout or "")[-20000:],
+            "stderr": (e.stderr or "")[-20000:],
+            "returncode": None,
+            "duration_ms": int((time.time() - started) * 1000),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "returncode": None, "duration_ms": int((time.time() - started) * 1000)}
+
+
+@mcp.tool(
+    name="run_powershell",
+    description=(
+        "Run a PowerShell command synchronously and return stdout/stderr/returncode. "
+        "Use for short commands (output < 20 KB, timeout < 30 s). "
+        "Long-running commands should use start_powershell job mode instead."
+    ),
+)
+def run_powershell(command: str, timeout: int = 30, cwd: str = None) -> str:
+    result = _run_ps(command, timeout, cwd)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="start_powershell",
+    description="Start a PowerShell command as an async job. Returns job_id for polling with get_job.",
+)
+def start_powershell(command: str, cwd: str = None) -> str:
+    job_id = uuid.uuid4().hex[:12]
+    future = _executor.submit(_run_ps, command, 300, cwd)
+    with _jobs_lock:
+        _jobs[job_id] = {"future": future, "command": command, "started_at": time.time()}
+    return json.dumps({"ok": True, "job_id": job_id}, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="get_job",
+    description="Poll a running PowerShell job status. Returns stdout/stderr/returncode when done.",
+)
+def get_job(job_id: str) -> str:
+    with _jobs_lock:
+        if job_id not in _jobs:
+            return json.dumps({"ok": False, "error": "job_id not found"})
+        job = _jobs[job_id]
+        future = job["future"]
+
+    if future.done():
+        try:
+            result = future.result()
+        except Exception as e:
+            result = {"ok": False, "error": str(e)}
+        with _jobs_lock:
+            _jobs[job_id]["result"] = result
+            _jobs[job_id]["completed_at"] = time.time()
+        return json.dumps({"ok": True, "status": "done", **result}, ensure_ascii=False)
+    else:
+        return json.dumps({"ok": True, "status": "running"}, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="cancel_job",
+    description="Cancel a running PowerShell job by job_id.",
+)
+def cancel_job(job_id: str) -> str:
+    with _jobs_lock:
+        if job_id not in _jobs:
+            return json.dumps({"ok": False, "error": "job_id not found"})
+        job = _jobs[job_id]
+        if not job["future"].done():
+            job["future"].cancel()
+        del _jobs[job_id]
+    return json.dumps({"ok": True}, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
