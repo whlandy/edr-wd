@@ -14,6 +14,7 @@ import time
 from typing import Optional
 
 from pywinauto import Application, timings
+from pywinauto import mouse
 
 logger = logging.getLogger("edr_wd.pywinauto_client")
 
@@ -182,10 +183,11 @@ class WindowsGUI:
     # ------------------------------------------------------------------
 
     def click(self, control_id: int = None, text: str = None,
-              class_name: str = None, parent_text: str = None) -> dict:
-        """点击控件（按 control_id、文本或 class_name）"""
+              class_name: str = None, parent_text: str = None,
+              automation_id: str = None) -> dict:
+        """点击控件（按 control_id、automation_id、文本或 class_name）"""
         try:
-            ctrl = self._find_control(control_id, text, class_name, parent_text)
+            ctrl = self._find_control(control_id, text, class_name, parent_text, automation_id)
             if not ctrl:
                 return {"ok": False, "error": "Control not found"}
 
@@ -194,6 +196,48 @@ class WindowsGUI:
             return {"ok": True, "method": "click_input", "control_id": control_id}
         except Exception as e:
             logger.exception("click failed")
+            return {"ok": False, "error": str(e)}
+
+    def click_target(self, control_id: int = None, text: str = None,
+                     class_name: str = None, parent_text: str = None,
+                     automation_id: str = None, x_offset: int = 0,
+                     y_offset: int = 0) -> dict:
+        """
+        Click the center of a matched control's screen rectangle.
+
+        This is useful for label-like Qt/UIA controls such as QLabel/Static
+        where invoke/click-by-title can report success without triggering the
+        UI's mouse handler.
+        """
+        try:
+            ctrl = self._find_control(control_id, text, class_name, parent_text, automation_id)
+            if not ctrl:
+                return {"ok": False, "error": "Control not found"}
+
+            rect = ctrl.rectangle()
+            x = int(rect.left + rect.width() / 2 + x_offset)
+            y = int(rect.top + rect.height() / 2 + y_offset)
+            mouse.click(button="left", coords=(x, y))
+            time.sleep(0.1)
+            return {
+                "ok": True,
+                "method": "mouse.click",
+                "x": x,
+                "y": y,
+                "rectangle": {"x": rect.left, "y": rect.top, "w": rect.width(), "h": rect.height()},
+            }
+        except Exception as e:
+            logger.exception("click_target failed")
+            return {"ok": False, "error": str(e)}
+
+    def click_at(self, x: int, y: int) -> dict:
+        """Click absolute screen coordinates."""
+        try:
+            mouse.click(button="left", coords=(int(x), int(y)))
+            time.sleep(0.1)
+            return {"ok": True, "method": "mouse.click", "x": int(x), "y": int(y)}
+        except Exception as e:
+            logger.exception("click_at failed")
             return {"ok": False, "error": str(e)}
 
     def double_click(self, control_id: int = None, text: str = None,
@@ -288,8 +332,9 @@ class WindowsGUI:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _find_control(self, control_id=None, text=None, class_name=None, parent_text=None):
-        """通过 control_id / text / class_name 查找控件"""
+    def _find_control(self, control_id=None, text=None, class_name=None, parent_text=None,
+                      automation_id=None):
+        """通过 control_id / automation_id / text / class_name 查找控件"""
         try:
             if self.app is None:
                 return None
@@ -304,8 +349,34 @@ class WindowsGUI:
             if control_id is not None:
                 return parent.child_window(control_id=control_id)
 
+            if automation_id:
+                try:
+                    return parent.child_window(auto_id=automation_id)
+                except Exception:
+                    pass
+
+                for ctrl in parent.descendants():
+                    try:
+                        if ctrl.automation_id() == automation_id:
+                            return ctrl
+                    except Exception:
+                        pass
+
             if text:
-                return parent.child_window(title_re=text, class_name=class_name)
+                try:
+                    return parent.child_window(title_re=text, class_name=class_name)
+                except Exception:
+                    pass
+
+                for ctrl in parent.descendants():
+                    try:
+                        if text in ctrl.window_text():
+                            if class_name and ctrl.friendly_class_name() != class_name:
+                                continue
+                            return ctrl
+                    except Exception:
+                        pass
+                return None
 
             if class_name:
                 return parent.child_window(class_name=class_name)

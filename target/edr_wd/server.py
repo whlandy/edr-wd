@@ -99,8 +99,47 @@ def click(
     text: str = None,
     class_name: str = None,
     parent_text: str = None,
+    automation_id: str = None,
 ) -> str:
-    result = _gui.click(control_id, text, class_name, parent_text)
+    result = _gui.click(control_id, text, class_name, parent_text, automation_id)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="click_target",
+    description=(
+        "Click the center of a matched control's screen rectangle by automation_id, text, "
+        "control_id, or class_name. Use this for label-like Static/QLabel controls where "
+        "normal click reports success but the UI does not react."
+    ),
+)
+def click_target(
+    control_id: int = None,
+    text: str = None,
+    class_name: str = None,
+    parent_text: str = None,
+    automation_id: str = None,
+    x_offset: int = 0,
+    y_offset: int = 0,
+) -> str:
+    result = _gui.click_target(
+        control_id=control_id,
+        text=text,
+        class_name=class_name,
+        parent_text=parent_text,
+        automation_id=automation_id,
+        x_offset=x_offset,
+        y_offset=y_offset,
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="click_at",
+    description="Click absolute screen coordinates, usually derived from dump_tree rectangle center.",
+)
+def click_at(x: int, y: int) -> str:
+    result = _gui.click_at(x, y)
     return json.dumps(result, ensure_ascii=False)
 
 
