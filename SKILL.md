@@ -99,8 +99,23 @@ Restart your MCP client if it does not hot-reload server configs.
 git clone https://github.com/whlandy/edr-wd.git
 cd edr-wd
 
-# 完整部署（SSH + 依赖 + 启动服务）
-.\deploy.ps1 -Host 127.0.0.1 -Port 8765 -AutoStart
+# 一键 bootstrap + 启动服务
+.\deploy.ps1 -Action start -BindHost 127.0.0.1 -Port 8765
+```
+
+### 推荐工作流
+
+1. 在 Windows 目标机的 **RDP / 本地交互式桌面会话** 中运行 `deploy.ps1`。
+2. 用 `deploy.ps1 -Action start` 启动 MCP server，它会先做 bootstrap，再把 server 以后台进程拉起并记录 PID。
+3. 用 `deploy.ps1 -Action status` 查看当前状态，用 `deploy.ps1 -Action stop` 关闭服务。
+4. 如果后续连接 EDR 时窗口没有激活，优先用 `connect(..., auto_activate=True)`。
+5. 如果只是单独把 EDR 窗口拉起来，再显式调用 `activate_edr()`。
+
+这就是正常 workflow:
+
+```powershell
+cd target
+.\deploy.ps1 -Action start -BindHost 127.0.0.1 -Port 8765
 ```
 
 **单独启动 server：**
@@ -111,6 +126,58 @@ python -m edr_wd.server --http --host 127.0.0.1 --port 8765
 
 **重要：GUI 自动化必须在 Windows RDP/本地交互式桌面会话中启动 server。**
 不要用 `Start-Job`、Windows service、纯 SSH 后台会话启动 pywinauto server；这些会话通常没有 GUI desktop context，`dump_tree` 会返回空树或找不到窗口。
+
+如果你现在已经拿到了 Windows 的交互式桌面，会更推荐直接跑：
+
+```powershell
+cd target
+.\deploy.ps1 -Action start -BindHost 127.0.0.1 -Port 8765
+```
+
+然后在 MCP 客户端侧使用 `connect(title_re=".*HiSec.*", auto_activate=True)` 作为默认入口。这样当 EDR 没有激活时，server 会自动尝试 `activate_edr()` 再重试一次。
+
+### 关闭和检查
+
+```powershell
+.\deploy.ps1 -Action status
+.\deploy.ps1 -Action stop
+```
+
+### 文件传输
+
+Windows 侧启用 SSH Server 后，agent 可以直接 `scp` 文件到固定目录，例如：
+
+```bash
+scp ./payload.zip admin@WINDOWS_HOST:C:\path\to\edr-wd\target\incoming\
+```
+
+推荐用统一入口脚本来做这些操作：
+
+```bash
+bash agent/edr-wd.sh up
+bash agent/edr-wd.sh status
+bash agent/edr-wd.sh push ./payload.zip
+bash agent/edr-wd.sh smoke
+bash agent/edr-wd.sh smoke --gui
+bash agent/edr-wd.sh down
+```
+
+`agent/edr-wd.sh` 会负责：
+- 启动 Windows 侧 `deploy.ps1`
+- 拉起或关闭本地 SSH tunnel
+- 复制文件到 target
+- 跑 MCP smoke test
+
+### Smoke test
+
+Windows 目标机上的 live server 可以用这个脚本做回归：
+
+```powershell
+python target\tests\smoke_mcp_client.py --base-url http://127.0.0.1:8765/mcp
+python target\tests\smoke_mcp_client.py --base-url http://127.0.0.1:8765/mcp --gui
+```
+
+`--gui` 模式会额外验证 `connect(..., auto_activate=True)` 和 `dump_tree`，更适合做最终回归。
 
 如需开放直连 MCP 端口，而不是 SSH tunnel，再显式运行：
 ```powershell
