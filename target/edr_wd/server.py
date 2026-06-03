@@ -93,7 +93,7 @@ def connect(
         "is_visible, is_enabled. Use control_id as the unique identifier for click/select operations."
     ),
 )
-def dump_tree(window_title_re: str = None, max_depth: int = 15) -> str:
+def dump_tree(window_title_re: str = None, max_depth: int = 8) -> str:
     result = _gui.dump_tree(window_title_re, max_depth=max_depth)
     return json.dumps(result, ensure_ascii=False)
 
@@ -101,9 +101,11 @@ def dump_tree(window_title_re: str = None, max_depth: int = 15) -> str:
 @mcp.tool(
     name="click",
     description=(
-        "Click a control by control_id, text, or class_name. "
+        "Click a control by control_id, text, class_name, automation_id, or derived filters. "
         "control_id is the preferred identifier (unique within the window). "
-        "Returns success status."
+        "New: auto_id_contains, auto_id_suffix, parent_of, control_type for flexible lookup. "
+        "parent_fallback=True (default): if the found control is a Static/Text/Label/Pane leaf, "
+        "click its parent container automatically — use this for Qt 'card button' patterns."
     ),
 )
 def click(
@@ -112,17 +114,29 @@ def click(
     class_name: str = None,
     parent_text: str = None,
     automation_id: str = None,
+    auto_id_contains: str = None,
+    auto_id_suffix: str = None,
+    parent_of: str = None,
+    control_type: str = None,
+    parent_fallback: bool = True,
 ) -> str:
-    result = _gui.click(control_id, text, class_name, parent_text, automation_id)
+    result = _gui.click(
+        control_id, text, class_name, parent_text, automation_id,
+        auto_id_contains, auto_id_suffix, parent_of, control_type,
+        parent_fallback,
+    )
     return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool(
     name="click_target",
     description=(
-        "Click the center of a matched control's screen rectangle by automation_id, text, "
-        "control_id, or class_name. Use this for label-like Static/QLabel controls where "
-        "normal click reports success but the UI does not react."
+        "Click the centre of a matched control's screen rectangle. "
+        "Unlike click() which uses click_input(), this uses mouse.click(coords). "
+        "Prefer click() for Qt UIA controls; use this only when click_input() does not "
+        "trigger the UI reaction. "
+        "Supports auto_id_contains, auto_id_suffix, parent_of, control_type filters "
+        "and parent_fallback=True (default, redirects Static/Text/Label/Pane to parent)."
     ),
 )
 def click_target(
@@ -131,8 +145,13 @@ def click_target(
     class_name: str = None,
     parent_text: str = None,
     automation_id: str = None,
+    auto_id_contains: str = None,
+    auto_id_suffix: str = None,
+    parent_of: str = None,
+    control_type: str = None,
     x_offset: int = 0,
     y_offset: int = 0,
+    parent_fallback: bool = True,
 ) -> str:
     result = _gui.click_target(
         control_id=control_id,
@@ -140,8 +159,13 @@ def click_target(
         class_name=class_name,
         parent_text=parent_text,
         automation_id=automation_id,
+        auto_id_contains=auto_id_contains,
+        auto_id_suffix=auto_id_suffix,
+        parent_of=parent_of,
+        control_type=control_type,
         x_offset=x_offset,
         y_offset=y_offset,
+        parent_fallback=parent_fallback,
     )
     return json.dumps(result, ensure_ascii=False)
 
@@ -244,10 +268,12 @@ def screenshot(path: str = None) -> str:
         "Requires EDR_WD_ENABLE_POWERSHELL=1 on the server."
     ),
 )
-def activate_edr(exe_path: str = None, wait: bool = True, timeout: float = 15.0) -> str:
+def activate_edr(exe_path: str = None, wait: bool = True, timeout: float = 15.0,
+                 edr_widget_auto_id: str = None) -> str:
     if not ENABLE_POWERSHELL:
         return json.dumps({"ok": False, "error": "PowerShell disabled: set EDR_WD_ENABLE_POWERSHELL=1 to enable"})
-    result = _gui.activate_edr(exe_path=exe_path, wait=wait, timeout=timeout)
+    result = _gui.activate_edr(exe_path=exe_path, wait=wait, timeout=timeout,
+                               edr_widget_auto_id=edr_widget_auto_id)
     return json.dumps(result, ensure_ascii=False)
 
 

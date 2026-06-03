@@ -257,40 +257,113 @@ class WindowsGUI:
     # ------------------------------------------------------------------
 
     def activate_edr(self, exe_path: str = None, wait: bool = True,
-                     timeout: float = 15.0) -> dict:
+                     timeout: float = 15.0,
+                     edr_widget_auto_id: str = None) -> dict:
         """
-        Activate EDR GUI (launch HisecEndpointAgent cmd ui).
+        Activate EDR GUI: connect HisecEndpointAgent main window, click edrWidget
+        to trigger EDRClient popup, then optionally wait for and connect EDRClient.
 
-        - wait=True: block until the EDRClient window appears (or timeout).
-        - wait=False: fire-and-forget (legacy behaviour).
-        - exe_path can be overridden via EDR_WD_EDR_EXE env var.
+        Flow:
+          1. If EDRClient already open → return immediately (already_open=True).
+          2. If HisecEndpointAgent not open → launch via exe_path + "cmd ui".
+          3. Connect HisecEndpointAgent main window.
+          4. Click edrWidget (parent of "前往安全防护中心" link).
+          5. Wait for EDRClient window to appear.
+          6. Connect EDRClient (if wait=True).
+
+        Args:
+            exe_path: path to HisecEndpointAgent.exe.
+            wait: if True, block until EDRClient appears and is connected.
+            timeout: seconds to wait for EDRClient window.
+            edr_widget_auto_id: full automation_id of the edrWidget GroupBox.
+                Defaults to the known EDR path.
         """
         exe = exe_path or os.environ.get("EDR_WD_EDR_EXE", DEFAULT_EDR_EXE)
 
-        # 1. Check if already open — prioritize process_name first, then title_re
-        existing_by_proc = self.is_window_open(process_name="EDRClient.exe")
-        if existing_by_proc.get("found"):
-            return {"ok": True, "already_open": True, "windows": existing_by_proc["windows"]}
+        # Default automation_id for the edrWidget GroupBox (card-button parent
+        # of the "前往安全防护中心" Static label). This path is stable for
+        # the current EDR version.
+        default_edr_widget_id = (
+            "SafraUIMainWindow.MainWidget.content_widget.featureWidget."
+            "EdrUIMainWindow.centralwidget.edrWidget"
+        )
+        edr_widget_auto_id = edr_widget_auto_id or default_edr_widget_id
 
-        existing_by_title = self.is_window_open(title_re=self._EDR_TITLE_RE)
-        if existing_by_title.get("found"):
-            return {"ok": True, "already_open": True, "windows": existing_by_title["windows"]}
+        # ── Step 1: EDRClient already open? ─────────────────────────────
+        edr_client = self.is_window_open(process_name="EDRClient.exe")
+        if edr_client.get("found"):
+            self.connect_by_process("EDRClient.exe", timeout=5)
+            return {
+                "ok": True,
+                "already_open": True,
+                "target": "EDRClient.exe",
+                "windows": edr_client["windows"],
+            }
 
-        # 2. Launch
-        try:
-            subprocess.Popen([exe, "cmd", "ui"])
-        except Exception as e:
-            logger.exception("activate_edr failed")
-            return {"ok": False, "error": str(e)}
+        # ── Step 2: HisecEndpointAgent already open? ────────────────────
+        hisec_win = self.is_window_open(process_name="HisecEndpointAgent.exe")
+        if not hisec_win.get("found"):
+            # Not open → launch it
+            try:
+                subprocess.Popen([exe, "cmd", "ui"])
+            except Exception as e:
+                logger.exception("activate_edr: failed to launch")
+                return {"ok": False, "error": f"Failed to launch: {e}"}
+
+            if not wait:
+                return {"ok": True, "already_open": False, "exe_path": exe}
+
+            # Wait for HisecEndpointAgent window to appear
+            hisec_win = self.wait_window(
+                process_name="HisecEndpointAgent.exe", timeout=timeout
+            )
+            if not hisec_win.get("found"):
+                return {
+                    "ok": False,
+                    "error": "HisecEndpointAgent.exe window did not appear",
+                    "exe_path": exe,
+                }
+
+        # ── Step 3: Connect HisecEndpointAgent ───────────────────────────
+        conn = self.connect_by_process("HisecEndpointAgent.exe", timeout=10)
+        if not conn.get("ok"):
+            return {"ok": False, "error": f"Cannot connect to HisecEndpointAgent: {conn.get('error')}"}
+
+        # ── Step 4: Click edrWidget GroupBox to trigger EDRClient ───────
+        click_result = self.click(automation_id=edr_widget_auto_id)
+        if not click_result.get("ok"):
+            logger.warning("activate_edr: click edrWidget failed: %s", click_result.get("error"))
+
+        # ── Step 5: Wait for EDRClient window ───────────────────────────
+        edr_client = self.wait_window(
+            process_name="EDRClient.exe", timeout=timeout, interval=0.5
+        )
+        if not edr_client.get("found"):
+            return {
+                "ok": False,
+                "error": "EDRClient.exe window did not appear after clicking edrWidget",
+                "hisec_connected": True,
+                "exe_path": exe,
+            }
 
         if not wait:
-            return {"ok": True, "already_open": False, "exe_path": exe}
+            return {
+                "ok": True,
+                "already_open": False,
+                "edr_client_found": True,
+                "exe_path": exe,
+            }
 
-        # 3. Wait for window
-        result = self.wait_window(title_re=self._EDR_TITLE_RE, timeout=timeout)
-        result["already_open"] = False
-        result["exe_path"] = exe
-        return result
+        # ── Step 6: Connect EDRClient ────────────────────────────────────
+        conn_edr = self.connect_by_process("EDRClient.exe", timeout=10)
+        return {
+            "ok": True,
+            "already_open": False,
+            "hisec_connected": True,
+            "edr_client_connected": conn_edr.get("ok", False),
+            "edr_client": edr_client,
+            "exe_path": exe,
+        }
 
     def _window_rect(self, window_title_re: str = None) -> dict:
         """获取窗口在屏幕上的绝对矩形坐标。"""
@@ -311,7 +384,7 @@ class WindowsGUI:
     # Dump tree
     # ------------------------------------------------------------------
 
-    def dump_tree(self, window_title_re: str = None, max_depth: int = 15) -> dict:
+    def dump_tree(self, window_title_re: str = None, max_depth: int = 8) -> dict:
         """
         导出控件树。
 
@@ -438,35 +511,78 @@ class WindowsGUI:
 
     def click(self, control_id: int = None, text: str = None,
               class_name: str = None, parent_text: str = None,
-              automation_id: str = None) -> dict:
-        """点击控件（按 control_id、automation_id、文本或 class_name）"""
+              automation_id: str = None,
+              auto_id_contains: str = None, auto_id_suffix: str = None,
+              parent_of: str = None, control_type: str = None,
+              parent_fallback: bool = True) -> dict:
+        """
+        Click a control (by control_id, automation_id, text, class_name, or derived filters).
+
+        If parent_fallback=True and the matched control is a non-interactive text/label
+        (Static/Text/Label/Pane), the click is automatically redirected to its parent
+        container — this is the correct behaviour for Qt "card button" patterns where
+        the visual text label is a child of the clickable GroupBox/QWidget.
+        """
         try:
-            ctrl = self._find_control(control_id, text, class_name, parent_text, automation_id)
+            ctrl = self._find_control(
+                control_id=control_id, text=text, class_name=class_name,
+                parent_text=parent_text, automation_id=automation_id,
+                auto_id_contains=auto_id_contains, auto_id_suffix=auto_id_suffix,
+                parent_of=parent_of, control_type=control_type,
+            )
             if not ctrl:
                 return {"ok": False, "error": "Control not found"}
 
+            # Auto-parent fallback: if the found control is a non-interactive leaf
+            # text node, click its parent container instead.
+            if parent_fallback and self._control_is_leaf_text(ctrl):
+                parent_ctrl = self._get_parent_of(ctrl)
+                if parent_ctrl is not None:
+                    logger.info("click: redirected from leaf %s to parent %s",
+                                ctrl.automation_id(), parent_ctrl.automation_id())
+                    ctrl = parent_ctrl
+
             ctrl.click_input()
             time.sleep(0.1)
-            return {"ok": True, "method": "click_input", "control_id": control_id}
+            return {"ok": True, "method": "click_input", "control_id": control_id,
+                    "automation_id": getattr(ctrl, "automation_id", lambda: None)()}
         except Exception as e:
             logger.exception("click failed")
             return {"ok": False, "error": str(e)}
 
     def click_target(self, control_id: int = None, text: str = None,
                      class_name: str = None, parent_text: str = None,
-                     automation_id: str = None, x_offset: int = 0,
-                     y_offset: int = 0) -> dict:
+                     automation_id: str = None,
+                     auto_id_contains: str = None, auto_id_suffix: str = None,
+                     parent_of: str = None, control_type: str = None,
+                     x_offset: int = 0, y_offset: int = 0,
+                     parent_fallback: bool = True) -> dict:
         """
-        Click the center of a matched control's screen rectangle.
+        Click the centre of a matched control's screen rectangle.
 
-        This is useful for label-like Qt/UIA controls such as QLabel/Static
-        where invoke/click-by-title can report success without triggering the
-        UI's mouse handler.
+        Unlike click() which uses click_input() (控件级点击), this uses
+        mouse.click(coords) (裸坐标点击). For non-interactive text/label controls
+        the click is redirected to the parent container when parent_fallback=True.
+
+        Prefer click() for Qt UIA controls; use this only when click_input() is
+        confirmed to not trigger the UI reaction.
         """
         try:
-            ctrl = self._find_control(control_id, text, class_name, parent_text, automation_id)
+            ctrl = self._find_control(
+                control_id=control_id, text=text, class_name=class_name,
+                parent_text=parent_text, automation_id=automation_id,
+                auto_id_contains=auto_id_contains, auto_id_suffix=auto_id_suffix,
+                parent_of=parent_of, control_type=control_type,
+            )
             if not ctrl:
                 return {"ok": False, "error": "Control not found"}
+
+            # Auto-parent fallback
+            if parent_fallback and self._control_is_leaf_text(ctrl):
+                parent_ctrl = self._get_parent_of(ctrl)
+                if parent_ctrl is not None:
+                    logger.info("click_target: redirected from leaf to parent")
+                    ctrl = parent_ctrl
 
             rect = ctrl.rectangle()
             x = int(rect.left + rect.width() / 2 + x_offset)
@@ -605,6 +721,7 @@ class WindowsGUI:
                 return {"ok": False, "error": "capture_as_image returned None"}
 
             if path:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
                 img.save(path)
                 return {"ok": True, "saved_to": path}
 
@@ -620,9 +737,40 @@ class WindowsGUI:
     # Helpers
     # ------------------------------------------------------------------
 
+    # Control types that are typically non-interactive text labels and
+    # should be auto-routed to their parent container when used as click targets.
+    _NON_INTERACTIVE_TYPES = {"Static", "Text", "Label", "Pane"}
+
+    def _control_is_leaf_text(self, ctrl) -> bool:
+        """Return True if ctrl is a non-interactive text/label control."""
+        try:
+            ctrl_type = str(ctrl.control_type()) if ctrl.control_type() else ""
+            cls = ctrl.friendly_class_name() or ""
+            return ctrl_type in self._NON_INTERACTIVE_TYPES or cls in self._NON_INTERACTIVE_TYPES
+        except Exception:
+            return False
+
+    def _get_parent_of(self, ctrl):
+        """Return the parent of a control, or None if unavailable."""
+        try:
+            return ctrl.parent()
+        except Exception:
+            return None
+
     def _find_control(self, control_id=None, text=None, class_name=None, parent_text=None,
-                      automation_id=None):
-        """通过 control_id / automation_id / text / class_name 查找控件"""
+                      automation_id=None, auto_id_contains=None, auto_id_suffix=None,
+                      parent_of=None, control_type=None):
+        """
+        Find a control by any combination of filters.
+
+        New filters (compared to plain child_window):
+          - auto_id_contains: automation_id must contain this substring
+          - auto_id_suffix:   automation_id must end with this suffix
+          - parent_of:        find a control whose text contains this string,
+                              then return its *parent* container (useful for
+                              "前往安全防护中心" Static label → edrWidget GroupBox)
+          - control_type:     UIA control type must equal this string
+        """
         try:
             if self.app is None:
                 return None
@@ -637,12 +785,12 @@ class WindowsGUI:
             if control_id is not None:
                 return parent.child_window(control_id=control_id)
 
+            # ── auto_id exact match (original behaviour) ─────────────────
             if automation_id:
                 try:
                     return parent.child_window(auto_id=automation_id)
                 except Exception:
                     pass
-
                 for ctrl in parent.descendants():
                     try:
                         if ctrl.automation_id() == automation_id:
@@ -650,16 +798,52 @@ class WindowsGUI:
                     except Exception:
                         pass
 
+            # ── auto_id_contains / auto_id_suffix ────────────────────────
+            if auto_id_contains is not None or auto_id_suffix is not None:
+                for ctrl in parent.descendants():
+                    try:
+                        aid = ctrl.automation_id() or ""
+                    except Exception:
+                        continue
+                    if auto_id_contains is not None and auto_id_contains not in aid:
+                        continue
+                    if auto_id_suffix is not None and not aid.endswith(auto_id_suffix):
+                        continue
+                    if control_type is not None:
+                        try:
+                            if str(ctrl.control_type()) != control_type:
+                                continue
+                        except Exception:
+                            continue
+                    return ctrl
+                return None
+
+            # ── parent_of: find leaf text control, return its parent ───────
+            if parent_of is not None:
+                for ctrl in parent.descendants():
+                    try:
+                        if parent_of in (ctrl.window_text() or ""):
+                            if control_type is not None and str(ctrl.control_type()) != control_type:
+                                continue
+                            parent_ctrl = self._get_parent_of(ctrl)
+                            if parent_ctrl is not None:
+                                return parent_ctrl
+                    except Exception:
+                        continue
+                return None
+
+            # ── text-based search ────────────────────────────────────────
             if text:
                 try:
                     return parent.child_window(title_re=text, class_name=class_name)
                 except Exception:
                     pass
-
                 for ctrl in parent.descendants():
                     try:
-                        if text in ctrl.window_text():
+                        if text in (ctrl.window_text() or ""):
                             if class_name and ctrl.friendly_class_name() != class_name:
+                                continue
+                            if control_type is not None and str(ctrl.control_type()) != control_type:
                                 continue
                             return ctrl
                     except Exception:
