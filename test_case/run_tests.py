@@ -13,7 +13,7 @@ import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from test_case.conftest import McpClient, check_tunnel, check_mcp_server, ensure_server_running
+from test_case.conftest import McpClient, check_mcp_server, ensure_server_running, MACHINE_CONFIG
 
 
 def run_tests(verbose=False):
@@ -27,21 +27,12 @@ def run_tests(verbose=False):
         print("[FAIL] Could not start MCP server on Windows.")
         sys.exit(1)
 
-    tunnel_ok, tun_msg = check_tunnel()
     print("=" * 60)
     print("Environment Check")
     print("=" * 60)
-    print(f"  Tunnel:     {'[OK]' if tunnel_ok else '[FAIL]'} {tun_msg}")
+    print(f"  Machine:    {MACHINE_CONFIG.get('host')} ({MACHINE_CONFIG.get('comment', '')})")
     print(f"  MCP Server: {'[OK]' if server_ok else '[FAIL]'} {srv_msg}")
     print()
-
-    if not tunnel_ok or not server_ok:
-        print("[FAIL] Environment not ready.")
-        if not tunnel_ok:
-            print("  - SSH tunnel: bash agent/tunnel.sh start")
-        if not server_ok:
-            print("  - Windows:    deploy.ps1 -Action start (in RDP desktop)")
-        sys.exit(1)
 
     client = McpClient()
     try:
