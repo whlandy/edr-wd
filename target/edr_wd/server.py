@@ -246,6 +246,40 @@ def activate_edr(exe_path: str = None) -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+@mcp.tool(
+    name="restore_edr",
+    description="Restore the EDR window if minimized. Call this before dump_tree/screenshot if the window may be minimized.",
+)
+def restore_edr() -> str:
+    """还原 EDR 窗口（如果最小化则强制恢复）"""
+    try:
+        if _gui.app is None:
+            return json.dumps({"ok": False, "error": "Not connected"})
+
+        wins = _gui.app.windows()
+        if not wins:
+            return json.dumps({"ok": False, "error": "No windows found"})
+
+        win = wins[0]
+        # Force-refresh window state
+        try:
+            win.wait_for_minimized(timeout=0.5)
+            win.restore()
+            win.wait_for_not_minimized(timeout=5)
+        except Exception:
+            pass  # Not minimized, continue
+
+        r = win.rectangle()
+        return json.dumps({
+            "ok": True,
+            "rectangle": {"x": r.left, "y": r.top, "w": r.width(), "h": r.height()},
+            "is_minimized": win.is_minimized()
+        })
+    except Exception as e:
+        logger.exception("restore_edr failed")
+        return json.dumps({"ok": False, "error": str(e)})
+
+
 # ---------------------------------------------------------------------------
 # PowerShell Execution (Popen + Terminate-Process, cancellable)
 # Security: set EDR_WD_ENABLE_POWERSHELL=1 to enable (default: disabled)
