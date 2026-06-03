@@ -242,16 +242,36 @@ class WindowsGUI:
                     interval: float = 0.5) -> dict:
         """
         Poll until a matching window appears or timeout expires.
+
+        Business timeout is handled internally — does NOT rely on HTTP/SSE timeout.
+        Returns structured result on both success and timeout; caller never sees
+        an HTTP-level timeout exception.
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
-            result = self.is_window_open(title_re=title_re, process_name=process_name,
-                                         class_name=class_name)
+            try:
+                result = self.is_window_open(
+                    title_re=title_re, process_name=process_name,
+                    class_name=class_name
+                )
+            except Exception as e:
+                # Internal error — keep polling, surface it only on timeout
+                logger.warning("wait_window: is_window_open raised %s", e)
+                time.sleep(interval)
+                continue
+
             if result.get("found"):
                 return result
             time.sleep(interval)
-        return {"ok": False, "found": False, "error": "timeout",
-                "windows": [], "count": 0}
+
+        # Timeout: surface the error that occurred during polling if any
+        return {
+            "ok": False,
+            "found": False,
+            "error": "timeout",
+            "windows": [],
+            "count": 0,
+        }
 
     # ------------------------------------------------------------------
     # EDR Activation
@@ -338,7 +358,7 @@ class WindowsGUI:
         if not click_result.get("ok"):
             logger.warning("activate_edr: click edrWidget failed: %s", click_result.get("error"))
 
-        # ── Step 5: Wait for EDRClient window ───────────────────────────
+        # Step 6: wait for EDRClient window
         edr_client = self.wait_window(
             process_name="EDRClient.exe", timeout=timeout, interval=0.5
         )
@@ -358,7 +378,7 @@ class WindowsGUI:
                 "exe_path": exe,
             }
 
-        # ── Step 6: Connect EDRClient ────────────────────────────────────
+        # Step 7: connect EDRClient only when caller explicitly asked for it
         conn_edr = self.connect_by_process("EDRClient.exe", timeout=10)
         return {
             "ok": True,
@@ -388,7 +408,7 @@ class WindowsGUI:
     # Dump tree
     # ------------------------------------------------------------------
 
-    def dump_tree(self, window_title_re: str = None, max_depth: int = 8) -> dict:
+    def dump_tree(self, window_title_re: str = None, max_depth: int = 10) -> dict:
         """
         导出控件树。
 
@@ -441,8 +461,13 @@ class WindowsGUI:
             logger.exception("dump_tree failed")
             return {"ok": False, "error": str(e)}
 
+    # Hard cap: prevent accidentally passing unbounded depth values
+    _MAX_TREE_DEPTH = 15
+
     def _build_tree(self, ctrl, depth: int = 0, max_depth: int = 15) -> list:
         """递归构建控件树（带深度限制防止卡死）"""
+        # Enforce hard cap regardless of what caller passed
+        max_depth = min(max_depth, self._MAX_TREE_DEPTH)
         if depth > max_depth:
             return []
 
