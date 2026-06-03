@@ -73,7 +73,8 @@ class WindowsGUI:
 
             # Step 2: 用 PID 连接
             self.app = Application(backend=self.backend).connect(process=pid)
-            self.main_window = self.app.windows()[0]
+            # top_window() 比 windows()[0] 更安全——会自动等窗口就绪
+            self.main_window = self.app.top_window()
 
             return {
                 "ok": True,
@@ -89,7 +90,7 @@ class WindowsGUI:
         """通过 PID 连接"""
         try:
             self.app = Application(backend=self.backend).connect(process=pid)
-            self.main_window = self.app.window()
+            self.main_window = self.app.top_window()
             return {"ok": True, "pid": pid}
         except Exception as e:
             logger.exception("connect_by_pid failed")
@@ -292,11 +293,14 @@ class WindowsGUI:
         # ── Step 1: EDRClient already open? ─────────────────────────────
         edr_client = self.is_window_open(process_name="EDRClient.exe")
         if edr_client.get("found"):
-            self.connect_by_process("EDRClient.exe", timeout=5)
+            # NOTE: do NOT auto-connect to EDRClient here — callers expect to
+            # stay on HisecEndpointAgent until they explicitly connect it.
             return {
                 "ok": True,
                 "already_open": True,
                 "target": "EDRClient.exe",
+                "note": "EDRClient already running; connect to HisecEndpointAgent first, "
+                        "then click edrWidget to trigger popup, then connect EDRClient",
                 "windows": edr_client["windows"],
             }
 
