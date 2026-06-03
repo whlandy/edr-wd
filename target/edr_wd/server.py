@@ -75,10 +75,13 @@ def connect(
             return {"ok": False, "error": "Must specify title_re, process_name, or pid"}
 
     result = do_connect()
+    activate_result = None
     if not result["ok"] and auto_activate and ENABLE_POWERSHELL:
-        _gui.activate_edr()
+        activate_result = _gui.activate_edr()
         time.sleep(3)
         result = do_connect()
+        if not result["ok"]:
+            result["activate_result"] = activate_result
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -235,14 +238,70 @@ def screenshot(path: str = None) -> str:
     name="activate_edr",
     description=(
         "Activate the EDR GUI by launching HisecEndpointAgent with 'cmd ui'. "
-        "Requires EDR_WD_ENABLE_POWERSHELL=1 on the server. "
-        "exe_path can override the default EDR executable path."
+        "By default waits up to 15 s for the EDRClient window to appear. "
+        "If the window is already open, returns immediately with already_open=true. "
+        "exe_path can override the default EDR executable path. "
+        "Requires EDR_WD_ENABLE_POWERSHELL=1 on the server."
     ),
 )
-def activate_edr(exe_path: str = None) -> str:
+def activate_edr(exe_path: str = None, wait: bool = True, timeout: float = 15.0) -> str:
     if not ENABLE_POWERSHELL:
         return json.dumps({"ok": False, "error": "PowerShell disabled: set EDR_WD_ENABLE_POWERSHELL=1 to enable"})
-    result = _gui.activate_edr(exe_path)
+    result = _gui.activate_edr(exe_path=exe_path, wait=wait, timeout=timeout)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="list_windows",
+    description=(
+        "List all top-level windows visible on the desktop. "
+        "Does NOT require a prior connect() call. "
+        "Returns every window with its title, process_id, class_name, handle, visible/enabled flags, and rectangle."
+    ),
+)
+def list_windows() -> str:
+    result = _gui.list_windows()
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="is_window_open",
+    description=(
+        "Check if any window matches the given criteria (title regex, process name, or class name). "
+        "At least one filter must be provided. "
+        "Does NOT require a prior connect() call. "
+        "Returns found=true/false and the matching windows array."
+    ),
+)
+def is_window_open(
+    title_re: str = None,
+    process_name: str = None,
+    class_name: str = None,
+) -> str:
+    result = _gui.is_window_open(title_re=title_re, process_name=process_name, class_name=class_name)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="wait_window",
+    description=(
+        "Poll until a window matching the given criteria appears, or timeout expires. "
+        "Useful for verifying that a pop-up or new window has actually appeared after an action. "
+        "Defaults: timeout=10 s, interval=0.5 s. "
+        "Does NOT require a prior connect() call."
+    ),
+)
+def wait_window(
+    title_re: str = None,
+    process_name: str = None,
+    class_name: str = None,
+    timeout: float = 10.0,
+    interval: float = 0.5,
+) -> str:
+    result = _gui.wait_window(
+        title_re=title_re, process_name=process_name, class_name=class_name,
+        timeout=timeout, interval=interval,
+    )
     return json.dumps(result, ensure_ascii=False)
 
 

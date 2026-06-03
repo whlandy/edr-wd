@@ -15,6 +15,7 @@ import subprocess
 import time
 from typing import Optional
 
+import psutil
 from pywinauto import Application, timings
 from pywinauto import mouse
 
@@ -71,19 +72,202 @@ class WindowsGUI:
             logger.exception("connect_by_pid failed")
             return {"ok": False, "error": str(e)}
 
-    def activate_edr(self, exe_path: str = None) -> dict:
+    # ------------------------------------------------------------------
+    # Window Detection
+    # ------------------------------------------------------------------
+
+    # Default EDR window title regex (case-insensitive)
+    _EDR_TITLE_RE = r".*(HiSec|Hisec|Endpoint|EDR|华为|安全).*"
+
+    def _win_info(self, win) -> Optional[dict]:
+        """Extract serialisable info from a pywinauto HwndElement wrapper."""
+        try:
+            title = win.window_text()
+        except Exception:
+            title = ""
+        try:
+            cid = win.control_id()
+        except Exception:
+            cid = None
+        try:
+            cls = win.friendly_class_name()
+        except Exception:
+            cls = ""
+        try:
+            pid = win.process_id()
+        except Exception:
+            pid = None
+        try:
+            rect = win.rectangle()
+            rect_dict = {"x": rect.left, "y": rect.top, "w": rect.width(), "h": rect.height()}
+        except Exception:
+            rect_dict = {}
+        try:
+            visible = win.is_visible()
+        except Exception:
+            visible = False
+        try:
+            enabled = win.is_enabled()
+        except Exception:
+            enabled = False
+        try:
+            handle = win.handle()
+        except Exception:
+            handle = None
+
+        return {
+            "title": title,
+            "class_name": cls,
+            "control_id": cid,
+            "process_id": pid,
+            "handle": handle,
+            "visible": visible,
+            "enabled": enabled,
+            "rectangle": rect_dict,
+        }
+
+    def _find_windows(self, title_re: str = None, process_name: str = None,
+                      class_name: str = None) -> list:
         """
-        激活 EDR GUI（通过启动 HisecEndpointAgent cmd ui）。
-        路径可通过 EDR_WD_EDR_EXE 环境变量覆盖。
+        Enumerate all top-level windows matching the given criteria.
+        Uses Desktop(backend).windows() so does NOT require self.app to be connected.
+        Returns a list of window info dicts.
+        """
+        import re
+        from pywinauto import Desktop
+
+        matched = []
+        try:
+            desktop = Desktop(backend=self.backend)
+            for win in desktop.windows():
+                try:
+                    is_top = win.is_top_level()
+                except Exception:
+                    is_top = True  # keep window if is_top_level() is unavailable
+
+                if not is_top:
+                    continue
+
+                info = self._win_info(win)
+                if info is None:
+                    continue
+
+                # Filter by title regex
+                if title_re:
+                    try:
+                        if not re.search(title_re, info["title"], re.IGNORECASE):
+                            continue
+                    except re.error:
+                        continue
+                # Filter by class_name
+                if class_name:
+                    if info["class_name"] != class_name:
+                        continue
+                # Filter by process name
+                if process_name:
+                    if info["process_id"] is None:
+                        continue
+                    try:
+                        proc = psutil.Process(info["process_id"])
+                        if proc.name().lower() != process_name.lower():
+                            continue
+                    except Exception:
+                        continue
+
+                matched.append(info)
+        except Exception as e:
+            logger.warning("_find_windows error: %s", e)
+        return matched
+
+    def list_windows(self) -> dict:
+        """
+        List all top-level windows visible on the desktop.
+        Returns all windows regardless of whether they match EDR patterns.
+        """
+        try:
+            from pywinauto import Desktop
+            windows = []
+            for win in Desktop(backend=self.backend).windows():
+                try:
+                    if not win.is_top_level():
+                        continue
+                except Exception:
+                    pass  # keep window if is_top_level() is unavailable
+                info = self._win_info(win)
+                if info:
+                    windows.append(info)
+            return {"ok": True, "count": len(windows), "windows": windows}
+        except Exception as e:
+            logger.exception("list_windows failed")
+            return {"ok": False, "error": str(e)}
+
+    def is_window_open(self, title_re: str = None, process_name: str = None,
+                       class_name: str = None) -> dict:
+        """
+        Check if any window matches the given criteria.
+        At least one of title_re / process_name / class_name must be provided.
+        """
+        if not any([title_re, process_name, class_name]):
+            return {"ok": False, "error": "At least one filter required: title_re, process_name, or class_name"}
+        windows = self._find_windows(title_re=title_re, process_name=process_name,
+                                      class_name=class_name)
+        return {"ok": True, "found": len(windows) > 0, "count": len(windows), "windows": windows}
+
+    def wait_window(self, title_re: str = None, process_name: str = None,
+                    class_name: str = None, timeout: float = 10.0,
+                    interval: float = 0.5) -> dict:
+        """
+        Poll until a matching window appears or timeout expires.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            result = self.is_window_open(title_re=title_re, process_name=process_name,
+                                         class_name=class_name)
+            if result.get("found"):
+                return result
+            time.sleep(interval)
+        return {"ok": False, "found": False, "error": "timeout",
+                "windows": [], "count": 0}
+
+    # ------------------------------------------------------------------
+    # EDR Activation
+    # ------------------------------------------------------------------
+
+    def activate_edr(self, exe_path: str = None, wait: bool = True,
+                     timeout: float = 15.0) -> dict:
+        """
+        Activate EDR GUI (launch HisecEndpointAgent cmd ui).
+
+        - wait=True: block until the EDRClient window appears (or timeout).
+        - wait=False: fire-and-forget (legacy behaviour).
+        - exe_path can be overridden via EDR_WD_EDR_EXE env var.
         """
         exe = exe_path or os.environ.get("EDR_WD_EDR_EXE", DEFAULT_EDR_EXE)
+
+        # 1. Check if already open — prioritize process_name first, then title_re
+        existing_by_proc = self.is_window_open(process_name="EDRClient.exe")
+        if existing_by_proc.get("found"):
+            return {"ok": True, "already_open": True, "windows": existing_by_proc["windows"]}
+
+        existing_by_title = self.is_window_open(title_re=self._EDR_TITLE_RE)
+        if existing_by_title.get("found"):
+            return {"ok": True, "already_open": True, "windows": existing_by_title["windows"]}
+
+        # 2. Launch
         try:
             subprocess.Popen([exe, "cmd", "ui"])
-            time.sleep(2)
-            return {"ok": True, "exe_path": exe}
         except Exception as e:
             logger.exception("activate_edr failed")
             return {"ok": False, "error": str(e)}
+
+        if not wait:
+            return {"ok": True, "already_open": False, "exe_path": exe}
+
+        # 3. Wait for window
+        result = self.wait_window(title_re=self._EDR_TITLE_RE, timeout=timeout)
+        result["already_open"] = False
+        result["exe_path"] = exe
+        return result
 
     def _window_rect(self, window_title_re: str = None) -> dict:
         """获取窗口在屏幕上的绝对矩形坐标。"""

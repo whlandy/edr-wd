@@ -27,10 +27,10 @@ function Write-Section([string]$Label) {
     Write-Host $Label -ForegroundColor Cyan
 }
 
-function Write-State([int]$Pid, [string]$Mode) {
+function Write-State([int]$ProcessId, [string]$Mode) {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
     $payload = [ordered]@{
-        pid = $Pid
+        pid = $ProcessId
         mode = $Mode
         host = $BindHost
         port = [int]$Port
@@ -242,7 +242,7 @@ function Start-Server {
     $env:EDR_WD_ENABLE_POWERSHELL = "1"
     $proc = Start-Process -FilePath python `
         -ArgumentList "-m edr_wd.server --http --host $BindHost --port $Port" `
-        -WindowStyle Hidden `
+        -WorkingDirectory $PSScriptRoot `
         -PassThru `
         -RedirectStandardOutput $StdoutLog `
         -RedirectStandardError $StderrLog
@@ -257,7 +257,7 @@ function Start-Server {
         exit 1
     }
 
-    Write-State -Pid $proc.Id -Mode "background"
+    Write-State -ProcessId $proc.Id -Mode "background"
     Write-Host "  [OK] Server started in background (PID: $($proc.Id))" -ForegroundColor Green
     Write-Host "  Log stdout: $StdoutLog" -ForegroundColor Gray
     Write-Host "  Log stderr: $StderrLog" -ForegroundColor Gray
@@ -266,11 +266,11 @@ function Start-Server {
 
 function Show-Status {
     Write-Section "[status] EDR-WD MCP Server"
-    $pid = Get-ServerPid
-    if ($pid) {
-        Write-Host "  [OK] Running (PID: $pid)" -ForegroundColor Green
+    $serverPid = Get-ServerPid
+    if ($serverPid) {
+        Write-Host "  [OK] Running (PID: $serverPid)" -ForegroundColor Green
         try {
-            $proc = Get-Process -Id $pid -ErrorAction Stop
+            $proc = Get-Process -Id $serverPid -ErrorAction Stop
             Write-Host "  Process: $($proc.ProcessName)" -ForegroundColor Gray
         } catch {
             Write-Host "  Process: not found in Get-Process output" -ForegroundColor Yellow
@@ -312,8 +312,8 @@ function Show-Status {
 
 function Stop-Server {
     Write-Section "[stop] Stopping MCP Server..."
-    $pid = Get-ServerPid
-    if (-not $pid) {
+    $serverPid = Get-ServerPid
+    if (-not $serverPid) {
         Write-Host "  [OK] No running server found" -ForegroundColor Green
         if (Test-Path $StatePath) {
             Remove-Item $StatePath -Force
@@ -322,15 +322,15 @@ function Stop-Server {
     }
 
     try {
-        & taskkill /F /T /PID $pid | Out-Null
+        & taskkill /F /T /PID $serverPid | Out-Null
         Start-Sleep -Seconds 1
-        if (Get-Process -Id $pid -ErrorAction SilentlyContinue) {
-            Write-Host "  [WARN] taskkill did not fully stop PID $pid, trying Stop-Process" -ForegroundColor Yellow
-            Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+        if (Get-Process -Id $serverPid -ErrorAction SilentlyContinue) {
+            Write-Host "  [WARN] taskkill did not fully stop PID $serverPid, trying Stop-Process" -ForegroundColor Yellow
+            Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue
         }
-        Write-Host "  [OK] Server stopped (PID: $pid)" -ForegroundColor Green
+        Write-Host "  [OK] Server stopped (PID: $serverPid)" -ForegroundColor Green
     } catch {
-        Write-Host "  [ERROR] Failed to stop PID $pid : $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  [ERROR] Failed to stop PID $serverPid : $($_.Exception.Message)" -ForegroundColor Red
         exit 1
     } finally {
         if (Test-Path $StatePath) {
