@@ -51,13 +51,36 @@ class WindowsGUI:
             return {"ok": False, "error": str(e)}
 
     def connect_by_process(self, process_name: str, timeout: float = 10.0) -> dict:
-        """通过进程名连接应用"""
+        """通过进程名连接应用（先用 psutil 解析 PID，再调 Application.connect(process=PID)）"""
         try:
-            self.app = Application(backend=self.backend).connect(
-                process_name=process_name, timeout=timeout
-            )
+            # Step 1: psutil 查找匹配的进程 PID
+            matches = []
+            for p in psutil.process_iter(["pid", "name", "exe", "username", "create_time"]):
+                try:
+                    if p.info["name"] and p.info["name"].lower() == process_name.lower():
+                        matches.append(p.info)
+                except psutil.Error:
+                    pass
+
+            if not matches:
+                return {"ok": False, "error": f"No process found matching: {process_name}"}
+
+            # 返回多个候选，方便调试
+            candidates = [{"pid": m["pid"], "name": m["name"]} for m in matches]
+
+            # 取第一个匹配（最常见的同名单实例情况）
+            pid = matches[0]["pid"]
+
+            # Step 2: 用 PID 连接
+            self.app = Application(backend=self.backend).connect(process=pid)
             self.main_window = self.app.windows()[0]
-            return {"ok": True, "process": process_name}
+
+            return {
+                "ok": True,
+                "process": process_name,
+                "pid": pid,
+                "candidates": candidates,  # 多进程时可供排查
+            }
         except Exception as e:
             logger.exception("connect_by_process failed")
             return {"ok": False, "error": str(e)}
