@@ -16,6 +16,7 @@
 #   EDR_WD_REMOTE_PORT   Windows MCP port (default: 8765)
 #   EDR_WD_TARGET_DIR    Remote repo path (default: C:/path/to/edr-wd)
 #   EDR_WD_PASSFILE      Password file for tunnel.sh (default: $HOME/.ssh/.tunnelpass)
+#   EDR_WD_START_MODE    Windows start mode: auto|process|scheduled-task (default: auto)
 
 set -euo pipefail
 
@@ -26,6 +27,8 @@ SSH_PORT="${EDR_WD_SSH_PORT:-22}"
 LOCAL_PORT="${EDR_WD_LOCAL_PORT:-18765}"
 REMOTE_PORT="${EDR_WD_REMOTE_PORT:-8765}"
 TARGET_DIR="${EDR_WD_TARGET_DIR:-C:/path/to/edr-wd}"
+PASSFILE="${EDR_WD_PASSFILE:-$HOME/.ssh/.tunnelpass}"
+START_MODE="${EDR_WD_START_MODE:-auto}"
 
 usage() {
     cat <<EOF
@@ -43,8 +46,14 @@ EOF
 remote_deploy() {
     local action="$1"
     local remote_script="$TARGET_DIR/target/deploy.ps1"
-    ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no "${USER}@${HOST}" \
-        "powershell -NoProfile -ExecutionPolicy Bypass -File \"$remote_script\" -Action $action -BindHost 127.0.0.1 -Port $REMOTE_PORT"
+    local ssh_args=(-p "$SSH_PORT" -o StrictHostKeyChecking=no)
+    local remote_cmd="powershell -NoProfile -ExecutionPolicy Bypass -File \"$remote_script\" -Action $action -BindHost 127.0.0.1 -Port $REMOTE_PORT -StartMode $START_MODE"
+
+    if command -v sshpass >/dev/null 2>&1 && [ -f "$PASSFILE" ]; then
+        sshpass -f "$PASSFILE" ssh "${ssh_args[@]}" "${USER}@${HOST}" "$remote_cmd"
+    else
+        ssh "${ssh_args[@]}" -o BatchMode=yes "${USER}@${HOST}" "$remote_cmd"
+    fi
 }
 
 ensure_tunnel() {

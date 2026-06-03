@@ -12,6 +12,9 @@ param(
     [string]$Action = "start",
     [string]$BindHost = "127.0.0.1",
     [string]$Port = "8765",
+    [ValidateSet("auto", "process", "scheduled-task")]
+    [string]$StartMode = "auto",
+    [string]$TaskName = "EDR-WD-MCP",
     [switch]$NoSsh,
     [switch]$NoFw,
     [switch]$AutoStart
@@ -22,6 +25,7 @@ $StatePath = Join-Path $PSScriptRoot ".edr-wd-state.json"
 $LogDir = Join-Path $PSScriptRoot "logs"
 $StdoutLog = Join-Path $LogDir "edr-wd.stdout.log"
 $StderrLog = Join-Path $LogDir "edr-wd.stderr.log"
+$LauncherPath = Join-Path $LogDir "start-edr-wd-server.ps1"
 
 function Write-Section([string]$Label) {
     Write-Host $Label -ForegroundColor Cyan
@@ -118,6 +122,98 @@ function Test-InteractiveSession {
     } else {
         Write-Host "  [OK] Interactive session: $session" -ForegroundColor Green
     }
+}
+
+function Test-CurrentSessionInteractive {
+    $session = $env:SESSIONNAME
+    if (-not $session) {
+        return $false
+    }
+    return ($session -match "^(Console|RDP-Tcp(#\d+)?)$")
+}
+
+function Resolve-InteractiveUser([string]$UserName) {
+    if (-not $UserName) {
+        return $null
+    }
+    if ($UserName -match "\\") {
+        return $UserName
+    }
+
+    try {
+        $explorers = Get-CimInstance Win32_Process -Filter "name = 'explorer.exe'" -ErrorAction SilentlyContinue
+        foreach ($proc in $explorers) {
+            $owner = Invoke-CimMethod -InputObject $proc -MethodName GetOwner -ErrorAction SilentlyContinue
+            if ($owner -and $owner.User -eq $UserName) {
+                if ($owner.Domain) {
+                    return "$($owner.Domain)\$($owner.User)"
+                }
+                return $owner.User
+            }
+        }
+    } catch {
+    }
+
+    try {
+        $computerUser = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+        if ($computerUser) {
+            $shortName = ($computerUser -split "\\")[-1]
+            if ($shortName -eq $UserName) {
+                return $computerUser
+            }
+        }
+    } catch {
+    }
+
+    return "$env:COMPUTERNAME\$UserName"
+}
+
+function Get-ActiveInteractiveUser {
+    try {
+        $lines = (& quser.exe 2>$null) | Select-Object -Skip 1
+        foreach ($line in $lines) {
+            $normalized = ($line -replace "^\s*>", "").Trim()
+            if (-not $normalized) {
+                continue
+            }
+            $parts = $normalized -split "\s+"
+            if ($parts.Count -lt 4) {
+                continue
+            }
+            $userName = $parts[0]
+            $sessionName = $parts[1]
+            $stateIndex = 3
+            if ($parts[2] -match "^\d+$") {
+                $stateIndex = 3
+            } elseif ($parts.Count -gt 3 -and $parts[3] -match "^\d+$") {
+                $sessionName = "$($parts[1]) $($parts[2])"
+                $stateIndex = 4
+            }
+            if ($parts.Count -le $stateIndex) {
+                continue
+            }
+            $state = $parts[$stateIndex]
+            if ($state -eq "Active" -and $sessionName.ToLowerInvariant() -match "^(console|rdp-tcp)") {
+                return Resolve-InteractiveUser $userName
+            }
+        }
+    } catch {
+    }
+    return $null
+}
+
+function Write-Launcher {
+    New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+    $rootLiteral = $PSScriptRoot.Replace("'", "''")
+    $stdoutLiteral = $StdoutLog.Replace("'", "''")
+    $stderrLiteral = $StderrLog.Replace("'", "''")
+    $launcher = @"
+`$ErrorActionPreference = "Stop"
+`$env:EDR_WD_ENABLE_POWERSHELL = "1"
+Set-Location '$rootLiteral'
+& python -m edr_wd.server --http --host $BindHost --port $Port 1> '$stdoutLiteral' 2> '$stderrLiteral'
+"@
+    $launcher | Set-Content -Encoding UTF8 $LauncherPath
 }
 
 function Check-Python {
@@ -230,7 +326,7 @@ function Install-Dependencies {
     }
 }
 
-function Start-Server {
+function Start-ServerProcess {
     Write-Section "[4/4] Starting MCP Server..."
     $currentPid = Get-ServerPid
     if ($currentPid) {
@@ -262,6 +358,94 @@ function Start-Server {
     Write-Host "  Log stdout: $StdoutLog" -ForegroundColor Gray
     Write-Host "  Log stderr: $StderrLog" -ForegroundColor Gray
     Write-Host "  Note: EDR_WD_ENABLE_POWERSHELL=1 (PowerShell tools enabled)" -ForegroundColor Gray
+}
+
+function Start-ServerScheduledTask {
+    Write-Section "[4/4] Starting MCP Server via interactive scheduled task..."
+    $currentPid = Get-ServerPid
+    if ($currentPid) {
+        Write-Host "  [OK] Server already running (PID: $currentPid)" -ForegroundColor Green
+        return
+    }
+
+    $interactiveUser = Get-ActiveInteractiveUser
+    if (-not $interactiveUser) {
+        Write-Host "  [ERROR] No active Console/RDP user session found." -ForegroundColor Red
+        Write-Host "  The server must run inside a logged-on Windows desktop for GUI automation." -ForegroundColor Yellow
+        Write-Host "  Log in once to Windows, then run this command again from the agent side; no RDP command execution is needed." -ForegroundColor Yellow
+        exit 1
+    }
+
+    Write-Launcher
+    try {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+        $action = New-ScheduledTaskAction `
+            -Execute "powershell.exe" `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$LauncherPath`""
+        $principal = New-ScheduledTaskPrincipal `
+            -UserId $interactiveUser `
+            -LogonType Interactive `
+            -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -ExecutionTimeLimit (New-TimeSpan -Days 7)
+
+        Register-ScheduledTask `
+            -TaskName $TaskName `
+            -Action $action `
+            -Principal $principal `
+            -Settings $settings `
+            -Description "EDR-WD MCP server in the active interactive desktop" `
+            -Force | Out-Null
+
+        Start-ScheduledTask -TaskName $TaskName
+    } catch {
+        Write-Host "  [ERROR] Failed to create or run scheduled task: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+
+    $deadline = (Get-Date).AddSeconds(20)
+    $serverPid = $null
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 1
+        $serverPid = Get-ServerPid
+        if ($serverPid) {
+            break
+        }
+    }
+
+    if (-not $serverPid) {
+        Write-Host "  [ERROR] Scheduled task ran, but server did not listen on port $Port" -ForegroundColor Red
+        if (Test-Path $StderrLog) {
+            Write-Host "  --- stderr tail ---" -ForegroundColor DarkYellow
+            Get-Content $StderrLog -Tail 40 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
+        }
+        exit 1
+    }
+
+    Write-State -ProcessId $serverPid -Mode "scheduled-task"
+    Write-Host "  [OK] Server started in interactive session (PID: $serverPid, User: $interactiveUser)" -ForegroundColor Green
+    Write-Host "  Task: $TaskName" -ForegroundColor Gray
+    Write-Host "  Log stdout: $StdoutLog" -ForegroundColor Gray
+    Write-Host "  Log stderr: $StderrLog" -ForegroundColor Gray
+    Write-Host "  Note: EDR_WD_ENABLE_POWERSHELL=1 (PowerShell tools enabled)" -ForegroundColor Gray
+}
+
+function Start-Server {
+    if ($StartMode -eq "process") {
+        Start-ServerProcess
+        return
+    }
+    if ($StartMode -eq "scheduled-task") {
+        Start-ServerScheduledTask
+        return
+    }
+    if (Test-CurrentSessionInteractive) {
+        Start-ServerProcess
+    } else {
+        Start-ServerScheduledTask
+    }
 }
 
 function Show-Status {
@@ -336,6 +520,7 @@ function Stop-Server {
         if (Test-Path $StatePath) {
             Remove-Item $StatePath -Force -ErrorAction SilentlyContinue
         }
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
     }
 }
 
@@ -343,6 +528,7 @@ Write-Host "=== EDR-WD Lifecycle Manager ===" -ForegroundColor Cyan
 Write-Host "Action: $Action" -ForegroundColor Gray
 Write-Host "Host: $BindHost" -ForegroundColor Gray
 Write-Host "Port: $Port" -ForegroundColor Gray
+Write-Host "StartMode: $StartMode" -ForegroundColor Gray
 Write-Host ""
 
 switch ($Action) {

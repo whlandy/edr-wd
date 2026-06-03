@@ -99,19 +99,28 @@ Restart your MCP client if it does not hot-reload server configs.
 git clone https://github.com/whlandy/edr-wd.git
 cd edr-wd
 
-# 一键 bootstrap + 启动服务
+# 一键 bootstrap + 启动服务；从 SSH 等非交互会话运行时会自动投递到已登录的交互桌面
 .\deploy.ps1 -Action start -BindHost 127.0.0.1 -Port 8765
 ```
 
 ### 推荐工作流
 
-1. 在 Windows 目标机的 **RDP / 本地交互式桌面会话** 中运行 `deploy.ps1`。
-2. 用 `deploy.ps1 -Action start` 启动 MCP server，它会先做 bootstrap，再把 server 以后台进程拉起并记录 PID。
-3. 用 `deploy.ps1 -Action status` 查看当前状态，用 `deploy.ps1 -Action stop` 关闭服务。
-4. 如果后续连接 EDR 时窗口没有激活，优先用 `connect(..., auto_activate=True)`。
-5. 如果只是单独把 EDR 窗口拉起来，再显式调用 `activate_edr()`。
+1. 让 Windows 目标机保持一个已登录的本地或 RDP 桌面会话。
+2. 在 Mac/Linux agent 侧运行 `bash agent/edr-wd.sh up`；它会通过 SSH 远程执行 `deploy.ps1 -Action start`，并自动拉起 tunnel。
+3. `deploy.ps1 -Action start` 会先做 bootstrap，再启动 MCP server 并记录 PID。
+   - 如果命令已经在 Windows 交互桌面里运行，server 直接作为后台进程启动。
+   - 如果命令来自 SSH / 非交互会话，server 会通过 Windows 计划任务投递到当前已登录用户的交互桌面中启动。
+4. 用 `deploy.ps1 -Action status` 查看当前状态，用 `deploy.ps1 -Action stop` 关闭服务。
+5. 如果后续连接 EDR 时窗口没有激活，优先用 `connect(..., auto_activate=True)`。
+6. 如果只是单独把 EDR 窗口拉起来，再显式调用 `activate_edr()`。
 
-这就是正常 workflow:
+Agent 侧正常 workflow:
+
+```bash
+bash agent/edr-wd.sh up
+```
+
+Windows 侧也仍支持直接运行:
 
 ```powershell
 cd target
@@ -124,14 +133,17 @@ $env:EDR_WD_ENABLE_POWERSHELL = "1"
 python -m edr_wd.server --http --host 127.0.0.1 --port 8765
 ```
 
-**重要：GUI 自动化必须在 Windows RDP/本地交互式桌面会话中启动 server。**
-不要用 `Start-Job`、Windows service、纯 SSH 后台会话启动 pywinauto server；这些会话通常没有 GUI desktop context，`dump_tree` 会返回空树或找不到窗口。
+**重要：GUI 自动化必须运行在 Windows 已登录的交互桌面会话中。**
+`deploy.ps1 -Action start -StartMode auto` 会自动处理 SSH / 非交互会话：它不会把 pywinauto server 留在 SSH 后台，而是用交互式计划任务投递到当前已登录用户的桌面。不要改用 `Start-Job`、Windows service、纯 SSH 后台进程来启动 pywinauto server；这些会话通常没有 GUI desktop context，`dump_tree` 会返回空树或找不到窗口。
 
-如果你现在已经拿到了 Windows 的交互式桌面，会更推荐直接跑：
+如果没有任何用户登录 Windows 桌面，计划任务无法创建 GUI desktop context；先让目标机保持一次登录会话，然后 agent 侧就能反复远程拉起/停止，无需在 RDP 里手动执行命令。
+
+也可以显式指定启动模式：
 
 ```powershell
-cd target
-.\deploy.ps1 -Action start -BindHost 127.0.0.1 -Port 8765
+.\deploy.ps1 -Action start -StartMode auto
+.\deploy.ps1 -Action start -StartMode scheduled-task
+.\deploy.ps1 -Action start -StartMode process
 ```
 
 然后在 MCP 客户端侧使用 `connect(title_re=".*HiSec.*", auto_activate=True)` 作为默认入口。这样当 EDR 没有激活时，server 会自动尝试 `activate_edr()` 再重试一次。
