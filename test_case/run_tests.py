@@ -13,12 +13,21 @@ import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from test_case.conftest import McpClient, check_tunnel, check_mcp_server
+from test_case.conftest import McpClient, check_tunnel, check_mcp_server, ensure_server_running
 
 
 def run_tests(verbose=False):
+    # ── Ensure MCP server is running on Windows ──────────────────────────
+    print("=" * 60)
+    print("Starting MCP Server")
+    print("=" * 60)
+    server_ok, srv_msg = ensure_server_running()
+    print(f"  MCP Server: {'[OK]' if server_ok else '[FAIL]'} {srv_msg}")
+    if not server_ok:
+        print("[FAIL] Could not start MCP server on Windows.")
+        sys.exit(1)
+
     tunnel_ok, tun_msg = check_tunnel()
-    server_ok, srv_msg = check_mcp_server()
     print("=" * 60)
     print("Environment Check")
     print("=" * 60)

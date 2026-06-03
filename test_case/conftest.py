@@ -163,3 +163,102 @@ def is_server_online() -> bool:
     """Quick boolean check."""
     ok, _ = check_mcp_server()
     return ok
+
+
+# ---------------------------------------------------------------------------
+# Server lifecycle via SSH
+# ---------------------------------------------------------------------------
+
+import subprocess
+import time
+
+
+def _ssh(host: str, port: int, user: str, password: str, cmd: str, timeout: int = 15) -> tuple[int, str]:
+    """Run a command via SSH and return (exit_code, stdout+stderr)."""
+    cp = subprocess.run(
+        [
+            "sshpass", "-p", password,
+            "ssh", "-o", "StrictHostKeyChecking=no",
+            "-o", f"Port={port}",
+            f"{user}@{host}",
+            cmd
+        ],
+        capture_output=True, timeout=timeout,
+    )
+    return cp.returncode, (cp.stdout + cp.stderr).decode("utf-8", errors="replace")
+
+
+def ensure_server_running(
+    host: str = "170.170.11.26",
+    port: int = 22,
+    user: str = "admin",
+    password: str = "whl@123",
+    local_tunnel_port: int = 18765,
+    server_path: str = "C:/Users/admin/Desktop/edr-wd-main/edr-wd-main/target",
+    server_port: int = 8765,
+) -> tuple[bool, str]:
+    """
+    Ensure the MCP server is running on Windows:
+      1. Kill any process holding the server port.
+      2. Start a new server process via SSH (Start-Process, background).
+      3. Wait for it to become reachable via the local tunnel.
+
+    Returns (True, msg) on success, (False, msg) on failure.
+    """
+    kill_script = "C:/Users/admin/Desktop/kill_edr.ps1"
+
+    # Step 1: kill old processes
+    rc, out = _ssh(host, port, user, password,
+                   f'powershell -ExecutionPolicy Bypass -Command "& {{{kill_script}}}"',
+                   timeout=20)
+    if rc != 0:
+        return False, f"kill script failed: {out}"
+
+    # Step 2: start new server via the start script (background)
+    start_script = "C:/Users/admin/Desktop/start_edr.ps1"
+    rc, out = _ssh(host, port, user, password,
+                    f'powershell -ExecutionPolicy Bypass -File "{start_script}"',
+                    timeout=15)
+    # Start-Process returns immediately, so rc may be 0 even if it worked
+
+    # Step 3: wait for server to be reachable via local tunnel (up to 20s)
+    import socket
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        # First check tunnel port is open
+        try:
+            with socket.create_connection(("127.0.0.1", local_tunnel_port), timeout=2):
+                pass
+        except OSError:
+            time.sleep(1)
+            continue
+        # Tunnel is open — give server a moment to finish initialization
+        time.sleep(2)
+        # Verify server is responding to MCP initialize
+        try:
+            client = McpClient()
+            try:
+                result = client.initialize()
+                if "error" not in result:
+                    return True, "Server started and responding"
+            finally:
+                client.close()
+        except Exception as e:
+            # Server not ready yet — log and retry
+            time.sleep(1)
+            continue
+    return False, "Server did not respond within 20s"
+
+
+def restart_server_via_ssh(
+    host: str = "170.170.11.26",
+    port: int = 22,
+    user: str = "admin",
+    password: str = "whl@123",
+) -> tuple[bool, str]:
+    """
+    Convenience wrapper: kill server processes and restart them.
+    Uses kill_edr.ps1 to stop existing processes, then launches a fresh
+    edr_wd.server in the background on Windows.
+    """
+    return ensure_server_running(host, port, user, password)
