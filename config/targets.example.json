@@ -45,6 +45,7 @@
       "description": "开发环境 Windows 虚拟机（key auth，适用于 Windows/Linux/Mac agent）",
 
       "platform": "windows",
+      "app_profile": "windows_hisec",
 
       "ssh": {
         "host": "<target-ip>",
@@ -72,6 +73,42 @@
         "target_root": "C:\\Users\\<TARGET_USER>\\Desktop\\edr-wd\\target",
         "task_name": "StartEDRMCP",
         "run_with_highest_privileges": true
+      }
+    },
+
+    "mac-dev": {
+      "_comment": "示例：macOS target — Windows agent 通过 SSH key 访问；lifecycle 走 launchd",
+      "description": "macOS 开发机（key auth，LaunchAgent）",
+
+      "platform": "macos",
+      "app_profile": "macos_generic",
+
+      "ssh": {
+        "host": "<macos-target-ip>",
+        "port": 22,
+        "user": "<MAC_USER>",
+        "auth": {
+          "type": "key",
+          "key_path": "C:\\Users\\<TARGET_USER>\\.ssh\\id_edr_wd"
+        }
+      },
+
+      "mcp": {
+        "host": "0.0.0.0",
+        "port": 8765,
+        "path": "/mcp",
+        "connect_mode": "direct",
+        "tunnel": {
+          "enabled": false,
+          "local_port": 18765
+        }
+      },
+
+      "macos": {
+        "python_path": "/opt/homebrew/bin/python3",
+        "root": "/Users/<MAC_USER>/edr-wd/target",
+        "backend": "macos_accessibility",
+        "launch_name": "com.edr-wd.target"
       }
     }
   }

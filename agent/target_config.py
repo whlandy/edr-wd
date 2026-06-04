@@ -89,6 +89,8 @@ SKELETON = {
     "targets": {
         "win-dev": {
             "description": "",
+            "platform": "windows",
+            "app_profile": "windows_hisec",
             "ssh": {
                 "host": "",
                 "port": 22,
@@ -108,7 +110,31 @@ SKELETON = {
                 "task_name": "StartEDRMCP",
                 "run_with_highest_privileges": True,
             },
-        }
+        },
+        "mac-dev": {
+            "description": "",
+            "platform": "macos",
+            "app_profile": "macos_generic",
+            "ssh": {
+                "host": "",
+                "port": 22,
+                "user": "",
+                "auth": {"type": "key", "key_path": "~/.ssh/id_edr_wd"},
+            },
+            "mcp": {
+                "host": "0.0.0.0",
+                "port": 8765,
+                "path": "/mcp",
+                "connect_mode": "direct",
+                "tunnel": {"enabled": False, "local_port": 18765},
+            },
+            "macos": {
+                "python_path": "/opt/homebrew/bin/python3",
+                "root": "",
+                "backend": "macos_accessibility",
+                "launch_name": "com.edr-wd.target",
+            },
+        },
     },
 }
 
@@ -202,7 +228,54 @@ def _normalize_target(raw: dict) -> dict:
             out_ssh["auth"] = {"type": "password", "password": ssh_legacy["password"]}
             out["ssh"] = out_ssh
 
+    # platform default: legacy targets are assumed to be Windows
+    # (windows target is the only target type that existed pre-2026).
+    out.setdefault("platform", "windows")
+
     return out
+
+
+# ── Platform validation helpers ─────────────────────────────────────────────
+
+SUPPORTED_PLATFORMS = ("windows", "macos")
+
+
+def _validate_platform_specific(t: dict) -> list[str]:
+    """
+    Platform-specific validation. Returns a list of error messages.
+
+    Behavior:
+      - platform=windows (default): requires windows.{target_root, python_path, task_name}
+      - platform=macos: requires macos.{root, python_path, backend, launch_name}
+    """
+    errors: list[str] = []
+    platform = t.get("platform", "windows")
+
+    if platform not in SUPPORTED_PLATFORMS:
+        errors.append(
+            f"platform='{platform}' is not supported. "
+            f"Supported: {', '.join(SUPPORTED_PLATFORMS)}"
+        )
+        return errors
+
+    if platform == "windows":
+        win = t.get("windows", {})
+        if not win.get("target_root"):
+            errors.append("windows.target_root is required for platform=windows")
+        if not win.get("python_path"):
+            errors.append("windows.python_path is required for platform=windows")
+    elif platform == "macos":
+        mac = t.get("macos", {})
+        if not mac.get("root"):
+            errors.append("macos.root is required for platform=macos")
+        if not mac.get("python_path"):
+            errors.append("macos.python_path is required for platform=macos")
+        if not mac.get("backend"):
+            errors.append("macos.backend is required for platform=macos")
+        if not mac.get("launch_name"):
+            errors.append("macos.launch_name is required for platform=macos")
+
+    return errors
 
 
 # ── TargetConfig class ────────────────────────────────────────────────────────
@@ -273,6 +346,24 @@ class TargetConfig:
 
     def has_target(self, name: str) -> bool:
         return name in self._data.get("targets", {})
+
+    # ── Platform / profile queries ───────────────────────────────────────────
+
+    def get_target_platform(self, name: str | None = None) -> str:
+        """
+        Return the platform for a target: 'windows' or 'macos'.
+        Defaults to 'windows' when not specified (legacy behavior).
+        """
+        t = self.get_target(name)
+        return t.get("platform", "windows")
+
+    def get_target_app_profile(self, name: str | None = None) -> str | None:
+        """
+        Return the app_profile for a target, or None if not set.
+        Used to dispatch test suites to the right workflow.
+        """
+        t = self.get_target(name)
+        return t.get("app_profile")
 
     # ── MCP URL builder ───────────────────────────────────────────────────────
 
@@ -421,12 +512,9 @@ class TargetConfig:
             path = mcp.get("path", "/mcp")
             if not path.startswith("/"):
                 errors.append(f"[{name}] mcp.path must start with '/'")
-            # windows
-            win = t.get("windows", {})
-            if not win.get("target_root"):
-                errors.append(f"[{name}] windows.target_root is required")
-            if not win.get("python_path"):
-                errors.append(f"[{name}] windows.python_path is required")
+
+            # Platform-specific required fields
+            errors.extend(_validate_platform_specific(t))
 
         return errors
 
@@ -463,7 +551,9 @@ def main() -> None:
                 marker = " (default)" if name == default else ""
                 desc = t.get("description") or "—"
                 host = t.get("ssh", {}).get("host") or "—"
-                print(f"  {name}{marker}  host={host}  desc={desc}")
+                platform = t.get("platform", "windows")
+                profile = t.get("app_profile") or "—"
+                print(f"  {name}{marker}  platform={platform}  profile={profile}  host={host}  desc={desc}")
         else:
             example = _find_example()
             if example:
