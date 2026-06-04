@@ -26,7 +26,7 @@ import uuid
 
 from fastmcp import FastMCP
 
-from .pywinauto_client import WindowsGUI
+from pywinauto_client import WindowsGUI
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -366,6 +366,67 @@ def restore_edr() -> str:
 
 
 # ---------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Status
+# --------------------------------------------------------------------------
+
+import socket
+
+
+def _get_server_pid() -> int | None:
+    """Return the PID of the process listening on port 8765, or None."""
+    try:
+        import psutil
+        for conn in psutil.net_connections(kind="inet"):
+            if conn.laddr.port == 8765 and conn.status == "LISTEN":
+                return conn.pid
+    except Exception:
+        pass
+    return None
+
+
+def _check_port(port: int) -> bool:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(2)
+    try:
+        s.connect(("127.0.0.1", port))
+        return True
+    except Exception:
+        return False
+    finally:
+        s.close()
+
+
+@mcp.tool(name="status", description=(
+    "Return the health and environment status of this MCP server. "
+    "Use this before any operation to confirm the server is running in a "
+    "proper interactive GUI session."
+))
+def status() -> str:
+    pid = _get_server_pid()
+    port_open = _check_port(8765)
+
+    result = {
+        "ok": pid is not None and port_open,
+        "pid": pid,
+        "port": 8765,
+        "backend": _gui.backend,
+        "cwd": os.getcwd(),
+        "can_see_hisec_agent": False,
+        "interactive_session": os.environ.get("SESSIONNAME", ""),
+    }
+
+    # Probe whether we can see a HisecEndpoint window
+    if _gui.app is not None and _gui.main_window is not None:
+        try:
+            result["can_see_hisec_agent"] = _gui.main_window.is_visible()
+        except Exception:
+            pass
+
+    return json.dumps(result, ensure_ascii=False)
+
+
 # PowerShell Execution (Popen + Terminate-Process, cancellable)
 # Security: set EDR_WD_ENABLE_POWERSHELL=1 to enable (default: disabled)
 # ---------------------------------------------------------------------------

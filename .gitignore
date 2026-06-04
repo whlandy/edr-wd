@@ -1,0 +1,18 @@
+# EDR-WD
+# Local config (contains real passwords / credentials)
+config/targets.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+test_case/__pycache__/
+.pytest_cache/
