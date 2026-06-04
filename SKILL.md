@@ -106,9 +106,9 @@ python -m agent.target_config --validate
       "description": "Development Windows VM",
 
       "ssh": {
-        "host": "170.170.11.26",
+        "host": "<TARGET_IP>",
         "port": 22,
-        "user": "admin",
+        "user": "<TARGET_USER>",
         "auth": {
           "type": "password",
           "password_env": "EDR_WD_WIN_DEV_PASSWORD"
@@ -125,7 +125,7 @@ python -m agent.target_config --validate
 
       "windows": {
         "python_path": "C:\\Program Files\\Python313\\python.exe",
-        "target_root": "C:\\Users\\admin\\Desktop\\edr-wd\\target",
+        "target_root": "C:\\Users\\<TARGET_USER>\\Desktop\\edr-wd\\target",
         "task_name": "StartEDRMCP",
         "run_with_highest_privileges": true
       }
@@ -139,7 +139,7 @@ python -m agent.target_config --validate
 Set the password before running:
 
 ```bash
-export EDR_WD_WIN_DEV_PASSWORD='whl@123'
+export EDR_WD_WIN_DEV_PASSWORD='<YOUR_PASSWORD>'
 ```
 
 Or per-target env var (add more targets as needed):
@@ -157,7 +157,7 @@ export EDR_WD_WIN_PROD_PASSWORD='ProdPass!'
 ```bash
 python -m agent.target_config --init
 # then edit config/targets.local.json
-export EDR_WD_WIN_DEV_PASSWORD='whl@123'
+export EDR_WD_WIN_DEV_PASSWORD='<YOUR_PASSWORD>'
 ```
 
 ### 2. Validate
@@ -280,12 +280,12 @@ Stops only the process listening on port 8765. Never kills all Python processes.
 - Protocol version: `2025-03-26`
 
 **Connection priority:**
-1. Direct: `http://170.170.11.26:8765/mcp` (preferred)
+1. Direct: `http://<TARGET_IP>:8765/mcp` (preferred)
 2. Tunnel fallback: `http://localhost:18765/mcp` (if direct is unreachable)
 
 **`mcp.host` vs `ssh.host`:**
 - `mcp.host` (e.g. `0.0.0.0`) is the **server bind address** — what the server listens on
-- `ssh.host` (e.g. `170.170.11.26`) is the **agent connection address** — how the agent reaches the server
+- `ssh.host` (e.g. `<TARGET_IP>`) is the **agent connection address** — how the agent reaches the server
 - In `direct` mode, the agent uses `ssh.host` to build the MCP URL, not `mcp.host`
 
 ---
@@ -349,8 +349,8 @@ TCP reachability probe — **does not require SSH auth**.
     "mcp_responding": None,   # delegated to mcp_manager
     "ready": True,
     "ready_level": "tcp_only", # MCP initialize is mcp_manager's job
-    "mcp_url": "http://170.170.11.26:8765/mcp",
-    "check_host": "170.170.11.26",
+    "mcp_url": "http://<TARGET_IP>:8765/mcp",
+    "check_host": "<TARGET_IP>",
     "check_port": 8765
   }
 }
@@ -371,7 +371,7 @@ TCP check; only calls `get_resolved_target()` (requires auth) if server needs to
     "port": 8765,
     "ready_level": "tcp_only",     # mcp_ready is from mcp_manager.initialize()
     "note": "MCP initialize handled by mcp_manager",
-    "mcp_url": "http://170.170.11.26:8765/mcp"
+    "mcp_url": "http://<TARGET_IP>:8765/mcp"
   }
 }
 ```
@@ -396,7 +396,7 @@ only needs `TargetConfig.build_mcp_url(name)` which requires no SSH credentials.
   "stage": "mcp_initialize",
   "data": {
     "session_id": "62ee9cf7f72046a1...",
-    "mcp_url": "http://170.170.11.26:8765/mcp",
+    "mcp_url": "http://<TARGET_IP>:8765/mcp",
     "protocol_version": "2025-03-26",
     "ready_level": "mcp_ready"
   }
@@ -446,7 +446,7 @@ client = McpClient(mcp_init_result=init_result)
 client = McpClient(target="win-dev")
 
 # Low-level debug only:
-client = McpClient(base_url="http://170.170.11.26:8765/mcp")
+client = McpClient(base_url="http://<TARGET_IP>:8765/mcp")
 ```
 
 Priority: `mcp_init_result` > `target` > `base_url`. Mixing `base_url` with
@@ -541,15 +541,15 @@ Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
 2. Copy the public key to the target (step 1: upload, step 2: append):
    ```powershell
    # Step 1: upload the public key to a temp location on the target
-   scp -P 22 $env:USERPROFILE\.ssh\id_edr_wd.pub admin@<target-ip>:C:\Users\admin\id_edr_wd.pub
+   scp -P 22 $env:USERPROFILE\.ssh\id_edr_wd.pub <TARGET_USER>@<target-ip>:C:\Users\<TARGET_USER>\id_edr_wd.pub
 
    # Step 2: append it to authorized_keys via PowerShell on the target
-   ssh -p 22 admin@<target-ip> `
+   ssh -p 22 <TARGET_USER>@<target-ip> `
      'powershell -NoProfile -Command "New-Item -ItemType Directory -Force $env:USERPROFILE\.ssh; Get-Content $env:USERPROFILE\id_edr_wd.pub | Add-Content $env:USERPROFILE\.ssh\authorized_keys"'
    ```
 3. Verify the key works:
    ```powershell
-   ssh -i $env:USERPROFILE\.ssh\id_edr_wd -p 22 admin@<target-ip> hostname
+   ssh -i $env:USERPROFILE\.ssh\id_edr_wd -p 22 <TARGET_USER>@<target-ip> hostname
    ```
 4. Set `auth.type=key` and `auth.key_path="C:\Users\<username>\.ssh\id_edr_wd"` in `targets.local.json`.
 
@@ -598,7 +598,7 @@ Note: use `python` (or `py`) on Windows, not `python3`.
 
 ### "MCP server not reachable"
 
-1. Check port: `telnet 170.170.11.26 8765`
+1. Check port: `telnet <TARGET_IP> 8765`
 2. Check server process on Windows:
    ```powershell
    Get-NetTCPConnection -LocalPort 8765 -State Listen
@@ -664,8 +664,8 @@ Get-Process python | Stop-Process -Force
 **Do NOT use root path** — FastMCP 3.x uses `/mcp` endpoint:
 
 ```
-http://170.170.11.26:8765/     ✗
-http://170.170.11.26:8765/mcp  ✓
+http://<TARGET_IP>:8765/     ✗
+http://<TARGET_IP>:8765/mcp  ✓
 ```
 
 ---
