@@ -1,67 +1,104 @@
-#!/usr/bin/env -pwsh
-# start_server.ps1 �?Start EDR-WD MCP server in the interactive desktop
-#
-# This script runs inside the user's interactive session when triggered by
-# the StartEDRMCP scheduled task.  DO NOT run this script directly over SSH.
-#
-# Behaviour:
-#   1. Change to the target/ directory.
-#   2. Create logs/ and screenshots/ if absent.
-#   3. Check if port 8765 is already listening; exit if so.
-#   4. Start python -m server --http --port 8765.
-#   5. Redirect stdout/stderr to logs/edr-wd.{timestamp}.log.
+$ErrorActionPreference = 'Continue'
 
-$ErrorActionPreference = 'Stop'
+function Get-TargetRoot {
+    # $PSScriptRoot = target/scripts/
+    # Target root = parent of parent
+    $scriptsDir = $PSScriptRoot
+    $targetRoot = Split-Path $scriptsDir -Parent
+    return $targetRoot
+}
 
-$Port         = 8765
-$TargetDir   = 'D:\skill\edr-wd\target'
-$LogDir      = Join-Path $TargetDir 'scripts\logs'
-$Screenshots = Join-Path $TargetDir 'scripts\screenshots'
-$LogFile     = Join-Path $LogDir ('edr-wd.' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
-$PythonExe   = 'C:\Program Files\Python313\python.exe'
+function Get-PythonPath {
+    param([string]$TargetRoot)
+    $configPath = Join-Path $TargetRoot 'config.json'
+    if (Test-Path $configPath) {
+        $config = Get-Content $configPath -Raw | ConvertFrom-Json
+        $configured = $config.server.python_path
+        if ($configured -and (Test-Path $configured)) {
+            return $configured
+        }
+    }
+    $envPath = $env:EDR_WD_PYTHON
+    if ($envPath -and (Test-Path $envPath)) {
+        return $envPath
+    }
+    $default = 'C:\Program Files\Python313\python.exe'
+    if (Test-Path $default) {
+        return $default
+    }
+    $found = Get-Command python -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found) {
+        return $found.Source
+    }
+    throw "Python not found. Set python_path in config.json or EDR_WD_PYTHON env var."
+}
 
-# ── Bootstrap ────────────────────────────────────────────────────────────────
-New-Item -ItemType Directory -Force -Path $LogDir    | Out-Null
-New-Item -ItemType Directory -Force -Path $Screenshots | Out-Null
+function Write-StartLog {
+    param([string]$Message, [string]$TargetRoot)
+    $logDir = Join-Path $TargetRoot 'logs'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $logFile = Join-Path $logDir 'start.log'
+    $entry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $Message"
+    Add-Content -Path $logFile -Value $entry
+}
 
-# ── Port check ────────────────────────────────────────────────────────────────
-$listening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-             Select-Object -First 1
+$TargetRoot = Get-TargetRoot
+$ServerDir = $TargetRoot
+$LogDir = Join-Path $TargetRoot 'logs'
+$ScreenshotsDir = Join-Path $TargetRoot 'screenshots'
+$Port = 8765
 
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+New-Item -ItemType Directory -Force -Path $ScreenshotsDir | Out-Null
+
+$listening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($listening) {
-    $pid = $listening.OwningProcess
-    Write-Host "[SKIP] Port $Port already listening (PID $pid). Server already running."
+    Write-Host "[SKIP] Port $Port already listening (PID $($listening.OwningProcess))"
+    Write-StartLog "SKIP: Port $Port already listening (PID $($listening.OwningProcess))" $TargetRoot
     exit 0
 }
 
-# ── Start ─────────────────────────────────────────────────────────────────────
-Write-Host "[INFO] Starting EDR-WD MCP server on port $Port..."
-Write-Host "[INFO] Log  : $LogFile"
-
-$env:EDR_WD_ENABLE_POWERSHELL = '1'
-
-$proc = Start-Process `
-    -FilePath $PythonExe `
-    -ArgumentList '-m server --http --host 0.0.0.0 --port 8765' `
-    -WorkingDirectory $TargetDir `
-    -PassThru `
-    -RedirectStandardOutput $LogFile `
-    -RedirectStandardError ($LogFile + '.stderr')
-
-Start-Sleep -Seconds 3
-
-if ($proc.HasExited) {
-    Write-Host '[ERROR] Server process exited immediately.' -ForegroundColor Red
-    if (Test-Path $LogFile) {
-        Get-Content $LogFile -Tail 20 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkYellow }
-    }
-    if (Test-Path ($LogFile + '.stderr')) {
-        Write-Host '[STDERR]' -ForegroundColor Red
-        Get-Content ($LogFile + '.stderr') -Tail 10 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkRed }
-    }
+try {
+    $PythonExe = Get-PythonPath $TargetRoot
+} catch {
+    Write-Host "[ERROR] $($_)"
+    Write-StartLog "ERROR: $_" $TargetRoot
     exit 1
 }
 
-Write-Host "[OK] Server started (PID $($proc.Id))"
-Write-Host "[INFO] Stdout/stderr �?$LogFile"
-exit 0
+$env:EDR_WD_ENABLE_PYWINAUTO = '1'
+$env:EDR_WD_ENABLE_POWERSHELL = '1'
+$env:EDR_WD_TARGET_ROOT = $TargetRoot
+
+$serverLog = Join-Path $LogDir ('server.' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
+$startLog = Join-Path $LogDir 'start.log'
+
+Write-StartLog "Python=$PythonExe TargetRoot=$TargetRoot" $TargetRoot
+Write-StartLog "Command: $PythonExe server.py --http --host 0.0.0.0 --port $Port" $TargetRoot
+
+$proc = Start-Process -FilePath $PythonExe `
+    -ArgumentList 'server.py', '--http', '--host', '0.0.0.0', '--port', $Port `
+    -WorkingDirectory $ServerDir `
+    -PassThru `
+    -RedirectStandardOutput $serverLog `
+    -RedirectStandardError ($serverLog + '.stderr') `
+    -WindowStyle Hidden
+
+Start-Sleep -Seconds 5
+
+if ($proc.HasExited) {
+    Write-Host "[ERROR] Server exited immediately with code $($proc.ExitCode)"
+    Write-StartLog "ERROR: Process exited with code $($proc.ExitCode)" $TargetRoot
+    exit 1
+}
+
+$stillListening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($stillListening) {
+    Write-Host "[OK] Server PID=$($proc.Id) listening on 0.0.0.0:$Port"
+    Write-StartLog "OK: PID=$($proc.Id) listening on 0.0.0.0:$Port" $TargetRoot
+    exit 0
+} else {
+    Write-Host "[ERROR] Server PID=$($proc.Id) started but port $Port not listening"
+    Write-StartLog "ERROR: PID=$($proc.Id) but port not listening. Check $serverLog" $TargetRoot
+    exit 1
+}
