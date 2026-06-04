@@ -1,0 +1,78 @@
+{
+  "_comment": "EDR-WD 多目标配置示例",
+  "_comment2": "复制为 targets.local.json 并填入真实值，不要提交 targets.local.json 到仓库",
+
+  "default_target": "win-dev",
+
+  "targets": {
+    "win-dev": {
+      "_comment": "示例：password auth — 推荐 Linux/Mac agent 使用，Windows agent 不支持 sshpass",
+      "description": "开发环境 Windows 虚拟机（password auth）",
+
+      "platform": "windows",
+
+      "ssh": {
+        "host": "<target-ip>",
+        "port": 22,
+        "user": "admin",
+        "auth": {
+          "type": "password",
+          "password_env": "EDR_WD_WIN_DEV_PASSWORD"
+        }
+      },
+
+      "mcp": {
+        "host": "0.0.0.0",
+        "port": 8765,
+        "path": "/mcp",
+        "connect_mode": "direct",
+        "tunnel": {
+          "enabled": false,
+          "local_port": 18765
+        }
+      },
+
+      "windows": {
+        "python_path": "C:\\Program Files\\Python313\\python.exe",
+        "target_root": "C:\\Users\\admin\\Desktop\\edr-wd\\target",
+        "task_name": "StartEDRMCP",
+        "run_with_highest_privileges": true
+      }
+    },
+
+    "win-dev-key": {
+      "_comment": "示例：key auth — Windows agent 必须使用 key auth，sshpass 不可用",
+      "description": "开发环境 Windows 虚拟机（key auth，适用于 Windows/Linux/Mac agent）",
+
+      "platform": "windows",
+
+      "ssh": {
+        "host": "<target-ip>",
+        "port": 22,
+        "user": "admin",
+        "auth": {
+          "type": "key",
+          "key_path": "C:\\Users\\<username>\\.ssh\\id_edr_wd"
+        }
+      },
+
+      "mcp": {
+        "host": "0.0.0.0",
+        "port": 8765,
+        "path": "/mcp",
+        "connect_mode": "direct",
+        "tunnel": {
+          "enabled": false,
+          "local_port": 18765
+        }
+      },
+
+      "windows": {
+        "python_path": "C:\\Program Files\\Python313\\python.exe",
+        "target_root": "C:\\Users\\admin\\Desktop\\edr-wd\\target",
+        "task_name": "StartEDRMCP",
+        "run_with_highest_privileges": true
+      }
+    }
+  }
+}

@@ -1,355 +1,695 @@
 ---
 name: edr-wd
 description: |
-  Windows EDR (HiSecEndpoint) GUI 自动化 MCP Server。通过 pywinauto 枚举控件树，
-  用 automation_id 或 text 作为唯一标识，完成点击、输入、下拉框、截图等操作。
+  Windows EDR (HiSecEndpoint) GUI automation via MCP. Controls HiSecEndpoint
+  using pywinauto/UIA — clicks, tree dumps, typing, screenshots, and more.
 
-  触发场景：
-  (1) 需要自动化 Windows 桌面应用（HiSecEndpoint 等）
-  (2) 需要读取窗口控件树并选择控件操作
-  (3) 通过 MCP over SSH tunnel 远程控制 Windows GUI
-  (4) 任意 MCP Client（OpenClaw / Hermes / Codex / Claude Desktop / 自己写的）跨平台 GUI 自动化
+  Trigger scenarios:
+  (1) Automating Windows desktop apps (HiSecEndpoint, etc.)
+  (2) Reading window control trees and operating on controls
+  (3) Remote control of Windows GUI via MCP (direct or SSH tunnel)
+  (4) Any MCP client (Hermes / Codex / Claude Desktop / custom)
+      cross-platform GUI automation
 
-  适用平台：
-  - Windows (MCP Server 部署端)
-  - Mac / Linux (任意 MCP Client 通过 SSH tunnel 调用)
+  Platforms: Windows (MCP Server side), Mac/Linux (MCP Client side)
 ---
 
-# EDR-WD — Windows EDR GUI 自动化
+# EDR-WD — Windows EDR GUI Automation
 
-通用 MCP Server，任何支持 MCP streamable HTTP 的 agent 都能连接。
-
-## 架构
+## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  Any MCP Client / Agent                                  │
-│  (OpenClaw / Hermes / Codex / Claude Desktop / 其他)    │
-└─────────────────────┬────────────────────────────────────┘
-                      │  MCP streamable-http
-                      ▼
-            http://127.0.0.1:18765/mcp
-                      │
-                      │  SSH LocalForward
-                      │  (Mac :18765 → Windows :8765)
-                      ▼
-┌──────────────────────────────────────────────────────────┐
-│  Windows EDR MCP Server (fastmcp + pywinauto)            │
-│  127.0.0.1:8765                                          │
-│                                                          │
-│  GUI: connect / dump_tree / click / type_text /          │
-│       select / get_text / screenshot                     │
-│  PS:  run_powershell / start_powershell /                │
-│       get_job / cancel_job                              │
-└─────────────────────┬────────────────────────────────────┘
-                      │  pywinauto UIA
-                      ▼
-        HiSecEndpoint GUI (华为智能终端安全系统)
+┌──────────────────────────────────────────────────────────────────┐
+│  Agent side (Mac / Linux)                                        │
+│                                                                  │
+│  ┌──────────────────┐     ┌──────────────────────────────────┐ │
+│  │  hermes / openclaw │────▶│  target_config.py                │ │
+│  │                    │     │  build_mcp_url(name)             │ │
+│  │  skill / tools    │────▶│  target_manager.py               │ │
+│  └──────────────────┘     │  mcp_manager.py                   │ │
+│                            │  ssh_runner.py                     │ │
+│                            └──────────────┬────────────────────┘ │
+│                                           │                     │
+│  ┌──────────────────┐     ┌──────────────▼────────────────────┐ │
+│  │  test_case/       │────▶│  test runner (run_tests.py)      │ │
+│  │  conftest.py      │     │  McpClient(mcp_init_result=...)  │ │
+│  └──────────────────┘     └───────────────────────────────────┘ │
+│                                           │                      │
+│                                           │ SSH + schtasks        │
+│  ┌──────────────────┐                   ▼                      │
+│  │  SSH tunnel (opt) │    ┌──────────────────────────────┐       │
+│  │  :18765 → :8765   │───▶│  Windows target            │       │
+│  └──────────────────┘    │  0.0.0.0:8765              │       │
+└───────────────────────────│──────────────┬──────────────┘───────┘
+                            │              │ Streamable HTTP /mcp
+                            │              ▼
+                            │  ┌──────────────────────────────┐  │
+                            │  │  target/                    │  │
+                            │  │    server.py  (fastmcp 3.x) │  │
+                            │  │    pywinauto_client.py     │  │
+                            │  └──────────────────────────────┘  │
+                            │              │ pywinauto UIA        │
+                            ▼              ▼
+                  HiSecEndpoint GUI (华为)
 ```
 
-**edr-wd 不属于任何特定 Agent**。所有 MCP Client 都是等价的连接方式。
+**Key principle:** The agent never starts Python over SSH. Instead it triggers
+`schtasks /Run /TN StartEDRMCP` which launches `start_server.ps1` in the
+logged-on interactive desktop session.
 
-## Client Setup
+**Two-layer ready model:**
+- `target_manager.ensure_server_running()` → `ready_level: "tcp_only"` (port open)
+- `mcp_manager.initialize()` → `ready_level: "mcp_ready"` (MCP session established)
 
-MCP endpoint:
+---
+
+## Configuration — `config/targets.local.json`
+
+All target definitions live in `config/targets.local.json`. The example template
+`config/targets.example.json` is committed to the repo; copy it to
+`targets.local.json` and fill in real values — **never commit `targets.local.json`**.
 
 ```
-http://127.0.0.1:18765/mcp
-Transport: streamable-http
+config/targets.example.json   ← repo template (no real passwords)
+config/targets.local.json     ← local config (gitignored)
 ```
 
-配置你的 MCP client 指向这个 endpoint。以下是任选示例：
+### Legacy config — DEPRECATED
 
-**Generic MCP client:**
-```yaml
-url: http://127.0.0.1:18765/mcp
-transport: streamable-http
-```
+`config/test_machines.json` is deprecated. All configuration now flows through
+`config/targets.local.json` via `TargetConfig`. Do not add new entries to
+`test_machines.json`.
 
-**OpenClaw:**
+### Generate skeleton
+
 ```bash
-openclaw mcp set edr-wd '{"url":"http://127.0.0.1:18765/mcp","transport":"streamable-http"}'
+# First time — generate config from template:
+python -m agent.target_config --init
+# Created: /Users/edr-test/edr-wd/config/targets.local.json
+# Edit the file and fill in ssh.host, ssh.user, windows.python_path, etc.
+
+# List targets:
+python -m agent.target_config --list
+
+# Validate:
+python -m agent.target_config --validate
 ```
 
-**Claude Desktop (macOS):**
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+### Config structure
+
 ```json
 {
-  "mcpServers": {
-    "edr-wd": {
-      "url": "http://127.0.0.1:18765/mcp",
-      "transport": "streamable-http"
+  "default_target": "win-dev",
+
+  "targets": {
+    "win-dev": {
+      "description": "Development Windows VM",
+
+      "ssh": {
+        "host": "170.170.11.26",
+        "port": 22,
+        "user": "admin",
+        "auth": {
+          "type": "password",
+          "password_env": "EDR_WD_WIN_DEV_PASSWORD"
+        }
+      },
+
+      "mcp": {
+        "host": "0.0.0.0",
+        "port": 8765,
+        "path": "/mcp",
+        "connect_mode": "direct",
+        "tunnel": { "enabled": false, "local_port": 18765 }
+      },
+
+      "windows": {
+        "python_path": "C:\\Program Files\\Python313\\python.exe",
+        "target_root": "C:\\Users\\admin\\Desktop\\edr-wd\\target",
+        "task_name": "StartEDRMCP",
+        "run_with_highest_privileges": true
+      }
     }
   }
 }
 ```
 
-**自己写的 MCP client:**
-```python
-# standard MCP HTTP client connecting to the same endpoint
-```
+### Auth: password via environment variable
 
-Restart your MCP client if it does not hot-reload server configs.
-
-## 部署步骤
-
-### Step 1: Windows 部署
-
-```powershell
-git clone https://github.com/whlandy/edr-wd.git
-cd edr-wd
-
-# 一键 bootstrap + 启动服务；从 SSH 等非交互会话运行时会自动投递到已登录的交互桌面
-.\deploy.ps1 -Action start -BindHost 127.0.0.1 -Port 8765
-```
-
-### 推荐工作流
-
-1. 让 Windows 目标机保持一个已登录的本地或 RDP 桌面会话。
-2. 在 Mac/Linux agent 侧运行 `bash agent/edr-wd.sh up`；它会通过 SSH 远程执行 `deploy.ps1 -Action start`，并自动拉起 tunnel。
-3. `deploy.ps1 -Action start` 会先做 bootstrap，再启动 MCP server 并记录 PID。
-   - 如果命令已经在 Windows 交互桌面里运行，server 直接作为后台进程启动。
-   - 如果命令来自 SSH / 非交互会话，server 会通过 Windows 计划任务投递到当前已登录用户的交互桌面中启动。
-4. 用 `deploy.ps1 -Action status` 查看当前状态，用 `deploy.ps1 -Action stop` 关闭服务。
-5. 如果后续连接 EDR 时窗口没有激活，优先用 `connect(..., auto_activate=True)`。
-6. 如果只是单独把 EDR 窗口拉起来，再显式调用 `activate_edr()`。
-
-Agent 侧正常 workflow:
+Set the password before running:
 
 ```bash
-bash agent/edr-wd.sh up
+export EDR_WD_WIN_DEV_PASSWORD='whl@123'
 ```
 
-Windows 侧也仍支持直接运行:
-
-```powershell
-cd target
-.\deploy.ps1 -Action start -BindHost 127.0.0.1 -Port 8765
-```
-
-**单独启动 server：**
-```powershell
-$env:EDR_WD_ENABLE_POWERSHELL = "1"
-python -m edr_wd.server --http --host 127.0.0.1 --port 8765
-```
-
-**重要：GUI 自动化必须运行在 Windows 已登录的交互桌面会话中。**
-`deploy.ps1 -Action start -StartMode auto` 会自动处理 SSH / 非交互会话：它不会把 pywinauto server 留在 SSH 后台，而是用交互式计划任务投递到当前已登录用户的桌面。不要改用 `Start-Job`、Windows service、纯 SSH 后台进程来启动 pywinauto server；这些会话通常没有 GUI desktop context，`dump_tree` 会返回空树或找不到窗口。
-
-如果没有任何用户登录 Windows 桌面，计划任务无法创建 GUI desktop context；先让目标机保持一次登录会话，然后 agent 侧就能反复远程拉起/停止，无需在 RDP 里手动执行命令。
-
-也可以显式指定启动模式：
-
-```powershell
-.\deploy.ps1 -Action start -StartMode auto
-.\deploy.ps1 -Action start -StartMode scheduled-task
-.\deploy.ps1 -Action start -StartMode process
-```
-
-然后在 MCP 客户端侧使用 `connect(title_re=".*HiSec.*", auto_activate=True)` 作为默认入口。这样当 EDR 没有激活时，server 会自动尝试 `activate_edr()` 再重试一次。
-
-### 关闭和检查
-
-```powershell
-.\deploy.ps1 -Action status
-.\deploy.ps1 -Action stop
-```
-
-### 文件传输
-
-Windows 侧启用 SSH Server 后，agent 可以直接 `scp` 文件到固定目录，例如：
+Or per-target env var (add more targets as needed):
 
 ```bash
-scp ./payload.zip admin@WINDOWS_HOST:C:\path\to\edr-wd\target\incoming\
+export EDR_WD_WIN_PROD_PASSWORD='ProdPass!'
 ```
 
-推荐用统一入口脚本来做这些操作：
+---
+
+## Quick Start
+
+### 1. Generate config
 
 ```bash
-bash agent/edr-wd.sh up
-bash agent/edr-wd.sh status
-bash agent/edr-wd.sh push ./payload.zip
-bash agent/edr-wd.sh smoke
-bash agent/edr-wd.sh smoke --gui
-bash agent/edr-wd.sh down
+python -m agent.target_config --init
+# then edit config/targets.local.json
+export EDR_WD_WIN_DEV_PASSWORD='whl@123'
 ```
 
-`agent/edr-wd.sh` 会负责：
-- 启动 Windows 侧 `deploy.ps1`
-- 拉起或关闭本地 SSH tunnel
-- 复制文件到 target
-- 跑 MCP smoke test
-
-### Smoke test
-
-Windows 目标机上的 live server 可以用这个脚本做回归：
-
-```powershell
-python target\tests\smoke_mcp_client.py --base-url http://127.0.0.1:8765/mcp
-python target\tests\smoke_mcp_client.py --base-url http://127.0.0.1:8765/mcp --gui
-```
-
-`--gui` 模式会额外验证 `connect(..., auto_activate=True)` 和 `dump_tree`，更适合做最终回归。
-
-如需开放直连 MCP 端口，而不是 SSH tunnel，再显式运行：
-```powershell
-.\target\setup-fw.ps1 -ExposeMcp
-python -m edr_wd.server --http --host 0.0.0.0 --port 8765
-```
-
-### Step 2: Mac/Linux 配置 SSH tunnel
+### 2. Validate
 
 ```bash
-git clone https://github.com/whlandy/edr-wd.git
-cd edr-wd
-bash agent/tunnel.sh start
+python -m agent.target_config --validate
 ```
 
-**tunnel 命令：**
+### 3. One-time task installation (on target)
+
 ```bash
-bash agent/tunnel.sh start   # 启动
-bash agent/tunnel.sh status   # 查看状态
-bash agent/tunnel.sh stop     # 停止
+python -c "from agent.target_manager import TargetManager; print(TargetManager().install_target_task())"
 ```
 
-**参数化（环境变量）：**
+### 4. Run tests
+
 ```bash
-EDR_WD_HOST=170.170.11.26 \
-EDR_WD_USER=admin \
-EDR_WD_LOCAL_PORT=18765 \
-EDR_WD_REMOTE_PORT=8765 \
-bash agent/tunnel.sh start
+cd test_case && python3 run_tests.py --target win-dev -v
+# or via environment variable:
+EDR_WD_TARGET=win-dev python3 run_tests.py -v
 ```
 
-## MCP 协议细节（FastMCP 3.3.1）
+---
 
-**Endpoint**: `POST /mcp`（根路径 `/` 返回 404，这是设计）
-
-**Session 建立流程**：
-1. `GET /mcp` → 返回 400 但 header 中含 `Mcp-Session-Id`
-2. `POST initialize`（带 session id）→ 成功后 session 激活
-3. `POST tools/list` / `tools/call`
-
-**必须 header**：
-```
-Accept: application/json, text/event-stream
-Content-Type: application/json
-Mcp-Session-Id: <从GET响应header获取的值>   # 注意大写 M
-```
-
-**protocolVersion 必须是 `2025-11-25`**
-
-```python
-import urllib.request, urllib.error, json
-
-base_url = "http://127.0.0.1:18765/mcp"
-session_id = None
-
-def do_get():
-    global session_id
-    req = urllib.request.Request(base_url, method="GET",
-        headers={"Accept": "text/event-stream"})
-    try:
-        resp = urllib.request.urlopen(req, timeout=5)
-        session_id = resp.headers.get("Mcp-Session-Id")
-    except urllib.error.HTTPError as e:
-        session_id = e.headers.get("Mcp-Session-Id")
-
-def do_rpc(method, params):
-    global session_id
-    payload = json.dumps({
-        "jsonrpc": "2.0", "id": 1, "method": method, "params": params
-    }).encode()
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-        "Mcp-Session-Id": session_id
-    }
-    req = urllib.request.Request(base_url, data=payload, headers=headers, method="POST")
-    resp = urllib.request.urlopen(req, timeout=15)
-    return resp.read().decode()
-
-do_get()          # 建立 session
-do_rpc("initialize", {
-    "protocolVersion": "2025-11-25",
-    "capabilities": {},
-    "clientInfo": {"name": "test", "version": "1.0"}
-})
-result = do_rpc("tools/call", {
-    "name": "run_powershell",
-    "arguments": {"command": "Get-Date", "timeout": 10}
-})
-```
-
-## 工具列表
-
-| 工具 | 说明 | 关键参数 |
-|------|------|---------|
-| `connect` | 连接 Windows 应用 | `title_re`、`process_name`、`pid` |
-| `dump_tree` | 导出控件树 | `window_title_re`（可选）、`max_depth`（默认15） |
-| `click` | 点击控件 | `automation_id`、`control_id`、`text`、`class_name` |
-| `click_target` | 点击控件矩形中心 | `automation_id`、`text`、`class_name`、`x_offset`、`y_offset` |
-| `click_at` | 点击绝对屏幕坐标 | `x`、`y` |
-| `type_text` | 向输入框写入文本 | `control_id`、`string` |
-| `select` | 下拉框选择 | `control_id`、`item`（文字）或 `index`（序号） |
-| `get_text` | 读取控件文本 | `control_id`、`text`、`class_name` |
-| `screenshot` | 截图 | `path`（可选） |
-| `run_powershell` | 同步执行 PowerShell | `command`、`timeout`（≤30s） |
-| `start_powershell` | 启动异步 PowerShell job | `command`、`timeout`（≤300s） |
-| `get_job` | 轮询 job 状态 | `job_id` |
-| `cancel_job` | 取消 job | `job_id` |
-
-## 控件标识优先级
-
-1. **`automation_id`** — 最可靠，Qt 控件的 `AutomationId` 全局唯一（`backend='uia'` 才有）
-2. **`text`** — 控件显示的文字（支持正则），最常用
-3. **`control_id`** — Windows 原生控件有效，Qt 控件通常为 null
-4. **`class_name`** — Windows 窗口类名
-
-**Qt 窗口推荐用 `text` 或 `automation_id`**，最稳定。
-
-## HiSecEndpoint 典型操作
-
-```
-1. connect(title_re=".*HiSecEndpoint.*")
-2. dump_tree()  → 找到"日志中心" tab 的 control_id
-3. click(control_id=<日志中心tab>)  → 切换到日志 tab
-4. dump_tree()  → 找到"升级日志" radio button
-5. click(control_id=<升级日志radio>)  → 选中级日志
-6. dump_tree()  → 找到"导出"/"刷新"按钮
-7. click(control_id=<导出按钮>)
-```
-
-## 文件结构
+## Directory Structure
 
 ```
 edr-wd/
-├── SKILL.md                  ← 本文档
-├── pyproject.toml
-├── target/                   ← Windows 目标机器（MCP Server + EDR 软件）
-│   ├── deploy.ps1            ← Windows 一键部署脚本
-│   ├── edr_wd/
-│   │   ├── server.py          ← fastmcp HTTP Server
-│   │   └── pywinauto_client.py
-│   └── tests/
-└── agent/                    ← Mac/Linux 控制端脚本
-    ├── tunnel.sh              ← SSH tunnel 管理（参数化，唯一必需）
-    └── setup-mac.sh           ← SSH config + tunnel setup
+├── SKILL.md
+│
+├── agent/                    # Agent-side (runs on Mac/Linux)
+│   ├── target_config.py     # Config loader: load, init, validate, build_mcp_url
+│   ├── ssh_runner.py        # Pure SSH/SCP executor (no config knowledge)
+│   ├── target_manager.py    # Multi-target lifecycle manager (tcp_only)
+│   └── mcp_manager.py       # MCP client (Streamable HTTP, mcp_ready)
+│
+├── target/                    # Target-side (runs on Windows)
+│   ├── server.py            # MCP server entry (fastmcp 3.x + pywinauto)
+│   ├── pywinauto_client.py  # WindowsGUI class
+│   ├── config.json          # Server local config (host/port/backend only)
+│   │
+│   ├── scripts/
+│   │   ├── install_task.ps1   # Register StartEDRMCP scheduled task
+│   │   ├── start_server.ps1  # Start MCP server (with logs/, dup guard)
+│   │   ├── stop_server.ps1  # Stop MCP server (port 8765 only)
+│   │   ├── restart_server.ps1  # Restart
+│   │   └── health.ps1         # Health check (port + MCP initialize)
+│   │
+│   ├── logs/                # server.stdout/stderr logs
+│   │   ├── start.log        # startup metadata
+│   │   └── server.*.log     # server stdout/stderr
+│   │
+│   └── screenshots/         # Screenshot output
+│
+├── config/
+│   ├── targets.example.json # Repo template (no real passwords)
+│   ├── targets.local.json  # Local config (gitignored, generated by --init)
+│   └── test_machines.json  # DEPRECATED — do not use for new targets
+│
+└── test_case/
+    ├── run_tests.py         # Test runner (--target supported)
+    └── conftest.py          # McpClient, fixtures, target selection
 ```
 
-## 已知限制
+---
 
-- 需要 Windows 管理员权限（某些控件操作）
-- 部分自定义控件（非标准 Win32 控件）可能无法枚举
-- SSH tunnel 依赖 Windows 开启 SSH Server 服务
+## Target Scripts
 
-## 调试
+All scripts use **dynamic path resolution** via `$PSScriptRoot` — no hardcoded
+`D:\skill\...` paths. Target root is always `scripts/`'s parent directory.
+
+### `install_task.ps1`
+
+Registers `StartEDRMCP` in Windows Task Scheduler.
+
+```
+Task: StartEDRMCP
+  Trigger:  Manual (schtasks /Run /TN StartEDRMCP /I)
+  Action:   powershell.exe -NoProfile -ExecutionPolicy Bypass
+            -File "<target>\scripts\start_server.ps1"
+  Start in: <target>
+  User:     Only when user is logged on (interactive session)
+  Privilege: Highest
+```
+
+### `start_server.ps1`
+
+Launches the MCP server inside the logged-on user's interactive session.
+
+1. Dynamically resolve target root from `$PSScriptRoot`
+2. Load `config.json` for Python path and port
+3. Check port 8765 — skip if already listening (no duplicate start)
+4. Set required env vars: `EDR_WD_ENABLE_PYWINAUTO=1`
+5. Start `python server.py --http --host 0.0.0.0 --port 8765`
+6. Log to `logs/start.log` (PID, timestamp) + `logs/server.*.log` (stdout/stderr)
+
+### `stop_server.ps1`
+
+Stops only the process listening on port 8765. Never kills all Python processes.
+
+### `health.ps1`
+
+```
+1. Port 8765 listening check
+2. HTTP POST /mcp MCP initialize probe
+   → must return Mcp-Session-Id header
+   → prints [OK] or [FAIL]
+```
+
+---
+
+## MCP Endpoint & Transport
+
+**Endpoint:** `http://<host>:<port>/mcp` (NOT root `/`)
+
+**Transport:** FastMCP 3.x Streamable HTTP
+- Method: `POST` (all requests)
+- Headers: `Content-Type: application/json`, `Accept: application/json, text/event-stream`
+- Session: `Mcp-Session-Id` header returned by server, sent back by client
+- Protocol version: `2025-03-26`
+
+**Connection priority:**
+1. Direct: `http://170.170.11.26:8765/mcp` (preferred)
+2. Tunnel fallback: `http://localhost:18765/mcp` (if direct is unreachable)
+
+**`mcp.host` vs `ssh.host`:**
+- `mcp.host` (e.g. `0.0.0.0`) is the **server bind address** — what the server listens on
+- `ssh.host` (e.g. `170.170.11.26`) is the **agent connection address** — how the agent reaches the server
+- In `direct` mode, the agent uses `ssh.host` to build the MCP URL, not `mcp.host`
+
+---
+
+## MCP Tools
+
+### GUI Tools
+
+| Tool | Description |
+|------|-------------|
+| `connect` | Connect to a window by title regex, process name, or PID |
+| `dump_tree` | Dump the full control tree of the connected window |
+| `click` | Click by control_id, text, class_name, automation_id, etc. |
+| `click_target` | Click matched control centre (uses mouse.click coords) |
+| `click_at` | Click absolute screen coordinates (x, y) |
+| `click_window_at` | Click window-relative coordinates |
+| `type_text` | Type text into an edit control |
+| `select` | Select a combo box item by text or index |
+| `get_text` | Read text from a control |
+| `screenshot` | Take a screenshot (save to `screenshots/` or base64) |
+| `restore_edr` | Restore the EDR window if minimized |
+
+### Status Tools
+
+| Tool | Description |
+|------|-------------|
+| `status` | Return server health: PID, port, backend, session |
+| `list_windows` | List all top-level windows (no connect required) |
+| `is_window_open` | Check if a window matching criteria exists |
+| `wait_window` | Poll until a window appears or timeout |
+
+### PowerShell Tools (always enabled via start_server.ps1)
+
+| Tool | Description |
+|------|-------------|
+| `run_powershell` | Run PowerShell synchronously, return stdout/stderr |
+| `start_powershell` | Start PowerShell as background job, return job_id |
+| `get_job` | Poll a background job result |
+| `cancel_job` | Cancel a running PowerShell job |
+
+### activate_edr
+
+Launch or activate the HisecEndpoint GUI:
+`activate_edr(exe_path=None, wait=True, timeout=15.0)`
+
+---
+
+## agent/target_manager.py API
+
+### `check_server_health(name=None) -> dict`
+
+TCP reachability probe — **does not require SSH auth**.
+
+```python
+{
+  "ok": True,
+  "target": "win-dev",
+  "stage": "health_check",
+  "data": {
+    "port_open": True,
+    "mcp_responding": None,   # delegated to mcp_manager
+    "ready": True,
+    "ready_level": "tcp_only", # MCP initialize is mcp_manager's job
+    "mcp_url": "http://170.170.11.26:8765/mcp",
+    "check_host": "170.170.11.26",
+    "check_port": 8765
+  }
+}
+```
+
+### `ensure_server_running(name=None) -> dict`
+
+Ensure MCP server TCP port is listening. Uses `get_target()` (no auth) for the
+TCP check; only calls `get_resolved_target()` (requires auth) if server needs to be started.
+
+```python
+{
+  "ok": True,
+  "target": "win-dev",
+  "stage": "ensure",
+  "data": {
+    "status": "already_running",   # or "started"
+    "port": 8765,
+    "ready_level": "tcp_only",     # mcp_ready is from mcp_manager.initialize()
+    "note": "MCP initialize handled by mcp_manager",
+    "mcp_url": "http://170.170.11.26:8765/mcp"
+  }
+}
+```
+
+### `list_targets() -> dict`
+
+Returns all targets and which one is default.
+
+---
+
+## agent/mcp_manager.py API
+
+### `initialize(name=None) -> dict`
+
+Performs MCP initialize handshake. **Does not call `get_resolved_target()`** —
+only needs `TargetConfig.build_mcp_url(name)` which requires no SSH credentials.
+
+```python
+{
+  "ok": True,
+  "target": "win-dev",
+  "stage": "mcp_initialize",
+  "data": {
+    "session_id": "62ee9cf7f72046a1...",
+    "mcp_url": "http://170.170.11.26:8765/mcp",
+    "protocol_version": "2025-03-26",
+    "ready_level": "mcp_ready"
+  }
+}
+```
+
+### `get_mcp_tools(session_id, mcp_url) -> dict`
+
+Calls `tools/list` on the given session.
+
+### `call_mcp_tool(session_id, mcp_url, tool_name, arguments=None) -> dict`
+
+Calls an MCP tool on the given session.
+
+### Session caching
+
+`mcp_initialize()` results are cached **per target** in `conftest.py`. Repeated
+calls for the same target return the cached session. Different targets get
+independent sessions.
+
+---
+
+## test_case/conftest.py API
+
+### `get_target_name() -> str`
+
+Returns the effective target name: CLI `--target` > `EDR_WD_TARGET` env var >
+`default_target` in config.
+
+### `ensure_server_running(target=None) -> (bool, str)`
+
+Wrapper around `target_manager.ensure_server_running()`. Returns `(ok, message)`.
+
+### `mcp_initialize(target=None) -> dict`
+
+Wrapper around `mcp_manager.initialize()`. Cached per target.
+
+### `McpClient`
+
+JSON-RPC-over-HTTP client using FastMCP 3.x Streamable HTTP transport.
+
+```python
+# Preferred: pass pre-initialized session
+client = McpClient(mcp_init_result=init_result)
+
+# Or: let it resolve target and initialize
+client = McpClient(target="win-dev")
+
+# Low-level debug only:
+client = McpClient(base_url="http://170.170.11.26:8765/mcp")
+```
+
+Priority: `mcp_init_result` > `target` > `base_url`. Mixing `base_url` with
+`target` or `mcp_init_result` raises `ValueError`.
+
+---
+
+## Running Tests
+
+All commands run from the repository root.
+
+```bash
+# Linux/Mac: Run all tests with default target
+python3 test_case/run_tests.py
+
+# Linux/Mac: Run with explicit target
+python3 test_case/run_tests.py --target win-dev
+
+# Windows PowerShell: Run with explicit target
+python test_case\run_tests.py --target win-dev -v
+
+# Windows PowerShell: via environment variable
+$env:EDR_WD_TARGET = "win-dev"
+python test_case\run_tests.py -v
+```
+
+### Test flow
+
+```
+target_manager.ensure_server_running(target)
+    → TCP port open (ready_level: "tcp_only")
+
+mcp_manager.initialize(target)
+    → MCP session ready (ready_level: "mcp_ready")
+
+McpClient(mcp_init_result=init_result)
+    → run tests...
+```
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EDR_WD_TARGET` | `default_target` in config | Target name to use |
+| `EDR_WD_WIN_DEV_PASSWORD` | from config | SSH password for win-dev |
+| `EDR_WD_WIN_PROD_PASSWORD` | from config | SSH password for win-prod |
+
+Note: `EDR_WD_ENABLE_PYWINAUTO=1` is set automatically by `start_server.ps1`
+— no need to set it manually.
+
+---
+
+## Windows Agent
+
+The agent side (`agent/`) runs on both Linux/Mac and Windows agents. Target is always Windows.
+
+### Auth requirements
+
+| Agent OS | Recommended auth | Notes |
+|----------|-----------------|-------|
+| Linux / Mac | password (`sshpass`) or key | both work |
+| Windows | **key only** | `sshpass` is not available on Windows |
+
+On Windows agent, if `auth.type=password` is used and `sshpass` is not found, the error message will be:
+
+```
+Command not found: sshpass. sshpass is not available on Windows agent.
+Use key auth instead (set auth.type='key' in config).
+```
+
+### OpenSSH on Windows
+
+Windows agent requires OpenSSH Client (not PowerShell remoting):
 
 ```powershell
-# Windows 上查看 MCP server 日志
-cd target
-python -m edr_wd.server --http --port 8765
+# Check if OpenSSH is installed
+ssh -V
 
-# 查看哪些窗口可以连接
-python -c "from pywinauto import Application; print([w.window_text() for w in Application().windows()])"
+# Install if missing
+Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Client*'
+Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
 ```
+
+### Key auth setup on Windows
+
+1. Generate a key (as the agent user):
+   ```powershell
+   ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\id_edr_wd
+   ```
+2. Copy the public key to the target (step 1: upload, step 2: append):
+   ```powershell
+   # Step 1: upload the public key to a temp location on the target
+   scp -P 22 $env:USERPROFILE\.ssh\id_edr_wd.pub admin@<target-ip>:C:\Users\admin\id_edr_wd.pub
+
+   # Step 2: append it to authorized_keys via PowerShell on the target
+   ssh -p 22 admin@<target-ip> `
+     'powershell -NoProfile -Command "New-Item -ItemType Directory -Force $env:USERPROFILE\.ssh; Get-Content $env:USERPROFILE\id_edr_wd.pub | Add-Content $env:USERPROFILE\.ssh\authorized_keys"'
+   ```
+3. Verify the key works:
+   ```powershell
+   ssh -i $env:USERPROFILE\.ssh\id_edr_wd -p 22 admin@<target-ip> hostname
+   ```
+4. Set `auth.type=key` and `auth.key_path="C:\Users\<username>\.ssh\id_edr_wd"` in `targets.local.json`.
+
+### Running tests on Windows agent
+
+```powershell
+# From the edr-wd root directory
+python test_case\run_tests.py --target win-dev -v
+
+# Or via environment variable
+$env:EDR_WD_TARGET = "win-dev"
+python test_case\run_tests.py -v
+```
+
+Note: use `python` (or `py`) on Windows, not `python3`.
+
+### Path separator
+
+- Windows agent uses backslash `\` in config files (`target_root`, `key_path`).
+- Agent code uses `pathlib.Path` which handles both `/` and `\` via `os.sep`.
+- Remote paths (target is always Windows) use backslash in SCP/SSH commands.
+
+---
+
+## Deployment Flow
+
+### First-time setup (once per target)
+
+```
+1. Agent: copy edr-wd to Windows (git / scp / share)
+2. Agent: install_target_task() → registers StartEDRMCP
+3. User: log into Windows desktop interactively (so Task Scheduler has a session)
+```
+
+### Daily use
+
+```
+1. Agent: ensure_server_running() → ensures TCP port is listening (tcp_only)
+2. Agent: mcp_manager.initialize() → MCP handshake (mcp_ready)
+3. Agent: call MCP tools to automate EDR GUI
+```
+
+---
+
+## Troubleshooting
+
+### "MCP server not reachable"
+
+1. Check port: `telnet 170.170.11.26 8765`
+2. Check server process on Windows:
+   ```powershell
+   Get-NetTCPConnection -LocalPort 8765 -State Listen
+   ```
+3. If not listening, trigger manually:
+   ```powershell
+   .\target\scripts\start_server.ps1
+   ```
+4. Check logs: `Get-Content target/logs/start.log` and `target/logs/server.*.log`
+
+### "PowerShell disabled"
+
+This should not happen with the current `start_server.ps1`. If seen,
+confirm `EDR_WD_ENABLE_PYWINAUTO=1` is set in the server environment.
+
+### "connect timeout — no window found"
+
+- The EDR window must be open before `connect()` is called
+- Use `is_window_open()` or `wait_window()` first to wait for the window
+
+### SSH tunnel drops
+
+```bash
+bash agent/tunnel.sh stop
+bash agent/tunnel.sh start
+```
+
+### Port 8765 already in use
+
+```powershell
+.\target\scripts\stop_server.ps1
+```
+
+Or manually:
+```powershell
+Get-NetTCPConnection -LocalPort 8765 -State Listen | Stop-Process -Force
+```
+
+### Task Scheduler task not found
+
+Re-run installation:
+```python
+from agent.target_manager import TargetManager
+TargetManager().install_target_task()
+```
+
+---
+
+## Rejected Patterns
+
+**Do NOT do this** — runs in non-interactive SSH session, pywinauto won't work:
+
+```powershell
+ssh target "python server.py --http --port 8765"
+```
+
+**Do NOT do this** — kills ALL Python processes:
+
+```powershell
+Get-Process python | Stop-Process -Force
+```
+
+**Do NOT use root path** — FastMCP 3.x uses `/mcp` endpoint:
+
+```
+http://170.170.11.26:8765/     ✗
+http://170.170.11.26:8765/mcp  ✓
+```
+
+---
+
+## Test Results
+
+### Current status (Phase 4)
+
+```
+Integration Tests:  5 passed
+E2E EDR Workflow:  4 passed / 6 failed (GUI runtime / EDR state)
+
+Failed steps are GUI-layer issues (EDR application state, RDP session),
+not multi-target architecture problems.
+```
+
+Run with: `cd test_case && python3 run_tests.py --target win-dev -v`
+
+---
+
+## Future
+
+- `exe` packaging: replace `python server.py` with `target/bin/edr-mcp-server.exe`
+- Launcher: a long-running process that keeps the MCP server alive
+- Status page: HTTP endpoint that returns structured health info
+- GUI-layer E2E stability: investigate `activate_edr`, `screenshot`, `restore_edr` failures
+- Windows agent: key-auth docs and guidance added; runtime validation pending
