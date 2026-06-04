@@ -1,57 +1,31 @@
-#!/usr/bin/env -pwsh
-# health.ps1 — Check if the EDR-WD MCP server is reachable
-#
-# Checks:
-#   1. Port 8765 is listening.
-#   2. MCP / initialize succeeds (HTTP 200/400 with Mcp-Session-Id header).
-#
-# Usage:
-#   .\health.ps1
-#   powershell -ExecutionPolicy Bypass -File health.ps1
-
 $ErrorActionPreference = 'Continue'
+$Port = 8765
 
-$Port    = 8765
-$BaseUrl = "http://127.0.0.1:$Port"
-
-# ── Port check ────────────────────────────────────────────────────────────────
-$conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-
-if (-not $conn) {
-    Write-Host '[FAIL] Port 8765 not listening.'
-    exit 1
+function Get-TargetRoot {
+    $scriptsDir = $PSScriptRoot
+    $targetRoot = Split-Path $scriptsDir -Parent
+    return $targetRoot
 }
 
-# ── MCP initialize check ─────────────────────────────────────────────────────
-try {
-    $headers = @{ Accept = 'application/json, text/event-stream' }
-    $resp = Invoke-WebRequest -Uri "$BaseUrl/mcp" -Method Get `
-                             -Headers $headers -TimeoutSec 5
+$TargetRoot = Get-TargetRoot
+$LogDir = Join-Path $TargetRoot 'logs'
 
-    $session = $resp.Headers['Mcp-Session-Id']
-    if ($session) {
-        Write-Host '[OK] MCP server healthy (session: ' -NoNewline
-        Write-Host "$session" -NoNewline
-        Write-Host ')'
-        exit 0
-    } else {
-        Write-Host '[WARN] Port 8765 open but no MCP session header received.'
-        exit 1
+$listening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($listening) {
+    Write-Host "[OK] Port $Port listening (PID=$($listening.OwningProcess), LocalAddr=$($listening.LocalAddress))"
+    $startLog = Join-Path $LogDir 'start.log'
+    if (Test-Path $startLog) {
+        $lastLine = Get-Content $startLog -Tail 3
+        Write-Host "Recent start.log: $lastLine"
     }
-} catch {
-    $status = $_.Exception.Response.StatusCode.value__
-    $session = $_.Exception.Response.Headers['Mcp-Session-Id']
-
-    if ($status -and $session) {
-        Write-Host '[OK] MCP server responding (HTTP ' -NoNewline
-        Write-Host "$status" -NoNewline
-        Write-Host ', session: ' -NoNewline
-        Write-Host "$session" -NoNewline
-        Write-Host ')'
-        exit 0
+    exit 0
+} else {
+    Write-Host "[DOWN] Port $Port not listening"
+    $serverLogs = Get-ChildItem $LogDir 'server.*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($serverLogs) {
+        $lastLines = Get-Content $serverLogs.FullName -Tail 10
+        Write-Host "Last server.log lines:"
+        $lastLines | ForEach-Object { Write-Host "  $_" }
     }
-
-    Write-Host "[FAIL] HTTP check failed: $_"
     exit 1
 }
