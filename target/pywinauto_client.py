@@ -366,6 +366,9 @@ class WindowsGUI:
             return {
                 "ok": False,
                 "error": "EDRClient.exe window did not appear after clicking edrWidget",
+                "stage": "post_click_wait",
+                "click_ok": click_result.get("ok", False),
+                "edr_client_found": False,
                 "hisec_connected": True,
                 "exe_path": exe,
             }
