@@ -1,6 +1,9 @@
 # EDR-WD
 # Local config (contains real passwords / credentials)
 config/targets.local.json
+config/targets.json
+.env
+*.local.json
 
 # Python
 __pycache__/

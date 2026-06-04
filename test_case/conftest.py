@@ -119,7 +119,12 @@ class McpClient:
 
         self._session_id: Optional[str] = None
         self._base_url: Optional[str] = None
-        self._client = httpx.Client(timeout=30.0)
+        # Fixed HTTP/1.1 transport: httpx streaming request path caused unstable SSE
+        # handling with FastMCP; switch to regular POST + HTTP/1.1 transport.
+        self._client = httpx.Client(
+            timeout=30.0,
+            transport=httpx.HTTPTransport(http1=True),
+        )
 
         if mcp_init_result:
             self._base_url = mcp_init_result["data"]["mcp_url"]
@@ -167,30 +172,23 @@ class McpClient:
             headers["Mcp-Session-Id"] = self._session_id
 
         try:
-            with self._client.stream(
-                "POST", self._base_url, json=payload, headers=headers
-            ) as resp:
-                status = resp.status_code
-                session = resp.headers.get("Mcp-Session-Id")
-                if session:
-                    self._session_id = session
+            resp = self._client.post(
+                self._base_url, json=payload, headers=headers
+            )
+            status = resp.status_code
+            session = resp.headers.get("Mcp-Session-Id")
+            if session:
+                self._session_id = session
 
-                content_type = resp.headers.get("Content-Type", "")
+            content_type = resp.headers.get("Content-Type", "")
 
-                if "application/json" in content_type:
-                    body = resp.read().decode("utf-8", errors="replace")
-                    return json.loads(body)
+            if "application/json" in content_type:
+                body = resp.text
+                return json.loads(body)
 
-                # SSE stream
-                body_parts = []
-                for line in resp.iter_lines():
-                    if isinstance(line, bytes):
-                        line = line.decode("utf-8", errors="replace")
-                    if line.strip() == "":
-                        break
-                    body_parts.append(line)
-                raw = "\n".join(body_parts)
-                return self._parse_sse(raw)
+            # SSE body — read and parse
+            raw = resp.text
+            return self._parse_sse(raw)
 
         except httpx.HTTPError as e:
             return {"ok": False, "error": f"HTTP error: {e}"}

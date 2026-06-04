@@ -194,6 +194,14 @@ def _normalize_target(raw: dict) -> dict:
     win.setdefault("run_with_highest_privileges", True)
     out["windows"] = win
 
+    # ssh.password (legacy) → ssh.auth (new schema)
+    ssh_legacy = raw.get("ssh", {})
+    if "auth" not in ssh_legacy:
+        if ssh_legacy.get("password"):
+            out_ssh = dict(out.get("ssh", {}))
+            out_ssh["auth"] = {"type": "password", "password": ssh_legacy["password"]}
+            out["ssh"] = out_ssh
+
     return out
 
 

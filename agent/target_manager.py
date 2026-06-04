@@ -291,7 +291,7 @@ def ensure_server_running(name: Optional[str] = None) -> dict:
         # Step 2: stop any existing process on the port
         stop_cmd = (
             f"powershell -NoProfile -Command \""
-            f"Get-NetTCPConnection -LocalPort {port} -State Listen "
+            f"Get-NetTCPConnection -LocalPort {check_port} -State Listen "
             f"-ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; "
             f"exit 0\""
         )
@@ -315,17 +315,17 @@ def ensure_server_running(name: Optional[str] = None) -> dict:
         max_wait = 15
         waited = 0
         while waited < max_wait:
-            if _is_port_listening(check_host, port):
+            if _is_port_listening(check_host, check_port):
                 break
             time.sleep(1)
             waited += 1
 
         if waited >= max_wait:
-            return _err(target_name, "ensure", f"Port {port} did not open within {max_wait}s after schtasks /Run")
+            return _err(target_name, "ensure", f"Port {check_port} did not open within {max_wait}s after schtasks /Run")
 
         return _ok(target_name, "ensure", {
             "status": "started",
-            "port": port,
+            "port": check_port,
             "waited_seconds": waited,
             "ready_level": "tcp_only",
             "mcp_url": _build_mcp_url(cfg),
