@@ -157,19 +157,23 @@ def check_server_health(name: Optional[str] = None) -> dict:
         tc = TargetConfig()
         target_name = name or tc.get_default_target()
 
-        # TCP reachability — does NOT need SSH auth
-        cfg_light = tc.get_target(target_name)  # unresolved, no auth
+        # TCP reachability — does NOT need SSH auth.
+        # cfg_light is already normalized by get_target(), so mcp/ssh/windows exist.
+        cfg_light = tc.get_target(target_name)
         mcp_cfg = cfg_light["mcp"]
         ssh_cfg = cfg_light["ssh"]
 
-        if mcp_cfg["connect_mode"] == "direct":
+        connect_mode = mcp_cfg["connect_mode"]
+        if connect_mode == "direct":
             check_host = ssh_cfg["host"]
             check_port = mcp_cfg["port"]
-            mcp_url = f"http://{check_host}:{check_port}{mcp_cfg['path']}"
+            mcp_path = mcp_cfg["path"]
+            mcp_url = f"http://{check_host}:{check_port}{mcp_path}"
         else:  # tunnel
             check_host = "127.0.0.1"
             check_port = mcp_cfg["tunnel"]["local_port"]
-            mcp_url = f"http://127.0.0.1:{check_port}{mcp_cfg['path']}"
+            mcp_path = mcp_cfg["path"]
+            mcp_url = f"http://127.0.0.1:{check_port}{mcp_path}"
 
         # TCP port check only — MCP initialize is handled by mcp_manager.py
         port_open = _is_port_listening(check_host, check_port)
@@ -255,12 +259,13 @@ def ensure_server_running(name: Optional[str] = None) -> dict:
         target_name = name or tc.get_default_target()
 
         # Phase 1: TCP reachability check — does NOT require SSH auth.
-        # We only need mcp.port and ssh.host (config values), not credentials.
-        cfg_light = tc.get_target(target_name)  # unresolved, no auth
+        # cfg_light is already normalized; mcp/ssh/windows are guaranteed to exist.
+        cfg_light = tc.get_target(target_name)
         mcp_cfg = cfg_light["mcp"]
         ssh_cfg = cfg_light["ssh"]
 
-        if mcp_cfg["connect_mode"] == "direct":
+        connect_mode = mcp_cfg["connect_mode"]
+        if connect_mode == "direct":
             check_host = ssh_cfg["host"]
         else:
             check_host = "127.0.0.1"
