@@ -265,7 +265,7 @@ def screenshot(path: str = None) -> str:
         "By default waits up to 15 s for the EDRClient window to appear. "
         "If the window is already open, returns immediately with already_open=true. "
         "exe_path can override the default EDR executable path. "
-        "Requires EDR_WD_ENABLE_POWERSHELL=1 on the server."
+        "Requires EDR_WD_ENABLE_PYWINAUTO=1 on the server."
     ),
 )
 def activate_edr(exe_path: str = None, wait: bool = True, timeout: float = 15.0,

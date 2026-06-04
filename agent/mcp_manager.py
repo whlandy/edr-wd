@@ -191,11 +191,22 @@ def call_mcp_tool(session_id: str, mcp_url: str, tool_name: str, arguments: Opti
     })
 
 
+_jsonrpc_id_counter = 1
+
+
+def _next_rpc_id() -> int:
+    global _jsonrpc_id_counter
+    cur = _jsonrpc_id_counter
+    _jsonrpc_id_counter += 1
+    return cur
+
+
 def _mcp_jsonrpc(session_id: str, mcp_url: str, method: str, params: dict) -> dict:
     """Send a JSON-RPC request with an active MCP session."""
+    rpc_id = _next_rpc_id()
     payload = json.dumps({
         "jsonrpc": "2.0",
-        "id": 2,
+        "id": rpc_id,
         "method": method,
         "params": params,
     }).encode("utf-8")
@@ -211,21 +222,58 @@ def _mcp_jsonrpc(session_id: str, mcp_url: str, method: str, params: dict) -> di
     try:
         with urllib.request.urlopen(req, timeout=MCP_INIT_TIMEOUT) as resp:
             raw = _read_all_sse_data(resp)
-            return _parse_sse_response(raw)
+            return _parse_sse_response(raw, expected_id=rpc_id)
+    except socket.timeout:
+        return {"ok": False, "error": f"socket timeout after {MCP_INIT_TIMEOUT}s waiting for JSON-RPC response"}
     except (urllib.error.URLError, socket.timeout) as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-def _parse_sse_response(raw: str) -> dict:
-    """Parse SSE-encoded JSON-RPC response into a clean dict."""
+def _parse_sse_response(raw: str, expected_id: Optional[int] = None) -> dict:
+    """
+    Parse SSE-encoded JSON-RPC response into a clean dict.
+
+    SSE format (FastMCP 3.x):
+      : comment / ping lines         → skip
+      event: <event_type>           → skip (we only care about data:)
+      data: <JSON>                  → parse as JSON-RPC
+      (blank lines)                  → skip
+
+    If raw contains no parseable data at all, returns error indicating raw content.
+    If expected_id is provided, only returns a data: line whose JSON-RPC id matches.
+    """
+    data_lines = []
     for line in raw.split("\r\n"):
-        if line.startswith("data:"):
-            try:
-                data = json.loads(line[5:].strip())
-                return {"ok": True, "data": data}
-            except (json.JSONDecodeError, ValueError):
-                pass
-    return {"ok": False, "error": "no parseable SSE data"}
+        stripped = line.strip()
+        # Skip blank lines and SSE comment/ping lines (start with :)
+        if not stripped or stripped.startswith(":"):
+            continue
+        # Skip SSE event metadata lines
+        if stripped.startswith("event:"):
+            continue
+        # Collect data: lines (support multi-line JSON)
+        if stripped.startswith("data:"):
+            data_lines.append(stripped[5:].strip())
+
+    if not data_lines:
+        # No data: lines found — return the raw content for debugging
+        sample = raw.split("\r\n")[0][:100] if raw else "(empty)"
+        return {"ok": False, "error": f"no SSE data: found. raw: {sample}"}
+
+    # Parse data lines in reverse order (last event wins in SSE)
+    for data_str in reversed(data_lines):
+        try:
+            data = json.loads(data_str)
+            # If we have an expected id, only return matching responses
+            if expected_id is not None:
+                rpc_id = data.get("id")
+                if rpc_id != expected_id:
+                    continue
+            return {"ok": True, "data": data}
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    return {"ok": False, "error": "SSE data: lines found but none were valid JSON"}
 
 
 def _read_all_sse_data(resp) -> str:
