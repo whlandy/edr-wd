@@ -22,27 +22,33 @@ description: |
 ┌──────────────────────────────────────────────────────────────────┐
 │  Agent side (Mac / Linux)                                        │
 │                                                                  │
-│  ┌──────────────────┐     ┌──────────────────────────────────┐  │
-│  │  hermes / openclaw │────▶│  target_config.py                │  │
-│  │                    │     │  ssh_runner.py                   │  │
-│  │  skill / tools    │────▶│  target_manager.py              │  │
-│  └──────────────────┘     │  mcp_manager.py                  │  │
-│                            └──────────────┬───────────────────┘  │
-│                                           │ SSH + schtasks       │
-│  ┌──────────────────┐                   ▼                       │
-│  │  SSH tunnel (opt)  │    ┌──────────────────────────────┐    │
-│  │  :18765 → :8765   │───▶│  Windows target               │    │
-│  └──────────────────┘    │  0.0.0.0:8765                 │    │
-└───────────────────────────│──────────────┬─────────────────┘────┘
+│  ┌──────────────────┐     ┌──────────────────────────────────┐ │
+│  │  hermes / openclaw │────▶│  target_config.py                │ │
+│  │                    │     │  build_mcp_url(name)             │ │
+│  │  skill / tools    │────▶│  target_manager.py               │ │
+│  └──────────────────┘     │  mcp_manager.py                   │ │
+│                            │  ssh_runner.py                     │ │
+│                            └──────────────┬────────────────────┘ │
+│                                           │                     │
+│  ┌──────────────────┐     ┌──────────────▼────────────────────┐ │
+│  │  test_case/       │────▶│  test runner (run_tests.py)      │ │
+│  │  conftest.py      │     │  McpClient(mcp_init_result=...)  │ │
+│  └──────────────────┘     └───────────────────────────────────┘ │
+│                                           │                      │
+│                                           │ SSH + schtasks        │
+│  ┌──────────────────┐                   ▼                      │
+│  │  SSH tunnel (opt) │    ┌──────────────────────────────┐       │
+│  │  :18765 → :8765   │───▶│  Windows target            │       │
+│  └──────────────────┘    │  0.0.0.0:8765              │       │
+└───────────────────────────│──────────────┬──────────────┘───────┘
                             │              │ Streamable HTTP /mcp
                             │              ▼
-                            │  ┌──────────────────────────────┐ │
-                            │  │  target/                      │ │
-                            │  │    server.py  (fastmcp 3.x)  │ │
-                            │  │    pywinauto_client.py       │ │
-                            │  │    config.json (local only)  │ │
-                            │  └──────────────────────────────┘ │
-                            │              │ pywinauto UIA      │
+                            │  ┌──────────────────────────────┐  │
+                            │  │  target/                    │  │
+                            │  │    server.py  (fastmcp 3.x) │  │
+                            │  │    pywinauto_client.py     │  │
+                            │  └──────────────────────────────┘  │
+                            │              │ pywinauto UIA        │
                             ▼              ▼
                   HiSecEndpoint GUI (华为)
 ```
@@ -50,6 +56,10 @@ description: |
 **Key principle:** The agent never starts Python over SSH. Instead it triggers
 `schtasks /Run /TN StartEDRMCP` which launches `start_server.ps1` in the
 logged-on interactive desktop session.
+
+**Two-layer ready model:**
+- `target_manager.ensure_server_running()` → `ready_level: "tcp_only"` (port open)
+- `mcp_manager.initialize()` → `ready_level: "mcp_ready"` (MCP session established)
 
 ---
 
@@ -63,6 +73,12 @@ All target definitions live in `config/targets.local.json`. The example template
 config/targets.example.json   ← repo template (no real passwords)
 config/targets.local.json     ← local config (gitignored)
 ```
+
+### Legacy config — DEPRECATED
+
+`config/test_machines.json` is deprecated. All configuration now flows through
+`config/targets.local.json` via `TargetConfig`. Do not add new entries to
+`test_machines.json`.
 
 ### Generate skeleton
 
@@ -156,17 +172,12 @@ python -m agent.target_config --validate
 python -c "from agent.target_manager import TargetManager; print(TargetManager().install_target_task())"
 ```
 
-### 4. Start MCP server
+### 4. Run tests
 
 ```bash
-python -c "from agent.target_manager import TargetManager; print(TargetManager().ensure_server_running())"
-```
-
-### 5. Run tests
-
-```bash
-cd test_case && EDR_WD_TARGET=win-dev python3 run_tests.py -v
-# → Results: 16 passed, 0 failed
+cd test_case && python3 run_tests.py --target win-dev -v
+# or via environment variable:
+EDR_WD_TARGET=win-dev python3 run_tests.py -v
 ```
 
 ---
@@ -180,9 +191,8 @@ edr-wd/
 ├── agent/                    # Agent-side (runs on Mac/Linux)
 │   ├── target_config.py     # Config loader: load, init, validate, build_mcp_url
 │   ├── ssh_runner.py        # Pure SSH/SCP executor (no config knowledge)
-│   ├── target_manager.py    # Multi-target lifecycle manager
-│   ├── mcp_manager.py       # MCP client (Streamable HTTP, target-agnostic)
-│   └── tunnel.sh             # SSH tunnel manager (optional)
+│   ├── target_manager.py    # Multi-target lifecycle manager (tcp_only)
+│   └── mcp_manager.py       # MCP client (Streamable HTTP, mcp_ready)
 │
 ├── target/                    # Target-side (runs on Windows)
 │   ├── server.py            # MCP server entry (fastmcp 3.x + pywinauto)
@@ -191,8 +201,8 @@ edr-wd/
 │   │
 │   ├── scripts/
 │   │   ├── install_task.ps1   # Register StartEDRMCP scheduled task
-│   │   ├── start_server.ps1   # Start MCP server (with logs/, dup guard)
-│   │   ├── stop_server.ps1    # Stop MCP server (port 8765 only)
+│   │   ├── start_server.ps1  # Start MCP server (with logs/, dup guard)
+│   │   ├── stop_server.ps1  # Stop MCP server (port 8765 only)
 │   │   ├── restart_server.ps1  # Restart
 │   │   └── health.ps1         # Health check (port + MCP initialize)
 │   │
@@ -204,11 +214,12 @@ edr-wd/
 │
 ├── config/
 │   ├── targets.example.json # Repo template (no real passwords)
-│   └── targets.local.json   # Local config (gitignored, generated by --init)
+│   ├── targets.local.json  # Local config (gitignored, generated by --init)
+│   └── test_machines.json  # DEPRECATED — do not use for new targets
 │
 └── test_case/
-    ├── run_tests.py         # Test runner
-    └── conftest.py          # McpClient (Streamable HTTP), fixtures
+    ├── run_tests.py         # Test runner (--target supported)
+    └── conftest.py          # McpClient, fixtures, target selection
 ```
 
 ---
@@ -239,7 +250,7 @@ Launches the MCP server inside the logged-on user's interactive session.
 1. Dynamically resolve target root from `$PSScriptRoot`
 2. Load `config.json` for Python path and port
 3. Check port 8765 — skip if already listening (no duplicate start)
-4. Set required env vars: `EDR_WD_ENABLE_POWERSHELL=1`, `EDR_WD_ENABLE_PYWINAUTO=1`
+4. Set required env vars: `EDR_WD_ENABLE_PYWINAUTO=1`
 5. Start `python server.py --http --host 0.0.0.0 --port 8765`
 6. Log to `logs/start.log` (PID, timestamp) + `logs/server.*.log` (stdout/stderr)
 
@@ -266,11 +277,16 @@ Stops only the process listening on port 8765. Never kills all Python processes.
 - Method: `POST` (all requests)
 - Headers: `Content-Type: application/json`, `Accept: application/json, text/event-stream`
 - Session: `Mcp-Session-Id` header returned by server, sent back by client
-- Protocol version: `2025-11-25`
+- Protocol version: `2025-03-26`
 
 **Connection priority:**
 1. Direct: `http://170.170.11.26:8765/mcp` (preferred)
 2. Tunnel fallback: `http://localhost:18765/mcp` (if direct is unreachable)
+
+**`mcp.host` vs `ssh.host`:**
+- `mcp.host` (e.g. `0.0.0.0`) is the **server bind address** — what the server listens on
+- `ssh.host` (e.g. `170.170.11.26`) is the **agent connection address** — how the agent reaches the server
+- In `direct` mode, the agent uses `ssh.host` to build the MCP URL, not `mcp.host`
 
 ---
 
@@ -317,36 +333,152 @@ Launch or activate the HisecEndpoint GUI:
 
 ---
 
-## agent/mcp_manager.py API
+## agent/target_manager.py API
 
-### `check_server_health() -> dict`
+### `check_server_health(name=None) -> dict`
 
-Lightweight probe — port open + MCP initialize. No side effects.
+TCP reachability probe — **does not require SSH auth**.
 
 ```python
-{"ok": True, "port_open": True, "mcp_ok": True, "session": "...", "url": "http://170.170.11.26:8765/mcp"}
+{
+  "ok": True,
+  "target": "win-dev",
+  "stage": "health_check",
+  "data": {
+    "port_open": True,
+    "mcp_responding": None,   # delegated to mcp_manager
+    "ready": True,
+    "ready_level": "tcp_only", # MCP initialize is mcp_manager's job
+    "mcp_url": "http://170.170.11.26:8765/mcp",
+    "check_host": "170.170.11.26",
+    "check_port": 8765
+  }
+}
 ```
 
-### `ensure_server_running() -> dict`
+### `ensure_server_running(name=None) -> dict`
 
-Full lifecycle manager — reads `target/config.json` automatically:
+Ensure MCP server TCP port is listening. Uses `get_target()` (no auth) for the
+TCP check; only calls `get_resolved_target()` (requires auth) if server needs to be started.
 
-1. Resolve MCP URL (direct first, tunnel fallback)
-2. If server already healthy → return immediately
-3. Trigger `schtasks /Run /TN StartEDRMCP /I` on target
-4. Poll until MCP initialize succeeds (max 60s, 3s interval)
-5. On timeout: read `logs/start.log` + latest `logs/server.*.log` for diagnostics
-6. Return `{"ok": True, "session": "...", "already_running": False, "url": "..."}`
-   or `{"ok": False, "stage": "...", "error": "...", "start_log": "...", "server_log": "..."}`
+```python
+{
+  "ok": True,
+  "target": "win-dev",
+  "stage": "ensure",
+  "data": {
+    "status": "already_running",   # or "started"
+    "port": 8765,
+    "ready_level": "tcp_only",     # mcp_ready is from mcp_manager.initialize()
+    "note": "MCP initialize handled by mcp_manager",
+    "mcp_url": "http://170.170.11.26:8765/mcp"
+  }
+}
+```
 
-### `install_target_task() -> dict`
+### `list_targets() -> dict`
 
-Uploads and runs `install_task.ps1` on the target via SSH.
-Returns `{"ok": True}` on success.
+Returns all targets and which one is default.
 
-### `trigger_target_server() -> CompletedProcess`
+---
 
-Fire `schtasks /Run /TN StartEDRMCP /I` directly. Does NOT wait.
+## agent/mcp_manager.py API
+
+### `initialize(name=None) -> dict`
+
+Performs MCP initialize handshake. **Does not call `get_resolved_target()`** —
+only needs `TargetConfig.build_mcp_url(name)` which requires no SSH credentials.
+
+```python
+{
+  "ok": True,
+  "target": "win-dev",
+  "stage": "mcp_initialize",
+  "data": {
+    "session_id": "62ee9cf7f72046a1...",
+    "mcp_url": "http://170.170.11.26:8765/mcp",
+    "protocol_version": "2025-03-26",
+    "ready_level": "mcp_ready"
+  }
+}
+```
+
+### `get_mcp_tools(session_id, mcp_url) -> dict`
+
+Calls `tools/list` on the given session.
+
+### `call_mcp_tool(session_id, mcp_url, tool_name, arguments=None) -> dict`
+
+Calls an MCP tool on the given session.
+
+### Session caching
+
+`mcp_initialize()` results are cached **per target** in `conftest.py`. Repeated
+calls for the same target return the cached session. Different targets get
+independent sessions.
+
+---
+
+## test_case/conftest.py API
+
+### `get_target_name() -> str`
+
+Returns the effective target name: CLI `--target` > `EDR_WD_TARGET` env var >
+`default_target` in config.
+
+### `ensure_server_running(target=None) -> (bool, str)`
+
+Wrapper around `target_manager.ensure_server_running()`. Returns `(ok, message)`.
+
+### `mcp_initialize(target=None) -> dict`
+
+Wrapper around `mcp_manager.initialize()`. Cached per target.
+
+### `McpClient`
+
+JSON-RPC-over-HTTP client using FastMCP 3.x Streamable HTTP transport.
+
+```python
+# Preferred: pass pre-initialized session
+client = McpClient(mcp_init_result=init_result)
+
+# Or: let it resolve target and initialize
+client = McpClient(target="win-dev")
+
+# Low-level debug only:
+client = McpClient(base_url="http://170.170.11.26:8765/mcp")
+```
+
+Priority: `mcp_init_result` > `target` > `base_url`. Mixing `base_url` with
+`target` or `mcp_init_result` raises `ValueError`.
+
+---
+
+## Running Tests
+
+```bash
+# Run all tests with default target
+python3 run_tests.py
+
+# Run with explicit target
+python3 run_tests.py --target win-dev
+
+# Run with environment variable
+EDR_WD_TARGET=win-dev python3 run_tests.py -v
+```
+
+### Test flow
+
+```
+target_manager.ensure_server_running(target)
+    → TCP port open (ready_level: "tcp_only")
+
+mcp_manager.initialize(target)
+    → MCP session ready (ready_level: "mcp_ready")
+
+McpClient(mcp_init_result=init_result)
+    → run tests...
+```
 
 ---
 
@@ -354,12 +486,11 @@ Fire `schtasks /Run /TN StartEDRMCP /I` directly. Does NOT wait.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EDR_WD_HOST` | from config.json | Windows target IP |
-| `EDR_WD_USER` | from config.json | SSH username |
-| `EDR_WD_PASS` | from config.json | SSH password |
-| `EDR_WD_CONN_PREF` | `"direct"` | `"direct"` or `"tunnel"` |
+| `EDR_WD_TARGET` | `default_target` in config | Target name to use |
+| `EDR_WD_WIN_DEV_PASSWORD` | from config | SSH password for win-dev |
+| `EDR_WD_WIN_PROD_PASSWORD` | from config | SSH password for win-prod |
 
-Note: `EDR_WD_ENABLE_POWERSHELL=1` is set automatically by `start_server.ps1`
+Note: `EDR_WD_ENABLE_PYWINAUTO=1` is set automatically by `start_server.ps1`
 — no need to set it manually.
 
 ---
@@ -377,8 +508,8 @@ Note: `EDR_WD_ENABLE_POWERSHELL=1` is set automatically by `start_server.ps1`
 ### Daily use
 
 ```
-1. Agent: ensure_server_running() → triggers StartEDRMCP if needed
-2. Agent: MCP initialize → verify server ready
+1. Agent: ensure_server_running() → ensures TCP port is listening (tcp_only)
+2. Agent: mcp_manager.initialize() → MCP handshake (mcp_ready)
 3. Agent: call MCP tools to automate EDR GUI
 ```
 
@@ -402,7 +533,7 @@ Note: `EDR_WD_ENABLE_POWERSHELL=1` is set automatically by `start_server.ps1`
 ### "PowerShell disabled"
 
 This should not happen with the current `start_server.ps1`. If seen,
-confirm `EDR_WD_ENABLE_POWERSHELL=1` is set in the server environment.
+confirm `EDR_WD_ENABLE_PYWINAUTO=1` is set in the server environment.
 
 ### "connect timeout — no window found"
 
@@ -431,8 +562,8 @@ Get-NetTCPConnection -LocalPort 8765 -State Listen | Stop-Process -Force
 
 Re-run installation:
 ```python
-from agent.mcp_manager import install_target_task
-install_target_task()
+from agent.target_manager import TargetManager
+TargetManager().install_target_task()
 ```
 
 ---
@@ -462,14 +593,17 @@ http://170.170.11.26:8765/mcp  ✓
 
 ## Test Results
 
+### Current status (Phase 4)
+
 ```
 Integration Tests:  5 passed
-E2E EDR Workflow:  11 passed
-────────────────────────────────
-Total:              16 passed, 0 failed
+E2E EDR Workflow:  4 passed / 6 failed (GUI runtime / EDR state)
+
+Failed steps are GUI-layer issues (EDR application state, RDP session),
+not multi-target architecture problems.
 ```
 
-Run with: `cd test_case && python3 run_tests.py -v`
+Run with: `cd test_case && python3 run_tests.py --target win-dev -v`
 
 ---
 
@@ -478,3 +612,4 @@ Run with: `cd test_case && python3 run_tests.py -v`
 - `exe` packaging: replace `python server.py` with `target/bin/edr-mcp-server.exe`
 - Launcher: a long-running process that keeps the MCP server alive
 - Status page: HTTP endpoint that returns structured health info
+- GUI-layer E2E stability: investigate `activate_edr`, `screenshot`, `restore_edr` failures

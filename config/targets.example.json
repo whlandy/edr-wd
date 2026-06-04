@@ -9,7 +9,7 @@
       "description": "开发环境 Windows 虚拟机",
 
       "ssh": {
-        "host": "170.170.11.26",
+        "host": "<target-ip>",
         "port": 22,
         "user": "admin",
         "auth": {
