@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """
-run_tests.py — 纯 Python 测试 runner（不依赖 pytest）
+run_tests.py — Profile-aware test runner (no pytest required)
 
-用法：
-  python run_tests.py              # 运行所有测试（使用 default_target）
-  python run_tests.py -v           # 详细输出
-  python run_tests.py --target win-dev   # 指定 target
-  EDR_WD_TARGET=win-dev python run_tests.py  # 通过环境变量指定
+Usage:
+  python run_tests.py                                # use default_target, dispatch by app_profile
+  python run_tests.py -v                             # verbose output
+  python run_tests.py --target win-dev               # specific target
+  EDR_WD_TARGET=mac-dev python run_tests.py          # macOS target
+  python run_tests.py --profile macos_generic        # force a profile (overrides target.app_profile)
+  python run_tests.py --legacy                       # bypass profile dispatch (raw Windows E2E)
+
+The runner now dispatches to a per-profile test suite:
+  - profile=windows_hisec  → test_case.run_windows_hisec (legacy 16/16 E2E)
+  - profile=macos_generic  → test_case.run_macos_generic (v1 minimal capability set)
+
+For platforms/profiles without a registered runner, the runner aborts
+with a clear error rather than silently running the wrong tests.
 """
 
 import sys
@@ -15,206 +24,127 @@ import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from test_case.conftest import McpClient, ensure_server_running, get_target_name, mcp_initialize
+from test_case.conftest import (
+    McpClient,
+    ensure_server_running,
+    get_target_name,
+    mcp_initialize,
+)
+from test_case.test_profiles import resolve_runner, PROFILE_RUNNERS
 
-# Import target_manager for health checks
+# Target manager for health checks
 from agent import target_manager
+from agent.target_config import TargetConfig
 
 
-def run_tests(verbose=False, target=None):
+def _resolve_profile(target_name: str, override: str | None) -> str:
+    """
+    Decide which test profile to run.
+
+    Priority: --profile override > target.app_profile > "windows_hisec"
+    (default for legacy behaviour, since the only target without an
+    explicit app_profile in the wild is the original win-dev).
+    """
+    if override:
+        return override
+    tc = TargetConfig()
+    try:
+        profile = tc.get_target_app_profile(target_name)
+    except Exception:
+        profile = None
+    return profile or "windows_hisec"
+
+
+def run_tests(verbose: bool = False, target: str | None = None,
+              profile_override: str | None = None) -> bool:
     # ── Resolve target ─────────────────────────────────────────────
     target_name = target or os.environ.get("EDR_WD_TARGET") or get_target_name()
 
-    # ── Ensure MCP server is running on Windows ────────────────────
+    # ── Resolve profile ────────────────────────────────────────────
+    profile = _resolve_profile(target_name, profile_override)
+    runner = resolve_runner(profile)
+    if runner is None:
+        print(f"[FAIL] No test runner registered for profile={profile!r}.")
+        print(f"       Registered profiles: {sorted(PROFILE_RUNNERS)}")
+        print("       To force the Windows legacy E2E suite: --profile windows_hisec")
+        return False
+
+    # ── Print header ───────────────────────────────────────────────
+    print("=" * 60)
+    print(f"EDR-WD Test Runner")
+    print("=" * 60)
+    print(f"  Target:  {target_name}")
+    print(f"  Profile: {profile}")
+    print(f"  Runner:  {runner.__module__}.{runner.__name__}")
+    print()
+
+    # ── Ensure MCP server is running on target ─────────────────────
     print("=" * 60)
     print("Starting MCP Server")
     print("=" * 60)
     server_ok, srv_msg = ensure_server_running(target_name)
     print(f"  MCP Server: {'[OK]' if server_ok else '[FAIL]'} {srv_msg}")
     if not server_ok:
-        print("[FAIL] Could not start MCP server on Windows.")
-        sys.exit(1)
+        print("[FAIL] Could not start MCP server on target.")
+        return False
 
     # ── MCP initialize ─────────────────────────────────────────────
+    print()
     print("=" * 60)
     print("Environment Check")
     print("=" * 60)
 
-    # Get MCP URL for display
     health = target_manager.check_server_health(target_name)
     mcp_url = health.get("data", {}).get("mcp_url", "unknown")
     print(f"  Target:     {target_name}")
+    print(f"  MCP URL:    {mcp_url}")
     print(f"  MCP Server: [{'OK' if server_ok else 'FAIL'}] {srv_msg}")
     print()
 
-    # Perform MCP initialize via mcp_manager
     try:
         init_result = mcp_initialize(target_name)
         if not init_result["ok"]:
             print(f"[FAIL] MCP initialize failed: {init_result.get('error')}")
-            sys.exit(1)
+            return False
 
         session_id = init_result["data"]["session_id"]
         print(f"[OK] MCP session: {session_id}")
         print()
 
-        # Create McpClient with pre-initialized session
         client = McpClient(mcp_init_result=init_result)
 
     except Exception as e:
         print(f"[FAIL] initialize exception: {e}")
-        sys.exit(1)
+        return False
 
-    passed = 0
-    failed = 0
-    errors = []
+    # ── Dispatch to per-profile test suite ─────────────────────────
+    try:
+        passed, failed, errors, ok = runner(client, verbose=verbose)
+    finally:
+        client.close()
 
-    def call_tool(name, args=None):
-        r = client.call_tool(name, args or {})
-        if isinstance(r, str):
-            r = json.loads(r)
-        return r
-
-    def check(result, key=None, expected=True):
-        """Helper: assert result[key] == expected"""
-        if key:
-            actual = result.get(key)
-            if expected is True and not actual:
-                return False, f"{key}={actual}, expected truthy"
-            if expected is False and actual:
-                return False, f"{key}={actual}, expected falsy"
-        if result.get("ok") is False:
-            return False, f"ok=false: {result.get('error', '')}"
-        return True, None
-
-    # ── Integration tests ──────────────────────────────────────────
-    print()
-    print("=" * 60)
-    print("Integration Tests")
-    print("=" * 60)
-
-    tests_integration = [
-        # (name, tool_name, args, pass_check_fn)
-        ("list_windows returns ok",
-         "list_windows", {},
-         lambda r: (r.get("ok") is True and "windows" in r, r.get("error", ""))),
-
-        ("is_window_open explorer.exe",
-         "is_window_open", {"process_name": "explorer.exe"},
-         lambda r: (r.get("ok") is True and "found" in r, r.get("error", ""))),
-
-        ("is_window_open nonexistent",
-         "is_window_open", {"process_name": "nonexistent_process_xyz.exe"},
-         lambda r: (r.get("ok") is True and r.get("found") is False, "")),
-
-        ("is_window_open no filter rejects",
-         "is_window_open", {},
-         lambda r: (r.get("ok") is False and "error" in r, "")),
-
-        ("wait_window timeout",
-         "wait_window", {"process_name": "nonexistent_xyz.exe", "timeout": 2.0, "interval": 0.3},
-         lambda r: (r.get("ok") is False and r.get("error") == "timeout", "")),
-    ]
-
-    for name, tool, args, check_fn in tests_integration:
-        print(f"\n  {name}... ", end="", flush=True)
-        try:
-            result = call_tool(tool, args)
-            ok, err = check_fn(result)
-            if verbose and not ok:
-                print(f"\n    FAIL: {err}\n    detail: {json.dumps(result, ensure_ascii=False)[:300]}")
-                print("    ", end="")
-            if ok:
-                print("PASS")
-                passed += 1
-            else:
-                print(f"FAIL: {err}")
-                failed += 1
-                errors.append(name)
-        except Exception as e:
-            print(f"ERROR: {e}")
-            failed += 1
-            errors.append(name)
-
-    # ── E2E tests ─────────────────────────────────────────────────
-    print()
-    print("=" * 60)
-    print("E2E: EDR Full Workflow")
-    print("=" * 60)
-
-    # Step1: explicit EDR activation — validates the activate_edr() flow works.
-    # Step3: uses auto_activate=True as fallback — validates that connect() can
-    # recover when the window is present but not yet active/ready, which is
-    # common in RDP/Qt GUI automation. This is NOT a substitute for Step1;
-    # keeping both helps distinguish: explicit activation failure vs
-    # connect-with-auto-recovery success.
-    e2e_steps = [
-        # (name, tool, args, must_pass)
-        ("Step0: is_window_open(HisecEndpointAgent.exe)", "is_window_open", {"process_name": "HisecEndpointAgent.exe"}, False),
-        ("Step1: activate_edr",                             "activate_edr",  {"wait": True, "timeout": 15.0}, True),
-        ("Step2: wait_window(HisecEndpointAgent.exe)",      "wait_window",   {"process_name": "HisecEndpointAgent.exe", "timeout": 15.0, "interval": 0.5}, True),
-        ("Step3: connect(HisecEndpointAgent.exe, auto_activate fallback)", "connect", {"process_name": "HisecEndpointAgent.exe", "timeout": 10.0, "auto_activate": True}, True),
-        ("Step4: dump_tree (max_depth=10, find edrLanel)",  "dump_tree",     {"max_depth": 10}, True),
-        ("Step5: click(edrWidget GroupBox)",                "click",          {"automation_id": "SafraUIMainWindow.MainWidget.content_widget.featureWidget.EdrUIMainWindow.centralwidget.edrWidget"}, True),
-        ("Step6: wait 2s for UI to react",                  None,             None,             False),  # no tool, just sleep
-        ("Step7: verify EDRClient window appeared",       "is_window_open", {"process_name": "EDRClient.exe"}, True),
-        ("Step8: screenshot",                               "screenshot",    {"path": "C:\\Users\\<TARGET_USER>\\Desktop\\maa-fw运行记录\\e2e_edr_full_workflow.png"}, True),
-        ("Step9: restore_edr",                              "restore_edr",   {}, False),
-        ("Step10: is_window_open verify",                   "is_window_open", {"process_name": "HisecEndpointAgent.exe"}, False),
-    ]
-
-    for name, tool, args, must_pass in e2e_steps:
-        print(f"\n  {name}... ", end="", flush=True)
-        try:
-            if tool is None:
-                # 纯等待步骤（无 tool call）
-                import time
-                time.sleep(2)
-                print("OK (wait 2s)")
-                passed += 1
-                continue
-            result = call_tool(tool, args)
-            if verbose:
-                print(f"\n    {json.dumps(result, ensure_ascii=False)[:400].replace(chr(10), chr(10) + '    ')}")
-                print("    ", end="")
-            ok = result.get("ok") is not False
-            if ok:
-                extra = ""
-                if "windows" in result:
-                    extra = f" ({len(result.get('windows', []))} windows)"
-                elif "controls" in result:
-                    extra = f" ({len(result.get('controls', []))} controls)"
-                elif "found" in result:
-                    extra = f" (found={result.get('found')})"
-                print(f"PASS{extra}")
-                passed += 1
-            else:
-                print(f"FAIL: {result.get('error', 'unknown')}")
-                failed += 1
-                errors.append(name)
-        except Exception as e:
-            print(f"ERROR: {e}")
-            failed += 1
-            errors.append(name)
-
-    client.close()
-
-    # ── Summary ────────────────────────────────────────────────────
+    # ── Summary ───────────────────────────────────────────────────
     print()
     print("=" * 60)
     print(f"Results: {passed} passed, {failed} failed")
     if errors:
         print(f"Failed: {', '.join(errors)}")
     print("=" * 60)
-    return failed == 0
+    return ok
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="EDR-WD profile-aware test runner")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--target", help="Target name (overrides EDR_WD_TARGET and default_target)")
+    parser.add_argument("--profile",
+                        help="Force a test profile (overrides target.app_profile). "
+                             f"Choices: {sorted(PROFILE_RUNNERS)}")
+    parser.add_argument("--legacy", action="store_true",
+                        help="Shorthand for --profile windows_hisec")
     args = parser.parse_args()
 
-    ok = run_tests(verbose=args.verbose, target=args.target)
+    profile = "windows_hisec" if args.legacy else args.profile
+    ok = run_tests(verbose=args.verbose, target=args.target, profile_override=profile)
     sys.exit(0 if ok else 1)
