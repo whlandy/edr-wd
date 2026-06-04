@@ -11,20 +11,20 @@ Interface:
 
 ssh_config shape (password auth):
     {
-        "host": "170.170.11.26",
+        "host": "<TARGET_IP>",
         "port": 22,
-        "user": "admin",
+        "user": "<TARGET_USER>",
         "auth": {
             "type": "password",
-            "password": "whl@123"
+            "password": "<YOUR_PASSWORD>"
         }
     }
 
 ssh_config shape (key auth):
     {
-        "host": "170.170.11.26",
+        "host": "<TARGET_IP>",
         "port": 22,
-        "user": "admin",
+        "user": "<TARGET_USER>",
         "auth": {
             "type": "key",
             "key_path": "~/.ssh/id_edr_wd"
@@ -77,7 +77,7 @@ def _build_ssh_base(ssh_config: dict) -> list:
     auth = ssh_config.get("auth", {})
     host = ssh_config["host"]
     port = ssh_config.get("port", 22)
-    user = ssh_config.get("user", "admin")
+    user = ssh_config.get("user", "<TARGET_USER>")
     auth_type = auth.get("type")
 
     if auth_type == "password":
@@ -116,7 +116,7 @@ def _build_scp_base(ssh_config: dict, direction: str) -> list:
     auth = ssh_config.get("auth", {})
     host = ssh_config["host"]
     port = ssh_config.get("port", 22)
-    user = ssh_config.get("user", "admin")
+    user = ssh_config.get("user", "<TARGET_USER>")
     auth_type = auth.get("type")
 
     if auth_type == "password":

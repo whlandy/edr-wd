@@ -2,8 +2,8 @@
 # tunnel.sh — EDR-WD SSH Tunnel 管理脚本（参数化版）
 #
 # 参数化默认值（环境变量优先，命令行参数次之）：
-#   EDR_WD_HOST          远程 Windows IP（默认: 170.170.11.26）
-#   EDR_WD_USER          远程用户名（默认: admin）
+#   EDR_WD_HOST          远程 Windows IP（默认: <TARGET_IP>）
+#   EDR_WD_USER          远程用户名（默认: <TARGET_USER>）
 #   EDR_WD_LOCAL_PORT    本地端口（默认: 18765）
 #   EDR_WD_REMOTE_PORT   远程端口（默认: 8765）
 #   EDR_WD_PASSFILE      密码文件（默认: $HOME/.ssh/.tunnelpass）
@@ -11,7 +11,7 @@
 #
 # 用法:
 #   bash tunnel.sh start      # 使用默认值
-#   bash tunnel.sh start 170.170.11.26 admin  # 覆盖 IP 和用户
+#   bash tunnel.sh start <TARGET_IP> <TARGET_USER>  # 覆盖 IP 和用户
 #   bash tunnel.sh stop
 #   bash tunnel.sh status
 #   bash tunnel.sh test
@@ -21,8 +21,8 @@ set -e
 COMMAND="${1:-status}"
 shift || true
 
-EDR_WD_HOST="${EDR_WD_HOST:-${1:-170.170.11.26}}"
-EDR_WD_USER="${EDR_WD_USER:-${2:-admin}}"
+EDR_WD_HOST="${EDR_WD_HOST:-${1:-<TARGET_IP>}}"
+EDR_WD_USER="${EDR_WD_USER:-${2:-<TARGET_USER>}}"
 EDR_WD_LOCAL_PORT="${EDR_WD_LOCAL_PORT:-18765}"
 EDR_WD_REMOTE_PORT="${EDR_WD_REMOTE_PORT:-8765}"
 EDR_WD_PASSFILE="${EDR_WD_PASSFILE:-$HOME/.ssh/.tunnelpass}"

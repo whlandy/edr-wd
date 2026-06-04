@@ -9,8 +9,8 @@
 #   smoke    Run the MCP smoke test against the local tunnel
 #
 # Environment:
-#   EDR_WD_HOST          Windows host/IP (default: 170.170.11.26)
-#   EDR_WD_USER          Windows username (default: admin)
+#   EDR_WD_HOST          Windows host/IP (default: <TARGET_IP>)
+#   EDR_WD_USER          Windows username (default: <TARGET_USER>)
 #   EDR_WD_SSH_PORT      SSH port (default: 22)
 #   EDR_WD_LOCAL_PORT    Local tunnel port (default: 18765)
 #   EDR_WD_REMOTE_PORT   Windows MCP port (default: 8765)
@@ -21,8 +21,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOST="${EDR_WD_HOST:-170.170.11.26}"
-USER="${EDR_WD_USER:-admin}"
+HOST="${EDR_WD_HOST:-<TARGET_IP>}"
+USER="${EDR_WD_USER:-<TARGET_USER>}"
 SSH_PORT="${EDR_WD_SSH_PORT:-22}"
 LOCAL_PORT="${EDR_WD_LOCAL_PORT:-18765}"
 REMOTE_PORT="${EDR_WD_REMOTE_PORT:-8765}"

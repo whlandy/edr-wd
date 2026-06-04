@@ -17,7 +17,7 @@ Usage:
     tc.get_default_target()               # → target name string
 
     # URL builder
-    tc.build_mcp_url("win-dev")          # → "http://170.170.11.26:8765/mcp"
+    tc.build_mcp_url("win-dev")          # → "http://<TARGET_IP>:8765/mcp"
 
     # Auth resolver (replaces password_env with actual password from env)
     tc.resolve_auth("win-dev")            # → {"host": ..., "user": ..., "auth": {"type": "password", "password": "***"}}

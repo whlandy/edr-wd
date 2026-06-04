@@ -5,7 +5,7 @@
 #   bash setup-mac.sh <WINDOWS_IP> <WINDOWS_USER>
 #
 # 示例:
-#   bash agent/setup-mac.sh 170.170.11.26 admin
+#   bash agent/setup-mac.sh <TARGET_IP> <TARGET_USER>
 
 set -e
 
