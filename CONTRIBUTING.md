@@ -20,7 +20,7 @@ direct_url / tunnel_url / target_root / sshpass -p
 cat config/targets.json
 cat config/targets.local.json
 git diff config/targets.local.json
-sshpass -p '真实密码' ssh user@host ...
+sshpass -p '<YOUR_PASSWORD>' ssh <TARGET_USER>@<TARGET_IP> ...
 ```
 
 **调试时使用脱敏输出**：
