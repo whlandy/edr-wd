@@ -456,15 +456,21 @@ Priority: `mcp_init_result` > `target` > `base_url`. Mixing `base_url` with
 
 ## Running Tests
 
+All commands run from the repository root.
+
 ```bash
-# Run all tests with default target
-python3 run_tests.py
+# Linux/Mac: Run all tests with default target
+python3 test_case/run_tests.py
 
-# Run with explicit target
-python3 run_tests.py --target win-dev
+# Linux/Mac: Run with explicit target
+python3 test_case/run_tests.py --target win-dev
 
-# Run with environment variable
-EDR_WD_TARGET=win-dev python3 run_tests.py -v
+# Windows PowerShell: Run with explicit target
+python test_case\run_tests.py --target win-dev -v
+
+# Windows PowerShell: via environment variable
+$env:EDR_WD_TARGET = "win-dev"
+python test_case\run_tests.py -v
 ```
 
 ### Test flow
@@ -492,6 +498,79 @@ McpClient(mcp_init_result=init_result)
 
 Note: `EDR_WD_ENABLE_PYWINAUTO=1` is set automatically by `start_server.ps1`
 — no need to set it manually.
+
+---
+
+## Windows Agent
+
+The agent side (`agent/`) runs on both Linux/Mac and Windows agents. Target is always Windows.
+
+### Auth requirements
+
+| Agent OS | Recommended auth | Notes |
+|----------|-----------------|-------|
+| Linux / Mac | password (`sshpass`) or key | both work |
+| Windows | **key only** | `sshpass` is not available on Windows |
+
+On Windows agent, if `auth.type=password` is used and `sshpass` is not found, the error message will be:
+
+```
+Command not found: sshpass. sshpass is not available on Windows agent.
+Use key auth instead (set auth.type='key' in config).
+```
+
+### OpenSSH on Windows
+
+Windows agent requires OpenSSH Client (not PowerShell remoting):
+
+```powershell
+# Check if OpenSSH is installed
+ssh -V
+
+# Install if missing
+Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Client*'
+Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
+```
+
+### Key auth setup on Windows
+
+1. Generate a key (as the agent user):
+   ```powershell
+   ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\id_edr_wd
+   ```
+2. Copy the public key to the target (step 1: upload, step 2: append):
+   ```powershell
+   # Step 1: upload the public key to a temp location on the target
+   scp -P 22 $env:USERPROFILE\.ssh\id_edr_wd.pub admin@<target-ip>:C:\Users\admin\id_edr_wd.pub
+
+   # Step 2: append it to authorized_keys via PowerShell on the target
+   ssh -p 22 admin@<target-ip> `
+     'powershell -NoProfile -Command "New-Item -ItemType Directory -Force $env:USERPROFILE\.ssh; Get-Content $env:USERPROFILE\id_edr_wd.pub | Add-Content $env:USERPROFILE\.ssh\authorized_keys"'
+   ```
+3. Verify the key works:
+   ```powershell
+   ssh -i $env:USERPROFILE\.ssh\id_edr_wd -p 22 admin@<target-ip> hostname
+   ```
+4. Set `auth.type=key` and `auth.key_path="C:\Users\<username>\.ssh\id_edr_wd"` in `targets.local.json`.
+
+### Running tests on Windows agent
+
+```powershell
+# From the edr-wd root directory
+python test_case\run_tests.py --target win-dev -v
+
+# Or via environment variable
+$env:EDR_WD_TARGET = "win-dev"
+python test_case\run_tests.py -v
+```
+
+Note: use `python` (or `py`) on Windows, not `python3`.
+
+### Path separator
+
+- Windows agent uses backslash `\` in config files (`target_root`, `key_path`).
+- Agent code uses `pathlib.Path` which handles both `/` and `\` via `os.sep`.
+- Remote paths (target is always Windows) use backslash in SCP/SSH commands.
 
 ---
 
@@ -613,3 +692,4 @@ Run with: `cd test_case && python3 run_tests.py --target win-dev -v`
 - Launcher: a long-running process that keeps the MCP server alive
 - Status page: HTTP endpoint that returns structured health info
 - GUI-layer E2E stability: investigate `activate_edr`, `screenshot`, `restore_edr` failures
+- Windows agent: key-auth docs and guidance added; runtime validation pending
