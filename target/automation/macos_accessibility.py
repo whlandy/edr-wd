@@ -249,17 +249,43 @@ class MacOSAccessibilityBackend:
         """
         Click at absolute screen coordinates (x, y).
 
-        Tries `cliclick` first (small CLI; install via `brew install cliclick`).
-        Falls back to AppleScript-driven click via System Events.
+        By default this is a DRY RUN — the click is not actually performed.
+        Real coordinate clicks can move the mouse, dismiss dialogs, hit
+        the wrong target if the user has been editing the screen, and
+        are impossible to undo. The first phase of the macOS backend
+        is capability plumbing; the second phase (app-specific
+        workflows) can opt in to real clicks by setting the
+        EDR_WD_ALLOW_REAL_CLICKS=1 environment variable on the target
+        server, OR by passing dry_run=False from a controlled caller.
+
+        Tries `cliclick` first (small CLI; install via
+        `brew install cliclick`). Falls back to AppleScript-driven
+        click via System Events.
 
         Note: AppleScript click at {x, y} interprets the coordinates as
-        window-relative in some contexts. We use System Events' "click at"
-        which is screen-absolute on a 1-pt coordinate system; this matches
-        the units used by screencapture on a non-Retina display and by
-        PyAutoGUI on macOS in default configuration. If the target Mac has
-        a Retina display, callers should divide pixel coordinates by 2
-        before passing in (or set their capture/click DPI explicitly).
+        window-relative in some contexts. We use System Events'
+        "click at" which is screen-absolute on a 1-pt coordinate
+        system; this matches the units used by screencapture on a
+        non-Retina display and by PyAutoGUI on macOS in default
+        configuration. If the target Mac has a Retina display,
+        callers should divide pixel coordinates by 2 before passing
+        in (or set their capture/click DPI explicitly).
         """
+        import os as _os
+        allow_real = _os.environ.get("EDR_WD_ALLOW_REAL_CLICKS", "0") == "1"
+        if not allow_real:
+            return {
+                "ok": True,
+                "method": "dry_run",
+                "x": x,
+                "y": y,
+                "note": (
+                    "click_at is in dry-run mode. Real clicks are disabled "
+                    "until EDR_WD_ALLOW_REAL_CLICKS=1 is set on the target. "
+                    "This is the macOS backend's default for safety — see "
+                    "SKILL.md / macos_accessibility docs for the rationale."
+                ),
+            }
         # Try cliclick
         rc, out = _run(["cliclick", f"c:{x},{y}"], timeout=5)
         if rc == 0:
@@ -275,6 +301,8 @@ class MacOSAccessibilityBackend:
         if rc2 != 0:
             return {
                 "ok": False,
+                "stage": "tool_missing",
+                "tool": "cliclick" if rc != 0 else None,
                 "error": (
                     f"click_at failed: cliclick rc={rc} ({out.strip()}); "
                     f"osascript rc={rc2} ({out2.strip()}). "

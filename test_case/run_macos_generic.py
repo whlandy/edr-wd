@@ -174,17 +174,18 @@ def run_macos_generic_tests(client, verbose: bool = False) -> tuple[int, int, li
     )
 
     # ── 10. click_at best-effort ─────────────────────────────────
-    # We do NOT verify the click "landed" — that requires visual inspection.
+    # We do NOT verify the click "landed" — that requires visual
+    # inspection, and the macos_accessibility backend defaults to
+    # dry-run mode (no real click) for safety. EDR_WD_ALLOW_REAL_CLICKS=1
+    # on the target server opts in to real cliclick / osascript clicks.
     # We only verify the backend has the plumbing to attempt it.
-    print("\n  click_at (plumbing check)... ", end="", flush=True)
+    print("\n  click_at (plumbing check, dry-run)... ", end="", flush=True)
     r = call_tool("click_at", {"x": 100, "y": 100})
     if verbose:
         print(f"\n    {json.dumps(r, ensure_ascii=False)[:300]}")
         print("    ", end="")
-    # On a headless or permission-restricted Mac, this can return ok=False
-    # with a meaningful error — that's still a pass for the plumbing test.
     method = r.get("method", "")
-    has_method = method in ("cliclick", "osascript")
+    has_method = method in ("cliclick", "osascript", "dry_run")
     record(
         "click_at plumbing",
         has_method,
