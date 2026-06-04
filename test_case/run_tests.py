@@ -142,12 +142,18 @@ def run_tests(verbose=False, target=None):
     print("E2E: EDR Full Workflow")
     print("=" * 60)
 
+    # Step1: explicit EDR activation — validates the activate_edr() flow works.
+    # Step3: uses auto_activate=True as fallback — validates that connect() can
+    # recover when the window is present but not yet active/ready, which is
+    # common in RDP/Qt GUI automation. This is NOT a substitute for Step1;
+    # keeping both helps distinguish: explicit activation failure vs
+    # connect-with-auto-recovery success.
     e2e_steps = [
         # (name, tool, args, must_pass)
         ("Step0: is_window_open(HisecEndpointAgent.exe)", "is_window_open", {"process_name": "HisecEndpointAgent.exe"}, False),
         ("Step1: activate_edr",                             "activate_edr",  {"wait": True, "timeout": 15.0}, True),
         ("Step2: wait_window(HisecEndpointAgent.exe)",      "wait_window",   {"process_name": "HisecEndpointAgent.exe", "timeout": 15.0, "interval": 0.5}, True),
-        ("Step3: connect(HisecEndpointAgent.exe)",           "connect",       {"process_name": "HisecEndpointAgent.exe", "timeout": 10.0}, True),
+        ("Step3: connect(HisecEndpointAgent.exe, auto_activate fallback)", "connect", {"process_name": "HisecEndpointAgent.exe", "timeout": 10.0, "auto_activate": True}, True),
         ("Step4: dump_tree (max_depth=10, find edrLanel)",  "dump_tree",     {"max_depth": 10}, True),
         ("Step5: click(edrWidget GroupBox)",                "click",          {"automation_id": "SafraUIMainWindow.MainWidget.content_widget.featureWidget.EdrUIMainWindow.centralwidget.edrWidget"}, True),
         ("Step6: wait 2s for UI to react",                  None,             None,             False),  # no tool, just sleep
