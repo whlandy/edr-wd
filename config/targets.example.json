@@ -14,7 +14,7 @@
       "ssh": {
         "host": "<target-ip>",
         "port": 22,
-        "user": "admin",
+        "user": "<TARGET_USER>",
         "auth": {
           "type": "password",
           "password_env": "EDR_WD_WIN_DEV_PASSWORD"
@@ -34,7 +34,7 @@
 
       "windows": {
         "python_path": "C:\\Program Files\\Python313\\python.exe",
-        "target_root": "C:\\Users\\admin\\Desktop\\edr-wd\\target",
+        "target_root": "C:\\Users\\<TARGET_USER>\\Desktop\\edr-wd\\target",
         "task_name": "StartEDRMCP",
         "run_with_highest_privileges": true
       }
@@ -49,10 +49,10 @@
       "ssh": {
         "host": "<target-ip>",
         "port": 22,
-        "user": "admin",
+        "user": "<TARGET_USER>",
         "auth": {
           "type": "key",
-          "key_path": "C:\\Users\\<username>\\.ssh\\id_edr_wd"
+          "key_path": "C:\\Users\\<TARGET_USER>\\.ssh\\id_edr_wd"
         }
       },
 
@@ -69,7 +69,7 @@
 
       "windows": {
         "python_path": "C:\\Program Files\\Python313\\python.exe",
-        "target_root": "C:\\Users\\admin\\Desktop\\edr-wd\\target",
+        "target_root": "C:\\Users\\<TARGET_USER>\\Desktop\\edr-wd\\target",
         "task_name": "StartEDRMCP",
         "run_with_highest_privileges": true
       }

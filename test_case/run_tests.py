@@ -158,7 +158,7 @@ def run_tests(verbose=False, target=None):
         ("Step5: click(edrWidget GroupBox)",                "click",          {"automation_id": "SafraUIMainWindow.MainWidget.content_widget.featureWidget.EdrUIMainWindow.centralwidget.edrWidget"}, True),
         ("Step6: wait 2s for UI to react",                  None,             None,             False),  # no tool, just sleep
         ("Step7: verify EDRClient window appeared",       "is_window_open", {"process_name": "EDRClient.exe"}, True),
-        ("Step8: screenshot",                               "screenshot",    {"path": "C:\\Users\\admin\\Desktop\\maa-fw运行记录\\e2e_edr_full_workflow.png"}, True),
+        ("Step8: screenshot",                               "screenshot",    {"path": "C:\\Users\\<TARGET_USER>\\Desktop\\maa-fw运行记录\\e2e_edr_full_workflow.png"}, True),
         ("Step9: restore_edr",                              "restore_edr",   {}, False),
         ("Step10: is_window_open verify",                   "is_window_open", {"process_name": "HisecEndpointAgent.exe"}, False),
     ]

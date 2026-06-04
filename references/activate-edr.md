@@ -21,7 +21,7 @@ activate_edr()
 2. **connect(title_re=".*HiSec.*", auto_activate=False)** — connect to window (auto_activate=True also activates EDR on failure)
 3. **dump_tree(max_depth=10)** — inspect controls
 4. **click_target(...)** or **click_window_at(x, y)** — click a control
-5. **screenshot(path="C:\\Users\\admin\\verify.png")** — verify result
+5. **screenshot(path="C:\\Users\\<TARGET_USER>\\verify.png")** — verify result
 
 ## Coordinate System Reference
 
