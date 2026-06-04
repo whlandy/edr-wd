@@ -3,8 +3,10 @@
 run_tests.py — 纯 Python 测试 runner（不依赖 pytest）
 
 用法：
-  python run_tests.py              # 运行所有测试
+  python run_tests.py              # 运行所有测试（使用 default_target）
   python run_tests.py -v           # 详细输出
+  python run_tests.py --target win-dev   # 指定 target
+  EDR_WD_TARGET=win-dev python run_tests.py  # 通过环境变量指定
 """
 
 import sys
@@ -13,44 +15,52 @@ import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from test_case.conftest import McpClient, check_tunnel, check_mcp_server, ensure_server_running
+from test_case.conftest import McpClient, ensure_server_running, get_target_name, mcp_initialize
+
+# Import target_manager for health checks
+from agent import target_manager
 
 
-def run_tests(verbose=False):
-    # ── Ensure MCP server is running on Windows ──────────────────────────
+def run_tests(verbose=False, target=None):
+    # ── Resolve target ─────────────────────────────────────────────
+    target_name = target or os.environ.get("EDR_WD_TARGET") or get_target_name()
+
+    # ── Ensure MCP server is running on Windows ────────────────────
     print("=" * 60)
     print("Starting MCP Server")
     print("=" * 60)
-    server_ok, srv_msg = ensure_server_running()
+    server_ok, srv_msg = ensure_server_running(target_name)
     print(f"  MCP Server: {'[OK]' if server_ok else '[FAIL]'} {srv_msg}")
     if not server_ok:
         print("[FAIL] Could not start MCP server on Windows.")
         sys.exit(1)
 
-    tunnel_ok, tun_msg = check_tunnel()
+    # ── MCP initialize ─────────────────────────────────────────────
     print("=" * 60)
     print("Environment Check")
     print("=" * 60)
-    print(f"  Tunnel:     {'[OK]' if tunnel_ok else '[FAIL]'} {tun_msg}")
-    print(f"  MCP Server: {'[OK]' if server_ok else '[FAIL]'} {srv_msg}")
+
+    # Get MCP URL for display
+    health = target_manager.check_server_health(target_name)
+    mcp_url = health.get("data", {}).get("mcp_url", "unknown")
+    print(f"  Target:     {target_name}")
+    print(f"  MCP Server: [{'OK' if server_ok else 'FAIL'}] {srv_msg}")
     print()
 
-    if not tunnel_ok or not server_ok:
-        print("[FAIL] Environment not ready.")
-        if not tunnel_ok:
-            print("  - SSH tunnel: bash agent/tunnel.sh start")
-        if not server_ok:
-            print("  - Windows:    deploy.ps1 -Action start (in RDP desktop)")
-        sys.exit(1)
-
-    client = McpClient()
+    # Perform MCP initialize via mcp_manager
     try:
-        init = client.initialize()
-        if "error" in init:
-            print(f"[FAIL] initialize failed: {init}")
+        init_result = mcp_initialize(target_name)
+        if not init_result["ok"]:
+            print(f"[FAIL] MCP initialize failed: {init_result.get('error')}")
             sys.exit(1)
-        server_info = init.get("result", {}).get("serverInfo", {})
-        print(f"[OK] initialize: server={server_info.get('name')} v{server_info.get('version')}")
+
+        session_id = init_result["data"]["session_id"]
+        print(f"[OK] MCP session: {session_id}")
+        print()
+
+        # Create McpClient with pre-initialized session
+        client = McpClient(mcp_init_result=init_result)
+
     except Exception as e:
         print(f"[FAIL] initialize exception: {e}")
         sys.exit(1)
@@ -132,12 +142,18 @@ def run_tests(verbose=False):
     print("E2E: EDR Full Workflow")
     print("=" * 60)
 
+    # Step1: explicit EDR activation — validates the activate_edr() flow works.
+    # Step3: uses auto_activate=True as fallback — validates that connect() can
+    # recover when the window is present but not yet active/ready, which is
+    # common in RDP/Qt GUI automation. This is NOT a substitute for Step1;
+    # keeping both helps distinguish: explicit activation failure vs
+    # connect-with-auto-recovery success.
     e2e_steps = [
         # (name, tool, args, must_pass)
         ("Step0: is_window_open(HisecEndpointAgent.exe)", "is_window_open", {"process_name": "HisecEndpointAgent.exe"}, False),
         ("Step1: activate_edr",                             "activate_edr",  {"wait": True, "timeout": 15.0}, True),
         ("Step2: wait_window(HisecEndpointAgent.exe)",      "wait_window",   {"process_name": "HisecEndpointAgent.exe", "timeout": 15.0, "interval": 0.5}, True),
-        ("Step3: connect(HisecEndpointAgent.exe)",           "connect",       {"process_name": "HisecEndpointAgent.exe", "timeout": 10.0}, True),
+        ("Step3: connect(HisecEndpointAgent.exe, auto_activate fallback)", "connect", {"process_name": "HisecEndpointAgent.exe", "timeout": 10.0, "auto_activate": True}, True),
         ("Step4: dump_tree (max_depth=10, find edrLanel)",  "dump_tree",     {"max_depth": 10}, True),
         ("Step5: click(edrWidget GroupBox)",                "click",          {"automation_id": "SafraUIMainWindow.MainWidget.content_widget.featureWidget.EdrUIMainWindow.centralwidget.edrWidget"}, True),
         ("Step6: wait 2s for UI to react",                  None,             None,             False),  # no tool, just sleep
@@ -197,7 +213,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--target", help="Target name (overrides EDR_WD_TARGET and default_target)")
     args = parser.parse_args()
 
-    ok = run_tests(verbose=args.verbose)
+    ok = run_tests(verbose=args.verbose, target=args.target)
     sys.exit(0 if ok else 1)

@@ -1,0 +1,26 @@
+{
+  "_comment": "测试机配置列表。默认使用 default 机器。可通过 EDR_WD_MACHINE 环境变量切换。",
+  "default": "192.168.3.23",
+  "machines": {
+    "192.168.3.23": {
+      "comment": "当前开发机",
+      "host": "192.168.3.23",
+      "port": 22,
+      "user": "whl",
+      "password": "lWlY0526",
+      "server_path": "D:\\skill\\edr-wd\\target",
+      "server_port": 8765,
+      "mcp_url": "http://192.168.3.23:8765/mcp"
+    },
+    "170.170.11.26": {
+      "comment": "备用机器",
+      "host": "170.170.11.26",
+      "port": 22,
+      "user": "admin",
+      "password": "whl@123",
+      "server_path": "C:/Users/admin/Desktop/edr-wd-main/edr-wd-main/target",
+      "server_port": 8765,
+      "mcp_url": "http://170.170.11.26:8765/mcp"
+    }
+  }
+}

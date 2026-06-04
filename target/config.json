@@ -1,0 +1,26 @@
+{
+  "ssh": {
+    "host": "170.170.11.26",
+    "port": 22,
+    "user": "admin",
+    "password": "whl@123"
+  },
+  "server": {
+    "python_path": "C:\\Program Files\\Python313\\python.exe",
+    "host": "0.0.0.0",
+    "port": 8765,
+    "command": "server.py --http --host 0.0.0.0 --port 8765"
+  },
+  "task": {
+    "name": "StartEDRMCP"
+  },
+  "paths": {
+    "target_root": null,
+    "target_root_fallback": "D:\\skill\\edr-wd\\target"
+  },
+  "connection": {
+    "preferred": "direct",
+    "direct_url": "http://170.170.11.26:8765/mcp",
+    "tunnel_url": "http://localhost:18765/mcp"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "default": "win-dev",
+  "machines": {
+    "win-dev": {
+      "name": "win-dev",
+      "host": "170.170.11.26",
+      "server_port": 8765,
+      "mcp_url": "http://170.170.11.26:8765/mcp",
+      "ssh_port": 22,
+      "ssh_user": "admin",
+      "ssh_password": "whl@123",
+      "target_root": "C:\\Users\\admin\\Desktop\\edr-wd-main\\edr-wd-hermes",
+      "description": "Development Windows VM (Huawei HiSec EDR)"
+    }
+  }
+}
