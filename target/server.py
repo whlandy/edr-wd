@@ -11,6 +11,10 @@ Usage:
 
     # Expose beyond localhost only when direct LAN access is required
     python -m edr_wd.server --http --host 0.0.0.0 --port 8765
+
+Backend selection:
+    EDR_WD_AUTOMATION_BACKEND=windows_pywinauto    (default; legacy behavior)
+    EDR_WD_AUTOMATION_BACKEND=macos_accessibility  (macOS target)
 """
 
 from __future__ import annotations
@@ -26,7 +30,8 @@ import uuid
 
 from fastmcp import FastMCP
 
-from pywinauto_client import WindowsGUI
+from automation import create_backend
+from automation.base import AutomationBackend
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -38,9 +43,17 @@ logging.basicConfig(
 logger = logging.getLogger("edr-wd")
 
 # ---------------------------------------------------------------------------
-# Global GUI client (singleton per server instance)
+# Global automation backend (singleton per server instance)
 # ---------------------------------------------------------------------------
-_gui: WindowsGUI = WindowsGUI()
+# Selection precedence: EDR_WD_AUTOMATION_BACKEND env var > "windows_pywinauto".
+# The factory raises UnsupportedBackendError for unknown names — caught here
+# so the server still starts (with a clear log line) and operators can fix
+# the env var. This avoids breaking deployments over a typo.
+try:
+    _backend: AutomationBackend = create_backend()
+except Exception as _e:  # pragma: no cover — defensive startup guard
+    logger.error("Failed to construct automation backend: %s", _e)
+    _backend = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -52,32 +65,44 @@ mcp = FastMCP("edr-wd")
 @mcp.tool(
     name="connect",
     description=(
-        "Connect to a Windows application by window title (regex), process name, or PID. "
-        "Must be called before any other operation. "
-        "auto_activate: if True and first connect attempt fails, try activate_edr() once then retry."
+        "Connect to a GUI application by window title (regex), process name, PID, "
+        "app name, or bundle id. The exact matchers supported depend on the "
+        "active automation backend. Must be called before any other "
+        "connect-required operation. "
+        "auto_activate: if True and first connect attempt fails AND the backend "
+        "exposes activate_edr() (Windows HiSec EDR only), try activate_edr() "
+        "once then retry."
     ),
 )
 def connect(
     title_re: str = None,
     process_name: str = None,
     pid: int = None,
+    app_name: str = None,
+    bundle_id: str = None,
     timeout: float = 10.0,
     auto_activate: bool = False,
 ) -> str:
+    if _backend is None:
+        return json.dumps({"ok": False, "error": "Automation backend not initialized"})
+
     def do_connect():
-        if title_re:
-            return _gui.connect_by_title(title_re, timeout)
-        elif process_name:
-            return _gui.connect_by_process(process_name, timeout)
-        elif pid:
-            return _gui.connect_by_pid(pid)
-        else:
-            return {"ok": False, "error": "Must specify title_re, process_name, or pid"}
+        return _backend.connect(
+            title_re=title_re,
+            process_name=process_name,
+            pid=pid,
+            app_name=app_name,
+            bundle_id=bundle_id,
+            timeout=timeout,
+        )
 
     result = do_connect()
     activate_result = None
-    if not result["ok"] and auto_activate and ENABLE_POWERSHELL:
-        activate_result = _gui.activate_edr()
+    if (not result["ok"]
+            and auto_activate
+            and ENABLE_POWERSHELL
+            and hasattr(_backend, "activate_edr")):
+        activate_result = _backend.activate_edr()  # type: ignore[attr-defined]
         time.sleep(3)
         result = do_connect()
         if not result["ok"]:
@@ -94,7 +119,7 @@ def connect(
     ),
 )
 def dump_tree(window_title_re: str = None, max_depth: int = 10) -> str:
-    result = _gui.dump_tree(window_title_re, max_depth=max_depth)
+    result = _backend.dump_tree(window_title_re, max_depth=max_depth)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -120,7 +145,7 @@ def click(
     control_type: str = None,
     parent_fallback: bool = True,
 ) -> str:
-    result = _gui.click(
+    result = _backend.click(
         control_id, text, class_name, parent_text, automation_id,
         auto_id_contains, auto_id_suffix, parent_of, control_type,
         parent_fallback,
@@ -153,7 +178,7 @@ def click_target(
     y_offset: int = 0,
     parent_fallback: bool = True,
 ) -> str:
-    result = _gui.click_target(
+    result = _backend.click_target(
         control_id=control_id,
         text=text,
         class_name=class_name,
@@ -178,7 +203,7 @@ def click_target(
     ),
 )
 def click_at(x: int, y: int) -> str:
-    result = _gui.click_at(x, y)
+    result = _backend.click_at(x, y)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -191,7 +216,7 @@ def click_at(x: int, y: int) -> str:
     ),
 )
 def click_window_at(x: int, y: int, window_title_re: str = None) -> str:
-    result = _gui.click_window_at(x, y, window_title_re)
+    result = _backend.click_window_at(x, y, window_title_re)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -209,7 +234,7 @@ def type_text(
     class_name: str = None,
     string: str = "",
 ) -> str:
-    result = _gui.type_text(control_id, text, class_name, string)
+    result = _backend.type_text(control_id, text, class_name, string)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -228,7 +253,7 @@ def select(
     item: str = None,
     index: int = None,
 ) -> str:
-    result = _gui.select(control_id, text, class_name, item, index)
+    result = _backend.select(control_id, text, class_name, item, index)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -241,7 +266,7 @@ def get_text(
     text: str = None,
     class_name: str = None,
 ) -> str:
-    result = _gui.get_text(control_id, text, class_name)
+    result = _backend.get_text(control_id, text, class_name)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -254,26 +279,36 @@ def get_text(
     ),
 )
 def screenshot(path: str = None) -> str:
-    result = _gui.screenshot(path)
+    result = _backend.screenshot(path)
     return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool(
     name="activate_edr",
     description=(
-        "Activate the EDR GUI by launching HisecEndpointAgent with 'cmd ui'. "
-        "By default waits up to 15 s for the EDRClient window to appear. "
-        "If the window is already open, returns immediately with already_open=true. "
-        "exe_path can override the default EDR executable path. "
-        "Requires EDR_WD_ENABLE_PYWINAUTO=1 on the server."
+        "Windows HiSec EDR specific. Activate the EDR GUI by launching "
+        "HisecEndpointAgent with 'cmd ui'. By default waits up to 15 s for the "
+        "EDRClient window to appear. If the window is already open, returns "
+        "immediately with already_open=true. exe_path can override the default "
+        "EDR executable path. Requires EDR_WD_ENABLE_POWERSHELL=1 on the server. "
+        "On non-Windows backends, returns ok=false with an explanatory error."
     ),
 )
 def activate_edr(exe_path: str = None, wait: bool = True, timeout: float = 15.0,
                  edr_widget_auto_id: str = None) -> str:
+    if _backend is None:
+        return json.dumps({"ok": False, "error": "Automation backend not initialized"})
+    if not hasattr(_backend, "activate_edr"):
+        return json.dumps({
+            "ok": False,
+            "error": f"activate_edr is not supported by the {type(_backend).__name__} backend",
+        })
     if not ENABLE_POWERSHELL:
         return json.dumps({"ok": False, "error": "PowerShell disabled: set EDR_WD_ENABLE_POWERSHELL=1 to enable"})
-    result = _gui.activate_edr(exe_path=exe_path, wait=wait, timeout=timeout,
-                               edr_widget_auto_id=edr_widget_auto_id)
+    result = _backend.activate_edr(  # type: ignore[attr-defined]
+        exe_path=exe_path, wait=wait, timeout=timeout,
+        edr_widget_auto_id=edr_widget_auto_id,
+    )
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -286,7 +321,7 @@ def activate_edr(exe_path: str = None, wait: bool = True, timeout: float = 15.0,
     ),
 )
 def list_windows() -> str:
-    result = _gui.list_windows()
+    result = _backend.list_windows()
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -304,7 +339,7 @@ def is_window_open(
     process_name: str = None,
     class_name: str = None,
 ) -> str:
-    result = _gui.is_window_open(title_re=title_re, process_name=process_name, class_name=class_name)
+    result = _backend.is_window_open(title_re=title_re, process_name=process_name, class_name=class_name)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -324,7 +359,7 @@ def wait_window(
     timeout: float = 10.0,
     interval: float = 0.5,
 ) -> str:
-    result = _gui.wait_window(
+    result = _backend.wait_window(
         title_re=title_re, process_name=process_name, class_name=class_name,
         timeout=timeout, interval=interval,
     )
@@ -338,10 +373,10 @@ def wait_window(
 def restore_edr() -> str:
     """还原 EDR 窗口（如果最小化则强制恢复）"""
     try:
-        if _gui.app is None:
+        if _backend.connected_app is None:
             return json.dumps({"ok": False, "error": "Not connected"})
 
-        wins = _gui.app.windows()
+        wins = _backend.connected_app.windows()
         if not wins:
             return json.dumps({"ok": False, "error": "No windows found"})
 
@@ -407,22 +442,32 @@ def status() -> str:
     pid = _get_server_pid()
     port_open = _check_port(8765)
 
+    backend_name = "unknown"
+    if _backend is not None:
+        try:
+            backend_name = _backend.backend
+        except Exception:
+            pass
+
     result = {
-        "ok": pid is not None and port_open,
+        "ok": pid is not None and port_open and _backend is not None,
         "pid": pid,
         "port": 8765,
-        "backend": _gui.backend,
+        "backend": backend_name,
         "cwd": os.getcwd(),
         "can_see_hisec_agent": False,
         "interactive_session": os.environ.get("SESSIONNAME", ""),
     }
 
-    # Probe whether we can see a HisecEndpoint window
-    if _gui.app is not None and _gui.main_window is not None:
-        try:
-            result["can_see_hisec_agent"] = _gui.main_window.is_visible()
-        except Exception:
-            pass
+    # Probe whether we can see a HisecEndpoint window (Windows-specific)
+    if _backend is not None:
+        connected_app = getattr(_backend, "connected_app", None)
+        main_window = getattr(_backend, "main_window", None)
+        if connected_app is not None and main_window is not None:
+            try:
+                result["can_see_hisec_agent"] = main_window.is_visible()
+            except Exception:
+                pass
 
     return json.dumps(result, ensure_ascii=False)
 
