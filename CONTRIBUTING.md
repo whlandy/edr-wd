@@ -25,24 +25,30 @@ sshpass -p '<YOUR_PASSWORD>' ssh <TARGET_USER>@<TARGET_IP> ...
 
 **调试时使用脱敏输出**：
 
-```python
-import json
+**唯一允许的查看 local config 方式** — 通过 `scripts/redact_config.py`：
 
-SENSITIVE_KEYS = {
-    "host", "ip", "user", "password", "password_env",
-    "key_path", "direct_url", "tunnel_url", "target_root"
-}
-
-def redact(obj):
-    if isinstance(obj, dict):
-        return {k: ("<REDACTED>" if k in SENSITIVE_KEYS else redact(v))
-                for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [redact(x) for x in obj]
-    return obj
-
-print(json.dumps(redact(data), indent=2, ensure_ascii=False))
+```bash
+python scripts/redact_config.py config/targets.local.json
+python scripts/redact_config.py config/targets.local.json --strict
+# --strict: exits non-zero if any non-secret key contains a
+# password-like value (length 6..64, no whitespace, mixed alnum).
 ```
+
+脚本规则：
+- `password / password_env / token / secret / api_key / key_path` 一律 `<REDACTED>`
+- `host / user / root / target_root / python_path / *_url` 用 stable SHA1 prefix (`h_xxxxxxxx`)
+- 其它结构保留，方便 review schema 正确性
+
+**严禁**使用 `cat / less / head / jq` 直接打开 `config/targets.local.json`、`config/targets.json`、`config/test_machines.json`、`target/config.json`。**严禁**在终端 / commit message / PR 描述里复述这些文件的内容。
+
+CI / pre-commit 应在每次提交前跑：
+
+```bash
+git grep -nE "170\\.170\\.11\\.26|whl@123|C:\\\\Users\\\\admin|sshpass -p '[A-Za-z0-9]+'" -- .
+git ls-files config/targets.local.json config/test_machines.json target/config.json
+```
+
+如果有任何输出，禁止 push。
 
 **SSH 密码认证**：使用 `sshpass -e`（从 `SSHPASS` 环境变量读取），不要在命令中明文写密码。
 
