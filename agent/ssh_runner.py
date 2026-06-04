@@ -39,6 +39,7 @@ If auth.password is missing (password auth), raises ValueError.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Tuple
@@ -55,7 +56,17 @@ class UnsupportedAuthType(SSHAuthError):
 
 
 def _resolve_key_path(key_path: str) -> Path:
-    p = Path(key_path).expanduser()
+    # Expand ~ and environment variables ($VAR, ${VAR}, %VAR%) in the key path.
+    # Supports both Unix and Windows formats.
+    def _expand_once(p: str) -> str:
+        def _replace(m: re.Match) -> str:
+            name = m.group(1) or ""
+            return os.environ.get(name, m.group(0)) or m.group(0)
+        p = re.sub(r"%([^%]+)%", _replace, p)
+        return os.path.expandvars(p)
+
+    expanded = _expand_once(key_path)
+    p = Path(expanded).expanduser()
     if not p.exists():
         raise SSHAuthError(f"SSH key not found: {p}")
     return p
@@ -148,7 +159,10 @@ def run_ssh(ssh_config: dict, command: str, *, timeout: int = 30) -> Tuple[int, 
         name = Path(missing).name if missing else "unknown"
         hint = ""
         if name == "sshpass":
-            hint = " Install sshpass: brew install sshpass (macOS) or apt install sshpass (Ubuntu/Debian)."
+            if os.name == "nt":
+                hint = " sshpass is not available on Windows agent. Use key auth instead (set auth.type='key' in config)."
+            else:
+                hint = " Install sshpass: brew install sshpass (macOS) or apt install sshpass (Ubuntu/Debian)."
         elif name in ("ssh", "scp"):
             hint = " Ensure OpenSSH is installed and in PATH."
         return -1, f"Command not found: {missing or e}.{hint}"
@@ -175,7 +189,10 @@ def scp_to(ssh_config: dict, local_path: str | os.PathLike,
         name = Path(missing).name if missing else "unknown"
         hint = ""
         if name == "sshpass":
-            hint = " Install sshpass: brew install sshpass (macOS) or apt install sshpass (Ubuntu/Debian)."
+            if os.name == "nt":
+                hint = " sshpass is not available on Windows agent. Use key auth instead (set auth.type='key' in config)."
+            else:
+                hint = " Install sshpass: brew install sshpass (macOS) or apt install sshpass (Ubuntu/Debian)."
         elif name in ("ssh", "scp"):
             hint = " Ensure OpenSSH is installed and in PATH."
         return -1, f"Command not found: {missing or e}.{hint}"
@@ -202,7 +219,10 @@ def scp_from(ssh_config: dict, remote_path: str | os.PathLike,
         name = Path(missing).name if missing else "unknown"
         hint = ""
         if name == "sshpass":
-            hint = " Install sshpass: brew install sshpass (macOS) or apt install sshpass (Ubuntu/Debian)."
+            if os.name == "nt":
+                hint = " sshpass is not available on Windows agent. Use key auth instead (set auth.type='key' in config)."
+            else:
+                hint = " Install sshpass: brew install sshpass (macOS) or apt install sshpass (Ubuntu/Debian)."
         elif name in ("ssh", "scp"):
             hint = " Ensure OpenSSH is installed and in PATH."
         return -1, f"Command not found: {missing or e}.{hint}"
