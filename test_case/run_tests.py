@@ -37,22 +37,67 @@ from agent import target_manager
 from agent.target_config import TargetConfig
 
 
+# Per-platform default profile. The legacy win-dev has no app_profile
+# in its config; defaulting it to windows_hisec keeps the 16/16
+# behaviour bit-identical to the pre-M6 run_tests.py.
+#
+# The critical safety rule: a macos target without an app_profile
+# MUST NOT fall through to windows_hisec. Doing so would route the
+# macOS target into activate_edr / HisecEndpointAgent / EDRClient —
+# a Windows-only workflow that has no meaning on macOS and would
+# produce misleading "test ran but everything failed" output.
+#
+# The macos default is macos_generic, which runs the v1 capability
+# set (screenshot / list_windows / activate_app / is_window_open /
+# click_at plumbing / connect) and never touches HiSec EDR.
+DEFAULT_PROFILE_BY_PLATFORM: dict[str, str] = {
+    "windows": "windows_hisec",
+    "macos":   "macos_generic",
+}
+
+
 def _resolve_profile(target_name: str, override: str | None) -> str:
     """
     Decide which test profile to run.
 
-    Priority: --profile override > target.app_profile > "windows_hisec"
-    (default for legacy behaviour, since the only target without an
-    explicit app_profile in the wild is the original win-dev).
+    Priority:
+      1. --profile CLI override
+      2. target.app_profile (explicit in config)
+      3. per-platform default (windows -> windows_hisec, macos -> macos_generic)
+      4. fail with a clear error (no silent fallback to a wrong-platform runner)
+
+    A target with platform=macos and no app_profile resolves to
+    macos_generic, NEVER to windows_hisec.
     """
     if override:
         return override
     tc = TargetConfig()
-    try:
-        profile = tc.get_target_app_profile(target_name)
-    except Exception:
-        profile = None
-    return profile or "windows_hisec"
+    # Pull platform + app_profile directly from the in-memory data so we
+    # never depend on get_target_platform() (which raises KeyError when
+    # the target name is not in the active config — e.g. when the only
+    # declared target is win-dev but the operator passes --target mac-dev).
+    targets = tc.list_targets()
+    raw = targets.get(target_name, {}) if isinstance(targets, dict) else {}
+    if not raw:
+        # Target not declared in the active config. We don't fail here
+        # because get_target_name() can still resolve a target via env
+        # var; we fall back to "windows" so the legacy behaviour holds
+        # when the caller passes a name that's not in targets.local.json.
+        platform = "windows"
+    else:
+        platform = raw.get("platform", "windows")
+    explicit = raw.get("app_profile") if isinstance(raw, dict) else None
+    if explicit:
+        return explicit
+    default = DEFAULT_PROFILE_BY_PLATFORM.get(platform)
+    if default is None:
+        raise SystemExit(
+            f"[FATAL] target '{target_name}' has platform='{platform}' but no app_profile "
+            f"and no default profile for that platform. Set target.app_profile in "
+            f"config/targets.local.json (e.g. 'macos_generic' or 'windows_hisec') "
+            f"or pass --profile explicitly."
+        )
+    return default
 
 
 def run_tests(verbose: bool = False, target: str | None = None,
@@ -70,12 +115,27 @@ def run_tests(verbose: bool = False, target: str | None = None,
         return False
 
     # ── Print header ───────────────────────────────────────────────
+    # Show platform + app_profile + runner explicitly so the operator
+    # sees at a glance which test suite is about to run, and so that
+    # a macos target can never silently fall through to windows_hisec.
+    tc = TargetConfig()
+    try:
+        platform = tc.get_target_platform(target_name)
+    except Exception:
+        platform = "?"
+    try:
+        app_profile = tc.get_target_app_profile(target_name) or "(default by platform)"
+    except Exception:
+        app_profile = "?"
+
     print("=" * 60)
     print(f"EDR-WD Test Runner")
     print("=" * 60)
-    print(f"  Target:  {target_name}")
-    print(f"  Profile: {profile}")
-    print(f"  Runner:  {runner.__module__}.{runner.__name__}")
+    print(f"  Target:      {target_name}")
+    print(f"  Platform:    {platform}")
+    print(f"  app_profile: {app_profile}")
+    print(f"  Profile:     {profile}")
+    print(f"  Runner:      {runner.__module__}.{runner.__name__}")
     print()
 
     # ── Ensure MCP server is running on target ─────────────────────

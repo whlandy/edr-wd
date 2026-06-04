@@ -11,9 +11,17 @@
     __STDOUT__       — stdout log path
     __STDERR__       — stderr log path
 
-  RunAtLoad  : start when the agent is bootstrapped
-  KeepAlive  : restart on exit (the agent is meant to be always up)
-  ProcessType: Background (low priority, won't compete with user apps)
+  KeepAlive policy:
+    We use the SuccessfulExit=false form rather than a bare <true/>.
+    A bare <true/> combined with start_server.sh's "exit 0 when port
+    is already in use" behaviour would cause launchd to repeatedly
+    relaunch the script in tight loops when something else is holding
+    the port. With SuccessfulExit=false, launchd only restarts on a
+    non-zero exit — the "port already in use, exit 0" branch is
+    treated as a clean no-op, not a failure.
+
+  RunAtLoad:     start when the agent is bootstrapped
+  ProcessType:   Background (low priority, won't compete with user apps)
 -->
 <plist version="1.0">
 <dict>
@@ -33,7 +41,10 @@
   <true/>
 
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
 
   <key>ProcessType</key>
   <string>Background</string>
