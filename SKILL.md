@@ -7,8 +7,8 @@ description: |
   Trigger scenarios:
   (1) Automating Windows desktop apps (HiSecEndpoint, etc.)
   (2) Reading window control trees and operating on controls
-  (3) Remote control of Windows GUI via MCP over SSH tunnel
-  (4) Any MCP client (OpenClaw / Hermes / Codex / Claude Desktop / custom)
+  (3) Remote control of Windows GUI via MCP (direct or SSH tunnel)
+  (4) Any MCP client (Hermes / Codex / Claude Desktop / custom)
       cross-platform GUI automation
 
   Platforms: Windows (MCP Server side), Mac/Linux (MCP Client side)
@@ -23,31 +23,32 @@ description: |
 │  Agent side (Mac / Linux)                                        │
 │                                                                  │
 │  ┌─────────────────────┐     ┌──────────────────────────────┐  │
-│  │  hermes / openclaw  │────▶│  mcp_manager.py             │  │
+│  │  hermes / openclaw  │────▶│  agent/mcp_manager.py        │  │
 │  │                     │     │  - ensure_server_running()   │  │
-│  │  skill / tools      │     │  - trigger_target_server()  │  │
-│  └─────────────────────┘     │  - install_target_task()    │  │
-│                                └──────────────┬───────────────┘  │
-│                                               │ SSH + schtasks  │
-│                                               ▼                 │
-│  ┌─────────────────────┐            ┌──────────────────────┐  │
-│  │  tunnel.sh           │            │  Windows target       │  │
-│  │  (SSH LocalForward)  │──────────▶│  127.0.0.1:8765     │  │
-│  │  :18765 → :8765      │            └──────────┬───────────┘  │
-│  └─────────────────────┘                       │              │
-└─────────────────────────────────────────────────│──────────────┘
-                                                │ fastmcp
-                                                ▼
+│  │  skill / tools      │     │  - check_server_health()     │  │
+│  └─────────────────────┘     │  - install_target_task()      │  │
+│                               └──────────────┬───────────────┘  │
+│                                               │ SSH + schtasks   │
+│                                               ▼                  │
+│  ┌─────────────────────┐            ┌──────────────────────┐   │
+│  │  SSH tunnel (optional)│           │  Windows target       │   │
+│  │  :18765 → :8765      │──────────▶│  0.0.0.0:8765        │   │
+│  └─────────────────────┘   direct   └──────────┬───────────┘   │
+│                                                  │ fastmcp 3.x  │
+└──────────────────────────────────────────────────│──────────────┘
+                                                 │ Streamable HTTP
+                                                 ▼
                               ┌──────────────────────────────────────┐
                               │  target/                             │
                               │    server.py          ← MCP server  │
-                              │    pywinauto_client.py               │
+                              │    pywinauto_client.py              │
+                              │    config.json        ← SSH/server  │
                               │    scripts/                          │
-                              │      install_task.ps1  (Task Sched)  │
-                              │      start_server.ps1                │
-                              │      stop_server.ps1                 │
-                              │      restart_server.ps1             │
-                              │      health.ps1                      │
+                              │      install_task.ps1 (Task Sched)  │
+                              │      start_server.ps1  (launcher)  │
+                              │      stop_server.ps1                │
+                              │      restart_server.ps1            │
+                              │      health.ps1                     │
                               └──────────────────┬─────────────────┘
                                                   │ pywinauto UIA
                                                   ▼
@@ -60,44 +61,73 @@ logged-on interactive desktop session.
 
 ---
 
+## Configuration — `target/config.json`
+
+All connection and server settings live in one file. No hardcoded paths or
+credentials in scripts.
+
+```json
+{
+  "ssh": {
+    "host": "170.170.11.26",
+    "port": 22,
+    "user": "admin",
+    "password": "whl@123"
+  },
+  "server": {
+    "python_path": "C:\\Program Files\\Python313\\python.exe",
+    "host": "0.0.0.0",
+    "port": 8765,
+    "command": "server.py --http --host 0.0.0.0 --port 8765"
+  },
+  "task": { "name": "StartEDRMCP" },
+  "connection": {
+    "preferred": "direct",
+    "direct_url": "http://170.170.11.26:8765/mcp",
+    "tunnel_url": "http://localhost:18765/mcp"
+  }
+}
+```
+
+- `connection.preferred`: `"direct"` (try 170.170.11.26 first) or `"tunnel"` (tunnel first)
+- Both `agent/mcp_manager.py` and `test_case/conftest.py` read this file
+- Environment variables (`EDR_WD_HOST`, `EDR_WD_USER`, `EDR_WD_PASS`) override config.json
+
+---
+
 ## Quick Start
 
-### 1. One-time target setup
+### 1. One-time task installation
 
 ```bash
-# SSH into Windows and run the task installer:
-ssh whl@192.168.3.23
+# From Mac — uploads scripts and registers the scheduled task:
+python -c "from agent.mcp_manager import install_target_task; print(install_target_task())"
+# → {'ok': True}
+```
+
+Or on Windows directly:
+```powershell
 powershell -ExecutionPolicy Bypass -File target/scripts/install_task.ps1
-
-# Or from Mac (agent side), trigger the install remotely:
-python -m agent.mcp_manager --install-task
 ```
 
-### 2. Start the tunnel
+### 2. Start MCP server
 
 ```bash
-# From this skill's directory:
-bash agent/tunnel.sh start
-
-# Verify:
-bash agent/tunnel.sh test
+# From Mac — triggers StartEDRMCP via schtasks:
+python -c "from agent.mcp_manager import ensure_server_running; print(ensure_server_running())"
+# → {'ok': True, 'session': '...', 'already_running': False, 'url': 'http://170.170.11.26:8765/mcp'}
 ```
 
-### 3. Ensure server is running (agent-side)
+Or on Windows:
+```powershell
+.\target\scripts\start_server.ps1
+```
 
-```python
-from agent.mcp_manager import ensure_server_running, check_server_health
+### 3. Run tests
 
-# Fast health check (no trigger):
-health = check_server_health(local_port=18765)
-print(health)
-# {'ok': True, 'port_open': True, 'mcp_ok': True, 'session': '...'}
-
-# Ensure server is up (triggers StartEDRMCP if down):
-result = ensure_server_running(local_port=18765, host="192.168.3.23",
-                               user="whl", pass_file="~/.ssh/.tunnelpass")
-print(result)
-# {'ok': True, 'session': '...', 'already_running': False}
+```bash
+cd test_case && python3 run_tests.py -v
+# → Results: 16 passed, 0 failed
 ```
 
 ---
@@ -109,61 +139,95 @@ edr-wd/
 ├── SKILL.md
 │
 ├── agent/                    # Agent-side (runs on Mac/Linux)
-│   ├── mcp_manager.py       # ensure_server_running, trigger, health
-│   ├── tunnel.sh             # SSH tunnel manager
-│   ├── setup-mac.sh          # Mac setup helper
-│   └── edr-wd.sh            # Legacy entry script
+│   ├── mcp_manager.py       # ensure_server_running, trigger, health, config loader
+│   └── tunnel.sh             # SSH tunnel manager (optional)
 │
-└── target/                   # Target-side (runs on Windows)
-    ├── server.py            # MCP server entry (fastmcp + pywinauto)
-    ├── pywinauto_client.py  # WindowsGUI class
-    ├── __init__.py
-    ├── config.json          # (optional) target config
-    │
-    ├── scripts/
-    │   ├── install_task.ps1   # Install StartEDRMCP scheduled task
-    │   ├── start_server.ps1   # Start MCP server in interactive session
-    │   ├── stop_server.ps1    # Stop MCP server (port 8765 only)
-    │   ├── restart_server.ps1  # Restart
-    │   └── health.ps1         # Health check (port + MCP initialize)
-    │
-    ├── logs/                # Server stdout/stderr logs
-    │   └── edr-wd.*.log
-    └── screenshots/         # Screenshot output
+├── target/                    # Target-side (runs on Windows)
+│   ├── server.py            # MCP server entry (fastmcp 3.x + pywinauto)
+│   ├── pywinauto_client.py  # WindowsGUI class
+│   ├── config.json          # SSH / server / connection config
+│   │
+│   ├── scripts/
+│   │   ├── install_task.ps1   # Register StartEDRMCP scheduled task
+│   │   ├── start_server.ps1   # Start MCP server (with logs/, dup guard)
+│   │   ├── stop_server.ps1    # Stop MCP server (port 8765 only)
+│   │   ├── restart_server.ps1  # Restart
+│   │   └── health.ps1         # Health check (port + MCP initialize)
+│   │
+│   ├── logs/                # server.stdout/stderr logs
+│   │   ├── start.log        # startup metadata
+│   │   └── server.*.log     # server stdout/stderr
+│   │
+│   └── screenshots/         # Screenshot output
+│
+├── test_case/
+│   ├── run_tests.py         # Test runner
+│   └── conftest.py          # McpClient (Streamable HTTP), fixtures
+│
+└── config/
+    └── test_machines.json   # Per-machine test config
 ```
 
 ---
 
 ## Target Scripts
 
-### install_task.ps1
+All scripts use **dynamic path resolution** via `$PSScriptRoot` — no hardcoded
+`D:\skill\...` paths. Target root is always `scripts/`'s parent directory.
 
-Installs the `StartEDRMCP` Windows Task Scheduler task. Must run in an
-interactive desktop session (RDP or Console).
+### `install_task.ps1`
+
+Registers `StartEDRMCP` in Windows Task Scheduler.
 
 ```
 Task: StartEDRMCP
-  Trigger: Manual (schtasks /Run /TN StartEDRMCP)
-  Run only when user is logged on (LogonType: Interactive)
-  Run with highest privileges
+  Trigger:  Manual (schtasks /Run /TN StartEDRMCP /I)
+  Action:   powershell.exe -NoProfile -ExecutionPolicy Bypass
+            -File "<target>\scripts\start_server.ps1"
+  Start in: <target>
+  User:     Only when user is logged on (interactive session)
+  Privilege: Highest
 ```
 
-### start_server.ps1
+### `start_server.ps1`
 
-Runs inside the user's interactive session (via the scheduled task).
+Launches the MCP server inside the logged-on user's interactive session.
 
-1. Create `logs/` and `screenshots/` if absent.
-2. Check port 8765 — skip if already listening.
-3. Start `python -m server --http --port 8765` with stdout/stderr → `logs/`.
+1. Dynamically resolve target root from `$PSScriptRoot`
+2. Load `config.json` for Python path and port
+3. Check port 8765 — skip if already listening (no duplicate start)
+4. Set required env vars: `EDR_WD_ENABLE_POWERSHELL=1`, `EDR_WD_ENABLE_PYWINAUTO=1`
+5. Start `python server.py --http --host 0.0.0.0 --port 8765`
+6. Log to `logs/start.log` (PID, timestamp) + `logs/server.*.log` (stdout/stderr)
 
-### stop_server.ps1
+### `stop_server.ps1`
 
-Stop only the process listening on port 8765. Never kills all Python processes.
+Stops only the process listening on port 8765. Never kills all Python processes.
 
-### health.ps1
+### `health.ps1`
 
-1. Port 8765 listening check.
-2. HTTP MCP initialize probe — must return `Mcp-Session-Id` header.
+```
+1. Port 8765 listening check
+2. HTTP POST /mcp MCP initialize probe
+   → must return Mcp-Session-Id header
+   → prints [OK] or [FAIL]
+```
+
+---
+
+## MCP Endpoint & Transport
+
+**Endpoint:** `http://<host>:<port>/mcp` (NOT root `/`)
+
+**Transport:** FastMCP 3.x Streamable HTTP
+- Method: `POST` (all requests)
+- Headers: `Content-Type: application/json`, `Accept: application/json, text/event-stream`
+- Session: `Mcp-Session-Id` header returned by server, sent back by client
+- Protocol version: `2025-11-25`
+
+**Connection priority:**
+1. Direct: `http://170.170.11.26:8765/mcp` (preferred)
+2. Tunnel fallback: `http://localhost:18765/mcp` (if direct is unreachable)
 
 ---
 
@@ -182,19 +246,19 @@ Stop only the process listening on port 8765. Never kills all Python processes.
 | `type_text` | Type text into an edit control |
 | `select` | Select a combo box item by text or index |
 | `get_text` | Read text from a control |
-| `screenshot` | Take a screenshot (base64 or save to file) |
+| `screenshot` | Take a screenshot (save to `screenshots/` or base64) |
 | `restore_edr` | Restore the EDR window if minimized |
 
 ### Status Tools
 
 | Tool | Description |
 |------|-------------|
-| `status` | Return server health: PID, port, backend, can_see_hisec_agent, session |
+| `status` | Return server health: PID, port, backend, session |
 | `list_windows` | List all top-level windows (no connect required) |
 | `is_window_open` | Check if a window matching criteria exists |
 | `wait_window` | Poll until a window appears or timeout |
 
-### PowerShell Tools (requires EDR_WD_ENABLE_POWERSHELL=1)
+### PowerShell Tools (always enabled via start_server.ps1)
 
 | Tool | Description |
 |------|-------------|
@@ -210,33 +274,36 @@ Launch or activate the HisecEndpoint GUI:
 
 ---
 
-## Agent Manager API
+## agent/mcp_manager.py API
 
-### `check_server_health(local_port=18765) -> dict`
+### `check_server_health() -> dict`
 
 Lightweight probe — port open + MCP initialize. No side effects.
 
 ```python
-{"ok": True, "port_open": True, "mcp_ok": True, "session": "..."}
+{"ok": True, "port_open": True, "mcp_ok": True, "session": "...", "url": "http://170.170.11.26:8765/mcp"}
 ```
 
-### `ensure_server_running(local_port, host, user, pass_file) -> dict`
+### `ensure_server_running() -> dict`
 
-Full lifecycle manager:
+Full lifecycle manager — reads `target/config.json` automatically:
 
-1. If server already healthy → return immediately.
-2. Trigger `schtasks /Run /TN StartEDRMCP` on target.
-3. Poll until MCP initialize succeeds (max 60s).
-4. Return `{"ok": True, "session": "...", "already_running": False}` on success.
-5. Return `{"ok": False, "stage": "wait_mcp_ready", "error": "..."}` on failure.
+1. Resolve MCP URL (direct first, tunnel fallback)
+2. If server already healthy → return immediately
+3. Trigger `schtasks /Run /TN StartEDRMCP /I` on target
+4. Poll until MCP initialize succeeds (max 60s, 3s interval)
+5. On timeout: read `logs/start.log` + latest `logs/server.*.log` for diagnostics
+6. Return `{"ok": True, "session": "...", "already_running": False, "url": "..."}`
+   or `{"ok": False, "stage": "...", "error": "...", "start_log": "...", "server_log": "..."}`
 
-### `trigger_target_server(host, user, pass_file) -> CompletedProcess`
+### `install_target_task() -> dict`
 
-Fire `schtasks /Run /TN StartEDRMCP` directly. Does NOT wait for server to start.
+Uploads and runs `install_task.ps1` on the target via SSH.
+Returns `{"ok": True}` on success.
 
-### `install_target_task(host, user, pass_file) -> dict`
+### `trigger_target_server() -> CompletedProcess`
 
-Run `install_task.ps1` on the target via SSH. One-time setup.
+Fire `schtasks /Run /TN StartEDRMCP /I` directly. Does NOT wait.
 
 ---
 
@@ -244,48 +311,60 @@ Run `install_task.ps1` on the target via SSH. One-time setup.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EDR_WD_HOST` | `192.168.3.23` | Windows target IP |
-| `EDR_WD_USER` | `whl` | SSH username |
-| `EDR_WD_LOCAL_PORT` | `18765` | Local SSH tunnel port |
-| `EDR_WD_REMOTE_PORT` | `8765` | Remote MCP server port |
-| `EDR_WD_ENABLE_POWERSHELL` | `0` | Enable PowerShell tools (1=enable) |
+| `EDR_WD_HOST` | from config.json | Windows target IP |
+| `EDR_WD_USER` | from config.json | SSH username |
+| `EDR_WD_PASS` | from config.json | SSH password |
+| `EDR_WD_CONN_PREF` | `"direct"` | `"direct"` or `"tunnel"` |
+
+Note: `EDR_WD_ENABLE_POWERSHELL=1` is set automatically by `start_server.ps1`
+— no need to set it manually.
 
 ---
 
 ## Deployment Flow
 
-### First-time setup
+### First-time setup (once per target)
 
 ```
-1. Agent: sync edr-wd to target (git clone or rsync)
-2. Agent: run install_task.ps1 on target (one-time)
-3. User: log into Windows desktop once (so Task Scheduler has a session)
+1. Agent: copy edr-wd to Windows (git / scp / share)
+2. Agent: install_target_task() → registers StartEDRMCP
+3. User: log into Windows desktop interactively (so Task Scheduler has a session)
 ```
 
 ### Daily use
 
 ```
-1. Agent: start tunnel.sh
-2. Agent: check_server_health() — if OK, skip to 5
-3. Agent: ensure_server_running() → triggers StartEDRMCP via schtasks
-4. Agent: poll until MCP initialize succeeds
-5. Agent: call MCP tools to automate EDR GUI
+1. Agent: ensure_server_running() → triggers StartEDRMCP if needed
+2. Agent: MCP initialize → verify server ready
+3. Agent: call MCP tools to automate EDR GUI
 ```
 
 ---
 
 ## Troubleshooting
 
-### MCP server won't start
+### "MCP server not reachable"
 
-- Check `target/logs/edr-wd.*.log` on Windows for stderr.
-- Confirm Windows user is logged into an interactive desktop.
-- Run `target/scripts/health.ps1` manually on Windows.
+1. Check port: `telnet 170.170.11.26 8765`
+2. Check server process on Windows:
+   ```powershell
+   Get-NetTCPConnection -LocalPort 8765 -State Listen
+   ```
+3. If not listening, trigger manually:
+   ```powershell
+   .\target\scripts\start_server.ps1
+   ```
+4. Check logs: `Get-Content target/logs/start.log` and `target/logs/server.*.log`
 
-### schtasks /Run succeeds but server never starts
+### "PowerShell disabled"
 
-- Task may be running in a different session.
-- Re-run `install_task.ps1` from an RDP session with the correct user.
+This should not happen with the current `start_server.ps1`. If seen,
+confirm `EDR_WD_ENABLE_POWERSHELL=1` is set in the server environment.
+
+### "connect timeout — no window found"
+
+- The EDR window must be open before `connect()` is called
+- Use `is_window_open()` or `wait_window()` first to wait for the window
 
 ### SSH tunnel drops
 
@@ -296,10 +375,21 @@ bash agent/tunnel.sh start
 
 ### Port 8765 already in use
 
-Run `target/scripts/stop_server.ps1` on Windows, or find and stop the rogue process:
-
 ```powershell
-Get-NetTCPConnection -LocalPort 8765 -State Listen
+.\target\scripts\stop_server.ps1
+```
+
+Or manually:
+```powershell
+Get-NetTCPConnection -LocalPort 8765 -State Listen | Stop-Process -Force
+```
+
+### Task Scheduler task not found
+
+Re-run installation:
+```python
+from agent.mcp_manager import install_target_task
+install_target_task()
 ```
 
 ---
@@ -309,14 +399,34 @@ Get-NetTCPConnection -LocalPort 8765 -State Listen
 **Do NOT do this** — runs in non-interactive SSH session, pywinauto won't work:
 
 ```powershell
-ssh target "python -m server --http --port 8765"
+ssh target "python server.py --http --port 8765"
 ```
 
-**Do NOT do this** — kills ALL Python processes, including unrelated ones:
+**Do NOT do this** — kills ALL Python processes:
 
 ```powershell
 Get-Process python | Stop-Process -Force
 ```
+
+**Do NOT use root path** — FastMCP 3.x uses `/mcp` endpoint:
+
+```
+http://170.170.11.26:8765/     ✗
+http://170.170.11.26:8765/mcp  ✓
+```
+
+---
+
+## Test Results
+
+```
+Integration Tests:  5 passed
+E2E EDR Workflow:  11 passed
+────────────────────────────────
+Total:              16 passed, 0 failed
+```
+
+Run with: `cd test_case && python3 run_tests.py -v`
 
 ---
 
