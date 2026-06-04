@@ -3,8 +3,10 @@
 run_tests.py — 纯 Python 测试 runner（不依赖 pytest）
 
 用法：
-  python run_tests.py              # 运行所有测试
+  python run_tests.py              # 运行所有测试（使用 default_target）
   python run_tests.py -v           # 详细输出
+  python run_tests.py --target win-dev   # 指定 target
+  EDR_WD_TARGET=win-dev python run_tests.py  # 通过环境变量指定
 """
 
 import sys
@@ -13,35 +15,52 @@ import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from test_case.conftest import McpClient, check_mcp_server, ensure_server_running, MACHINE_CONFIG
+from test_case.conftest import McpClient, ensure_server_running, get_target_name, mcp_initialize
+
+# Import target_manager for health checks
+from agent import target_manager
 
 
-def run_tests(verbose=False):
-    # ── Ensure MCP server is running on Windows ──────────────────────────
+def run_tests(verbose=False, target=None):
+    # ── Resolve target ─────────────────────────────────────────────
+    target_name = target or os.environ.get("EDR_WD_TARGET") or get_target_name()
+
+    # ── Ensure MCP server is running on Windows ────────────────────
     print("=" * 60)
     print("Starting MCP Server")
     print("=" * 60)
-    server_ok, srv_msg = ensure_server_running()
+    server_ok, srv_msg = ensure_server_running(target_name)
     print(f"  MCP Server: {'[OK]' if server_ok else '[FAIL]'} {srv_msg}")
     if not server_ok:
         print("[FAIL] Could not start MCP server on Windows.")
         sys.exit(1)
 
+    # ── MCP initialize ─────────────────────────────────────────────
     print("=" * 60)
     print("Environment Check")
     print("=" * 60)
-    print(f"  Machine:    {MACHINE_CONFIG.get('host')} ({MACHINE_CONFIG.get('comment', '')})")
-    print(f"  MCP Server: {'[OK]' if server_ok else '[FAIL]'} {srv_msg}")
+
+    # Get MCP URL for display
+    health = target_manager.check_server_health(target_name)
+    mcp_url = health.get("data", {}).get("mcp_url", "unknown")
+    print(f"  Target:     {target_name}")
+    print(f"  MCP Server: [{'OK' if server_ok else 'FAIL'}] {srv_msg}")
     print()
 
-    client = McpClient()
+    # Perform MCP initialize via mcp_manager
     try:
-        init = client.initialize()
-        if "error" in init:
-            print(f"[FAIL] initialize failed: {init}")
+        init_result = mcp_initialize(target_name)
+        if not init_result["ok"]:
+            print(f"[FAIL] MCP initialize failed: {init_result.get('error')}")
             sys.exit(1)
-        server_info = init.get("result", {}).get("serverInfo", {})
-        print(f"[OK] initialize: server={server_info.get('name')} v{server_info.get('version')}")
+
+        session_id = init_result["data"]["session_id"]
+        print(f"[OK] MCP session: {session_id}")
+        print()
+
+        # Create McpClient with pre-initialized session
+        client = McpClient(mcp_init_result=init_result)
+
     except Exception as e:
         print(f"[FAIL] initialize exception: {e}")
         sys.exit(1)
@@ -188,7 +207,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--target", help="Target name (overrides EDR_WD_TARGET and default_target)")
     args = parser.parse_args()
 
-    ok = run_tests(verbose=args.verbose)
+    ok = run_tests(verbose=args.verbose, target=args.target)
     sys.exit(0 if ok else 1)

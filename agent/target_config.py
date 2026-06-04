@@ -1,15 +1,15 @@
 """
 target_config.py — EDR-WD target registry and configuration loader.
 
-Loads targets from config/targets.local.json (or targets.example.json as fallback).
-Provides get_target(), list_targets(), build_mcp_url(), resolve_auth(), and
-init_config() / validate_config() CLI tools.
+Runtime config is loaded from EDR_WD_CONFIG or config/targets.local.json.
+targets.example.json is only used by --init / documentation and is NEVER used
+for real operations.
 
 Usage:
     from agent.target_config import TargetConfig
 
-    tc = TargetConfig()                    # auto-detect config file
-    tc = TargetConfig("config/targets.local.json")  # explicit path
+    tc = TargetConfig()                    # auto-detect: EDR_WD_CONFIG > targets.local.json
+    tc = TargetConfig("config/custom.json")  # explicit path
 
     # Basic queries
     tc.list_targets()                      # → {"win-dev": {...}, "win-prod": {...}}
@@ -40,17 +40,41 @@ from typing import Optional
 # ── Config discovery ──────────────────────────────────────────────────────────
 
 def _find_config() -> Path | None:
-    """Find the first existing config file, in priority order."""
-    base = Path(__file__).parent.parent  # agent/ → project root
-    candidates = [
-        base / "config" / "targets.local.json",
-        base / "config" / "targets.json",
-        base / "config" / "targets.example.json",
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
+    """
+    Find the first existing config file for runtime use, in priority order:
+
+      1. EDR_WD_CONFIG env var (explicit path, if set and exists)
+      2. config/targets.local.json (must exist for real operations)
+
+    Do NOT fall back to targets.example.json — it contains placeholder values
+    and must not be used as a real target.
+    """
+    # 1. EDR_WD_CONFIG env var — if set, it is an explicit intent; must exist
+    env_path = os.environ.get("EDR_WD_CONFIG")
+    if env_path:
+        p = Path(env_path)
+        if not p.exists():
+            raise ConfigNotFound(
+                f"EDR_WD_CONFIG is set to '{env_path}' but the file does not exist. "
+                f"Please create the file or unset EDR_WD_CONFIG to use config/targets.local.json."
+            )
+        return p
+    # 2. targets.local.json (required for real operations)
+    base = Path(__file__).parent.parent
+    local = base / "config" / "targets.local.json"
+    if local.exists():
+        return local
     return None
+
+
+def _find_example() -> Path | None:
+    """
+    Find targets.example.json for --list / documentation purposes only.
+    NEVER used for real operations.
+    """
+    base = Path(__file__).parent.parent
+    example = base / "config" / "targets.example.json"
+    return example if example.exists() else None
 
 
 def _default_config_path() -> Path:
@@ -87,6 +111,16 @@ SKELETON = {
         }
     },
 }
+
+
+class ConfigNotFound(Exception):
+    """Raised when no runtime config file can be found."""
+    pass
+
+
+class ConfigError(Exception):
+    """Raised when the config file exists but has validation errors."""
+    pass
 
 
 # ── TargetConfig class ────────────────────────────────────────────────────────
@@ -320,11 +354,18 @@ def main() -> None:
     if args.list:
         targets = tc.list_targets()
         default = tc.get_default_target()
-        for name, t in targets.items():
-            marker = " (default)" if name == default else ""
-            desc = t.get("description") or "—"
-            host = t.get("ssh", {}).get("host") or "—"
-            print(f"  {name}{marker}  host={host}  desc={desc}")
+        if targets:
+            for name, t in targets.items():
+                marker = " (default)" if name == default else ""
+                desc = t.get("description") or "—"
+                host = t.get("ssh", {}).get("host") or "—"
+                print(f"  {name}{marker}  host={host}  desc={desc}")
+        else:
+            example = _find_example()
+            if example:
+                print("  (no targets.local.json found — showing targets.example.json for reference)")
+                print(f"  Copy '{example}' to 'config/targets.local.json' and edit it.")
+                print("  Then run: python -m agent.target_config --list")
         sys.exit(0)
 
     if args.validate:
