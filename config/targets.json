@@ -1,0 +1,33 @@
+{
+  "default": "win-dev",
+  "targets": {
+    "win-dev": {
+      "name": "win-dev",
+      "ssh": {
+        "host": "170.170.11.26",
+        "port": 22,
+        "user": "admin",
+        "password": "whl@123"
+      },
+      "server": {
+        "python_path": "C:\\Program Files\\Python313\\python.exe",
+        "host": "0.0.0.0",
+        "port": 8765,
+        "command": "server.py --http --host 0.0.0.0 --port 8765"
+      },
+      "task": {
+        "name": "StartEDRMCP"
+      },
+      "paths": {
+        "target_root": "C:\\Users\\admin\\Desktop\\edr-wd-main\\edr-wd-hermes\\target",
+        "scripts": "scripts"
+      },
+      "connection": {
+        "preferred": "direct",
+        "direct_url": "http://170.170.11.26:8765/mcp",
+        "tunnel_url": "http://localhost:18765/mcp"
+      },
+      "description": "Development Windows VM (Huawei HiSec EDR)"
+    }
+  }
+}

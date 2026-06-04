@@ -123,6 +123,80 @@ class ConfigError(Exception):
     pass
 
 
+# ── Legacy schema normalizer ──────────────────────────────────────────────────
+
+def _normalize_target(raw: dict) -> dict:
+    """
+    Convert a pre-2026 targets.json raw target dict to the current schema.
+
+    Legacy fields seen in targets.json:
+      server.{python_path, host, port, command}  → mcp (subset)
+      connection.{preferred, direct_url, tunnel_url} → mcp.connect_mode / direct_url / tunnel_url
+      task.name                                   → windows.task_name
+      paths.{target_root, scripts}               → windows.{target_root, scripts}
+
+    Current schema (post-2026) fields preserved as-is:
+      ssh, mcp, windows, description, name
+    """
+    import warnings
+
+    # Detect legacy by presence of 'server' or 'connection' at target level
+    has_server = "server" in raw
+    has_connection = "connection" in raw
+    if not has_server and not has_connection:
+        # Already new schema — return as-is
+        return raw
+
+    warnings.warn(
+        f"Target config uses legacy pre-2026 schema "
+        f"(server/connection/task/paths fields). "
+        f"Please migrate to the new mcp/ssh/windows schema. "
+        f"Support will be removed in a future release.",
+        DeprecationWarning,
+        stacklevel=4,
+    )
+
+    out = dict(raw)  # shallow copy — don't mutate caller's dict
+
+    # server.{python_path,host,port,command} → mcp
+    server = raw.get("server", {})
+    mcp = dict(raw.get("mcp", {}))  # preserve any existing mcp fields
+    mcp.setdefault("host", server.get("host", "0.0.0.0"))
+    mcp.setdefault("port", server.get("port", 8765))
+    mcp.setdefault("path", "/mcp")
+    mcp.setdefault("connect_mode", "direct")
+    mcp.setdefault("tunnel", {"enabled": False, "local_port": 18765})
+    out["mcp"] = mcp
+
+    # connection → mcp overrides
+    conn = raw.get("connection", {})
+    if conn.get("preferred"):
+        mcp["connect_mode"] = conn["preferred"]
+    if conn.get("direct_url"):
+        # [internal legacy-only field] stores the original full URL from legacy
+        # connection.direct_url. build_mcp_url() checks this as a fallback.
+        # Not part of the public schema — do not use in new configs.
+        mcp["_direct_url_override"] = conn["direct_url"]
+    if conn.get("tunnel_url"):
+        # [internal legacy-only field] stores the original tunnel URL.
+        # build_mcp_url() checks this as a fallback for tunnel mode.
+        # Not part of the public schema — do not use in new configs.
+        mcp["_tunnel_url_override"] = conn["tunnel_url"]
+
+    # task.name → windows.task_name
+    task = raw.get("task", {})
+    paths = raw.get("paths", {})
+    win = dict(raw.get("windows", {}))
+    win.setdefault("task_name", task.get("name", "StartEDRMCP"))
+    win.setdefault("target_root", paths.get("target_root", ""))
+    win.setdefault("scripts", paths.get("scripts", "scripts"))
+    win.setdefault("python_path", server.get("python_path", ""))
+    win.setdefault("run_with_highest_privileges", True)
+    out["windows"] = win
+
+    return out
+
+
 # ── TargetConfig class ────────────────────────────────────────────────────────
 
 class TargetConfig:
@@ -172,9 +246,12 @@ class TargetConfig:
 
     def get_target(self, name: str | None = None) -> dict:
         """
-        Return the full config dict for `name`.
+        Return the normalized config dict for `name`.
         If name is None, uses default_target.
         Raises KeyError if target not found.
+
+        Legacy schema (targets.json, pre-2026): converts server/connection/task/paths
+        to the current mcp/ssh/windows structure so callers always get a consistent shape.
         """
         if name is None:
             name = self.get_default_target()
@@ -183,7 +260,8 @@ class TargetConfig:
         targets = self._data.get("targets", {})
         if name not in targets:
             raise KeyError(f"Target '{name}' not found. Available: {list(targets.keys())}")
-        return dict(targets[name])
+        raw = dict(targets[name])
+        return _normalize_target(raw)
 
     def has_target(self, name: str) -> bool:
         return name in self._data.get("targets", {})
@@ -197,20 +275,31 @@ class TargetConfig:
         connect_mode=direct  → http://{ssh.host}:{mcp.port}{mcp.path}
         connect_mode=tunnel → http://127.0.0.1:{tunnel.local_port}{mcp.path}
 
+        For legacy normalized configs, _direct_url_override / _tunnel_url_override
+        are used when the original connection.{direct_url,tunnel_url} full URL
+        was present in the raw config.
+
         Raises KeyError if ssh.host is empty and mode is direct.
         """
         t = self.get_target(target_name)
         mcp = t.get("mcp", {})
         connect_mode = mcp.get("connect_mode", "direct")
 
+        # Legacy normalized configs carry the original full URL as an override
         if connect_mode == "direct":
+            direct_url = mcp.get("_direct_url_override")
+            if direct_url:
+                return direct_url
             host = t.get("ssh", {}).get("host", "")
             if not host:
                 raise KeyError(f"Target '{target_name}': ssh.host is required for direct mode")
             port = mcp.get("port", 8765)
             path = mcp.get("path", "/mcp")
             return f"http://{host}:{port}{path}"
-        else:
+        else:  # tunnel
+            tunnel_url = mcp.get("_tunnel_url_override")
+            if tunnel_url:
+                return tunnel_url
             local_port = mcp.get("tunnel", {}).get("local_port", 18765)
             path = mcp.get("path", "/mcp")
             return f"http://127.0.0.1:{local_port}{path}"
@@ -287,13 +376,20 @@ class TargetConfig:
             errors.append("No targets defined")
             return errors
 
-        default = self._data.get("default_target")
+        default = self._data.get("default_target") or self._data.get("default")
         if not default:
             errors.append("default_target is not set")
         elif default not in targets:
             errors.append(f"default_target='{default}' but that target does not exist")
 
         for name, t in targets.items():
+            # Validate the normalized form so both legacy and new schemas are checked
+            try:
+                t = _normalize_target(dict(t))
+            except Exception as e:
+                errors.append(f"[{name}] failed to normalize: {e}")
+                continue
+
             # ssh
             ssh = t.get("ssh", {})
             if not ssh.get("host"):
