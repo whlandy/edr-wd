@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.edr-wd.target.plist.template
+
+  Placeholders (replaced at install time by install_launch_agent.sh):
+    __LABEL__        — launchd label, e.g. com.edr-wd.target
+    __SCRIPT_PATH__  — absolute path to start_server.sh
+    __WORKDIR__      — working directory for the script
+    __STDOUT__       — stdout log path
+    __STDERR__       — stderr log path
+
+  RunAtLoad  : start when the agent is bootstrapped
+  KeepAlive  : restart on exit (the agent is meant to be always up)
+  ProcessType: Background (low priority, won't compete with user apps)
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__SCRIPT_PATH__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__STDOUT__</string>
+
+  <key>StandardErrorPath</key>
+  <string>__STDERR__</string>
+</dict>
+</plist>
