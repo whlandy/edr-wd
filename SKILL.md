@@ -22,12 +22,12 @@ description: |
 ┌──────────────────────────────────────────────────────────────────┐
 │  Agent side (Mac / Linux)                                        │
 │                                                                  │
-│  ┌──────────────────┐     ┌──────────────────────────────────┐ │
-│  │  hermes / openclaw │────▶│  target_config.py                │ │
-│  │                    │     │  build_mcp_url(name)             │ │
-│  │  skill / tools    │────▶│  target_manager.py               │ │
-│  └──────────────────┘     │  mcp_manager.py                   │ │
-│                            │  ssh_runner.py                     │ │
+│  ┌──────────────────┐     ┌──────────────────────────────────┐  │
+│  │  hermes / openclaw │────▶│  target_config.py                │  │
+│  │                    │     │  build_mcp_url(name)             │  │
+│  │  skill / tools    │────▶│  target_manager.py               │  │
+│  └──────────────────┘     │  mcp_manager.py                   │  │
+│                            │  ssh_runner.py                     │  │
 │                            └──────────────┬────────────────────┘ │
 │                                           │                     │
 │  ┌──────────────────┐     ┌──────────────▼────────────────────┐ │
@@ -37,9 +37,9 @@ description: |
 │                                           │                      │
 │                                           │ SSH + schtasks        │
 │  ┌──────────────────┐                   ▼                      │
-│  │  SSH tunnel (opt) │    ┌──────────────────────────────┐       │
-│  │  :18765 → :8765   │───▶│  Windows target            │       │
-│  └──────────────────┘    │  0.0.0.0:8765              │       │
+│  │  SSH tunnel (opt) │    ┌──────────────────────────────┐     │
+│  │  :18765 → :8765   │───▶│  Windows target              │     │
+│  └──────────────────┘    │  0.0.0.0:8765                │     │
 └───────────────────────────│──────────────┬──────────────┘───────┘
                             │              │ Streamable HTTP /mcp
                             │              ▼
@@ -322,7 +322,7 @@ Stops only the process listening on port 8765. Never kills all Python processes.
 | `is_window_open` | Check if a window matching criteria exists |
 | `wait_window` | Poll until a window appears or timeout |
 
-### PowerShell Tools (always enabled via start_server.ps1)
+### PowerShell Tools
 
 | Tool | Description |
 |------|-------------|
@@ -331,11 +331,20 @@ Stops only the process listening on port 8765. Never kills all Python processes.
 | `get_job` | Poll a background job result |
 | `cancel_job` | Cancel a running PowerShell job |
 
-### activate_edr
+**Important:** `run_powershell` is **only supported on Windows backend**.
+Mac backend must not implement `run_powershell` using `/bin/sh -c` wrappers.
+If called on a non-Windows backend, return:
+```json
+{ "ok": false, "error": "run_powershell is only supported on Windows backend" }
+```
 
-Launch or activate the HisecEndpoint GUI. Two backends — **Windows** and **macOS** — use completely different activation flows.
+---
 
-#### Windows
+## activate_edr
+
+Launch or activate the HisecEndpoint GUI. Two backends — **Windows** and **macOS** — use completely different activation flows. **These are not the same program.**
+
+### Windows Backend (primary, recommended)
 
 `activate_edr(exe_path=None, wait=True, timeout=15.0)`
 
@@ -345,30 +354,94 @@ Flow: launch HisecEndpointAgent → connect → click edrWidget → EDRClient po
 exe_path  EDR widget automation_id  EDRClient
 ```
 
-#### macOS
+This is the **primary path** for EDR GUI automation. Deploy the MCP server on the Windows VM itself.
+
+### macOS Backend (macOS native only — NOT for Parallels VM)
 
 macOS runs two **independent** processes — there is no widget-click flow.
 
 ```
-HiSecEndpoint.app/Contents/MacOS/safra/HiSecEndpointAgent    # 主界面
-HiSecEndpoint.app/Contents/MacOS/EDRClient                    # EDRClient
+HiSecEndpoint.app/Contents/MacOS/safra/HiSecEndpointAgent    # macOS native main UI
+HiSecEndpoint.app/Contents/MacOS/EDRClient                    # macOS native EDRClient
 ```
 
-Both scripts live in the same `.app` bundle:
-
-```bash
-# 启动 HiSecEndpointAgent 主界面
-bash "/Applications/HiSecEndpoint.app/Contents/scripts/start_hisec_ui.sh"
-# 或者直接
-"/Applications/HiSecEndpoint.app/Contents/MacOS/safra/HiSecEndpointAgent" ui &
-
-# 启动 EDRClient
-bash "/Applications/HiSecEndpoint.app/Contents/scripts/start_client.sh"
-# 或者直接
-/Applications/HiSecEndpoint.app/Contents/MacOS/EDRClient &
+**Critical distinction:**
+```
+macOS HiSecEndpoint.app    → macOS native binary, controlled by macOS Accessibility API
+HisecEndpointAgent.exe     → Windows VM binary, controlled by pywinauto/UIA
 ```
 
-**Key difference:** on Windows, `activate_edr` auto-triggers EDRClient via widget click. On macOS, the two windows are separate entry points and must be launched independently. There is no `activate_edr` equivalent for macOS in the MCP server — use the above shell commands directly.
+**The macOS backend CANNOT see Parallels VM internal windows.**
+macOS Accessibility API (`AXUIElement`, `CGWindowList`, `screencapture`) only enumerates Mac native GUI layers. It cannot see inside a Parallels virtual display. Therefore:
+- Do NOT use macOS backend to automate Windows VM EDR
+- Do NOT use macOS `activate_edr` for `HisecEndpointAgent.exe` in a VM
+- Do NOT rely on macOS `screenshot` for VM window capture
+
+---
+
+## Critical Architecture Decision
+
+### Why macOS Backend Cannot Control Windows VM Windows
+
+```
+Win agent
+  → Mac MCP server :8765
+    → macOS Accessibility API
+      → only sees Mac native windows
+      → cannot enumerate Parallels VM internal Windows child windows
+```
+
+This is a **fundamental limitation**, not a bug to fix. Parallels VM windows exist in a virtual display layer that macOS Accessibility APIs cannot penetrate.
+
+### Correct Architecture
+
+```
+Preferred path:
+agent → Windows VM MCP server (192.168.x.x:8765)
+  → pywinauto / UIAutomation
+    → HisecEndpointAgent.exe
+    → EDRClient.exe
+    → 终端安全窗口
+
+Mac role: manage VM lifecycle, network forwarding, bootstrap
+Mac MUST NOT: try to click VM internal windows via macOS Accessibility
+```
+
+### Recommended Target Configuration
+
+```json
+{
+  "targets": {
+    "windows-hisec": {
+      "description": "Windows VM (Parallels) with HisecEndpoint",
+
+      "ssh": {
+        "host": "<VM_IP>",
+        "port": 22,
+        "user": "<WINDOWS_USER>",
+        "auth": {
+          "type": "password",
+          "password_env": "EDR_WD_TARGET_PASSWORD"
+        }
+      },
+
+      "mcp": {
+        "host": "<VM_IP>",
+        "port": 8765,
+        "path": "/mcp",
+        "connect_mode": "direct"
+      },
+
+      "windows": {
+        "python_path": "C:\\Program Files\\Python313\\python.exe",
+        "target_root": "C:\\Users\\<USER>\\edr-wd\\target",
+        "task_name": "StartEDRMCP",
+        "run_with_highest_privileges": true
+      }
+    }
+  }
+}
+```
 
 ---
 
@@ -602,8 +675,8 @@ Note: use `python` (or `py`) on Windows, not `python3`.
 
 ### Path separator
 
-- Windows agent uses backslash `\` in config files (`target_root`, `key_path`).
-- Agent code uses `pathlib.Path` which handles both `/` and `\` via `os.sep`.
+- Windows agent uses backslash `\\` in config files (`target_root`, `key_path`).
+- Agent code uses `pathlib.Path` which handles both `/` and `\\` via `os.sep`.
 - Remote paths (target is always Windows) use backslash in SCP/SSH commands.
 
 ---
@@ -679,6 +752,17 @@ from agent.target_manager import TargetManager
 TargetManager().install_target_task()
 ```
 
+### "screenshot failed" on macOS backend
+
+`screencapture failed: could not create image from display` may indicate:
+- Screen Recording permission missing
+- LaunchAgent/SSH session not in a GUI-capable session
+- No active display
+- Parallels virtual display not accessible to the current process
+
+**In any case**, macOS screenshot cannot reliably capture VM internal windows.
+Use Windows backend screenshot for VM window capture.
+
 ---
 
 ## Rejected Patterns
@@ -702,19 +786,25 @@ http://<TARGET_IP>:8765/     ✗
 http://<TARGET_IP>:8765/mcp  ✓
 ```
 
+**Do NOT use macOS backend to control Parallels VM internal windows.**
+macOS Accessibility API cannot penetrate Parallels virtual display layer.
+
+**Do NOT implement `run_powershell` on macOS backend using shell wrappers.**
+`run_powershell` must return an error on non-Windows backends.
+
 ---
 
 ## Test Results
 
-### Current status (Phase 4)
+### Phase 4 status
 
 ```
 Integration Tests:  5 passed
 E2E EDR Workflow:  4 passed / 6 failed (GUI runtime / EDR state)
-
-Failed steps are GUI-layer issues (EDR application state, RDP session),
-not multi-target architecture problems.
 ```
+
+Failed steps are GUI-layer issues (EDR application state, RDP/VM session)
+related to **macOS backend limitations for VM internal windows**, not architecture problems.
 
 Run with: `cd test_case && python3 run_tests.py --target win-dev -v`
 
@@ -725,5 +815,5 @@ Run with: `cd test_case && python3 run_tests.py --target win-dev -v`
 - `exe` packaging: replace `python server.py` with `target/bin/edr-mcp-server.exe`
 - Launcher: a long-running process that keeps the MCP server alive
 - Status page: HTTP endpoint that returns structured health info
-- GUI-layer E2E stability: investigate `activate_edr`, `screenshot`, `restore_edr` failures
+- Windows VM target: validate direct Windows backend for `activate_edr`, `screenshot`, `restore_edr`
 - Windows agent: key-auth docs and guidance added; runtime validation pending
