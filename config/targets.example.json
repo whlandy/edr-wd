@@ -1,0 +1,115 @@
+{
+  "_comment": "EDR-WD 多目标配置示例",
+  "_comment2": "复制为 targets.local.json 并填入真实值，不要提交 targets.local.json 到仓库",
+
+  "default_target": "win-dev",
+
+  "targets": {
+    "win-dev": {
+      "_comment": "示例：password auth — 推荐 Linux/Mac agent 使用，Windows agent 不支持 sshpass",
+      "description": "开发环境 Windows 虚拟机（password auth）",
+
+      "platform": "windows",
+
+      "ssh": {
+        "host": "<target-ip>",
+        "port": 22,
+        "user": "<TARGET_USER>",
+        "auth": {
+          "type": "password",
+          "password_env": "EDR_WD_WIN_DEV_PASSWORD"
+        }
+      },
+
+      "mcp": {
+        "host": "0.0.0.0",
+        "port": 8765,
+        "path": "/mcp",
+        "connect_mode": "direct",
+        "tunnel": {
+          "enabled": false,
+          "local_port": 18765
+        }
+      },
+
+      "windows": {
+        "python_path": "C:\\Program Files\\Python313\\python.exe",
+        "target_root": "C:\\Users\\<TARGET_USER>\\Desktop\\edr-wd\\target",
+        "task_name": "StartEDRMCP",
+        "run_with_highest_privileges": true
+      }
+    },
+
+    "win-dev-key": {
+      "_comment": "示例：key auth — Windows agent 必须使用 key auth，sshpass 不可用",
+      "description": "开发环境 Windows 虚拟机（key auth，适用于 Windows/Linux/Mac agent）",
+
+      "platform": "windows",
+      "app_profile": "windows_hisec",
+
+      "ssh": {
+        "host": "<target-ip>",
+        "port": 22,
+        "user": "<TARGET_USER>",
+        "auth": {
+          "type": "key",
+          "key_path": "C:\\Users\\<TARGET_USER>\\.ssh\\id_edr_wd"
+        }
+      },
+
+      "mcp": {
+        "host": "0.0.0.0",
+        "port": 8765,
+        "path": "/mcp",
+        "connect_mode": "direct",
+        "tunnel": {
+          "enabled": false,
+          "local_port": 18765
+        }
+      },
+
+      "windows": {
+        "python_path": "C:\\Program Files\\Python313\\python.exe",
+        "target_root": "C:\\Users\\<TARGET_USER>\\Desktop\\edr-wd\\target",
+        "task_name": "StartEDRMCP",
+        "run_with_highest_privileges": true
+      }
+    },
+
+    "mac-dev": {
+      "_comment": "示例：macOS target — password auth (默认)；lifecycle 走 launchd；key auth 可选",
+      "description": "macOS 开发机（password auth，LaunchAgent）",
+
+      "platform": "macos",
+      "app_profile": "macos_generic",
+
+      "ssh": {
+        "host": "<macos-target-ip>",
+        "port": 22,
+        "user": "<MAC_USER>",
+        "auth": {
+          "type": "password",
+          "password_env": "EDR_WD_TARGET_PASSWORD"
+        }
+      },
+
+      "mcp": {
+        "host": "0.0.0.0",
+        "port": 8765,
+        "path": "/mcp",
+        "connect_mode": "direct",
+        "tunnel": {
+          "enabled": false,
+          "local_port": 18765
+        }
+      },
+
+      "macos": {
+        "python_path": "/opt/homebrew/bin/python3",
+        "root": "/Users/<MAC_USER>/edr-wd/target",
+        "backend": "macos_accessibility",
+        "launch_name": "com.edr-wd.target"
+      }
+    }
+  }
+}

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.edr-wd.target.plist.template
+
+  Placeholders (replaced at install time by install_launch_agent.sh):
+    __LABEL__        — launchd label, e.g. com.edr-wd.target
+    __SCRIPT_PATH__  — absolute path to start_server.sh
+    __WORKDIR__      — working directory for the script
+    __STDOUT__       — stdout log path
+    __STDERR__       — stderr log path
+
+  KeepAlive policy:
+    We use the SuccessfulExit=false form rather than a bare <true/>.
+    A bare <true/> combined with start_server.sh's "exit 0 when port
+    is already in use" behaviour would cause launchd to repeatedly
+    relaunch the script in tight loops when something else is holding
+    the port. With SuccessfulExit=false, launchd only restarts on a
+    non-zero exit — the "port already in use, exit 0" branch is
+    treated as a clean no-op, not a failure.
+
+  RunAtLoad:     start when the agent is bootstrapped
+  ProcessType:   Background (low priority, won't compete with user apps)
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__SCRIPT_PATH__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__STDOUT__</string>
+
+  <key>StandardErrorPath</key>
+  <string>__STDERR__</string>
+</dict>
+</plist>

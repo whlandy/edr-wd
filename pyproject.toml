@@ -1,0 +1,19 @@
+[project]
+name = "edr-wd"
+version = "0.1.0"
+description = "MCP server for Windows EDR GUI automation via pywinauto"
+requires-python = ">=3.9"
+dependencies = [
+    "fastmcp>=3.1.0",
+    "pywinauto>=0.6.8",
+    "psutil>=5.9.0",
+    "Pillow>=10.0.0",
+    "paramiko>=3.4.0",
+]
+
+[project.scripts]
+edr-wd = "edr_wd.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

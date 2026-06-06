@@ -1,0 +1,3 @@
+# Test-only dependencies (not part of main edr-wd requirements)
+# Run: pip install -r test_case/requirements_test.txt
+pytest>=7.0.0
