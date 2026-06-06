@@ -336,7 +336,7 @@ class MacOSAccessibilityBackend:
                 'use framework "AppKit"\n'
                 'use framework "CoreGraphics"\n'
                 'set info to CFArrayCreateMutable(0, 0, 0)\n'
-                'set wList to CGWindowListCopyWindowInfo(CGWindowListOption(kCGWindowListOptionOnScreenOnly + kCGWindowListExcludeDesktopElements), 0)\n'
+                'set wList to CGWindowListCopyWindowInfo(17, 0)\n'
                 'set matched to ""\n'
                 'repeat with w in wList\n'
                 '    set owner to "" & (kCGWindowOwnerName of w as string)\n'

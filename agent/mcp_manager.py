@@ -178,14 +178,22 @@ def get_mcp_tools(session_id: str, mcp_url: Optional[str] = None) -> dict:
     return _mcp_jsonrpc(session_id, mcp_url, "tools/list", {})
 
 
-def call_mcp_tool(session_id: str, mcp_url: str, tool_name: str, arguments: Optional[dict] = None) -> dict:
+def call_mcp_tool(session_id: str, mcp_url: str, tool_name: str,
+                  arguments: Optional[dict] = None, timeout: Optional[float] = None) -> dict:
     """
-    Call an MCP tool by name with optional arguments.
+    Call an MCP tool by name with optional arguments and per-call timeout.
+
+    Args:
+        session_id: MCP session ID from initialize()
+        mcp_url: MCP server URL
+        tool_name: name of the tool to call
+        arguments: tool arguments dict
+        timeout: per-call timeout in seconds (overrides MCP_INIT_TIMEOUT for this call only)
     """
     return _mcp_jsonrpc(session_id, mcp_url, "tools/call", {
         "name": tool_name,
         "arguments": arguments or {},
-    })
+    }, timeout=timeout)
 
 
 _jsonrpc_id_counter = 1
@@ -198,7 +206,8 @@ def _next_rpc_id() -> int:
     return cur
 
 
-def _mcp_jsonrpc(session_id: str, mcp_url: str, method: str, params: dict) -> dict:
+def _mcp_jsonrpc(session_id: str, mcp_url: str, method: str, params: dict,
+                 timeout: Optional[float] = None) -> dict:
     """Send a JSON-RPC request with an active MCP session."""
     rpc_id = _next_rpc_id()
     payload = json.dumps({
@@ -215,13 +224,14 @@ def _mcp_jsonrpc(session_id: str, mcp_url: str, method: str, params: dict) -> di
     }
 
     req = urllib.request.Request(mcp_url, data=payload, headers=headers, method="POST")
+    effective_timeout = timeout if timeout is not None else MCP_INIT_TIMEOUT
 
     try:
-        with urllib.request.urlopen(req, timeout=MCP_INIT_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
             raw = _read_all_sse_data(resp)
             return _parse_sse_response(raw, expected_id=rpc_id)
     except socket.timeout:
-        return {"ok": False, "error": f"socket timeout after {MCP_INIT_TIMEOUT}s waiting for JSON-RPC response"}
+        return {"ok": False, "error": f"socket timeout after {effective_timeout}s waiting for JSON-RPC response"}
     except (urllib.error.URLError, socket.timeout) as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 

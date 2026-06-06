@@ -532,31 +532,77 @@ def status() -> str:
 
     # Probe HiSecEndpoint process and window presence (macOS-specific)
     if _backend is not None and hasattr(_backend, "activate_edr"):
-        try:
-            # Use the backend's own detection helpers if available
-            proc_found = getattr(_backend, "_proc_exists", None)
-            if proc_found:
-                result["hisec_agent_process_found"] = proc_found("HiSecEndpointAgent")
-                result["edr_client_process_found"] = proc_found("EDRClient")
-            # Check windows via osascript
-            import subprocess
-            def _check_window(script: str) -> bool:
+        proc_found = getattr(_backend, "_proc_exists", None)
+        if proc_found:
+            result["hisec_agent_process_found"] = proc_found("HiSecEndpointAgent")
+            result["edr_client_process_found"] = proc_found("EDRClient")
+
+        # Check windows with structured return (owner + pid + titles), not just bool
+        import subprocess
+
+        def _check_window_structured(proc_name: str) -> dict:
+            """
+            Returns {"found": bool, "owner": str, "pid": int|None, "titles": [str]}.
+            Never raises — always returns a structured dict.
+            """
+            script = (
+                f'tell application "System Events"\n'
+                f'  set winList to every window of process "{proc_name}"\n'
+                f'  set out to ""\n'
+                f'  repeat with w in winList\n'
+                f'    set out to out & (name of w) & "|"\n'
+                f'  end repeat\n'
+                f'  return out\n'
+                f'end tell'
+            )
+            try:
                 cp = subprocess.run(
                     ["osascript", "-e", script],
                     capture_output=True, text=True, timeout=5,
                 )
-                return cp.returncode == 0 and "华为" in (cp.stdout or "")
+                titles = []
+                if cp.returncode == 0 and cp.stdout:
+                    titles = [t for t in cp.stdout.strip().split("|") if t]
+                # Also get PID for the process
+                pid_script = f'tell application "System Events" to unix id of process "{proc_name}"'
+                pid_cp = subprocess.run(
+                    ["osascript", "-e", pid_script],
+                    capture_output=True, text=True, timeout=3,
+                )
+                pid = None
+                if pid_cp.returncode == 0:
+                    try:
+                        pid = int(pid_cp.stdout.strip())
+                    except ValueError:
+                        pass
+                found = bool(titles)
+                return {
+                    "found": found,
+                    "owner": proc_name,
+                    "pid": pid,
+                    "titles": titles,
+                    "has_chinese": any("\u4e00" <= c <= "\u9fff" for t in titles for c in t),
+                }
+            except Exception as e:
+                return {
+                    "found": False,
+                    "owner": proc_name,
+                    "pid": None,
+                    "titles": [],
+                    "error": str(e),
+                }
 
-            hisec_main_check = (
-                'tell application "System Events" to get name of every window of process "HiSecEndpointAgent"'
-            )
-            edr_client_check = (
-                'tell application "System Events" to get name of every window of process "EDRClient"'
-            )
-            result["hisec_main_window_found"] = _check_window(hisec_main_check)
-            result["edr_client_window_found"] = _check_window(edr_client_check)
-        except Exception:
-            pass
+        hisec_struct = _check_window_structured("HiSecEndpointAgent")
+        edr_struct = _check_window_structured("EDRClient")
+
+        result["hisec_main_window_found"] = hisec_struct["found"]
+        result["hisec_main_window_detected_by"] = hisec_struct.get("owner")
+        result["hisec_main_window_pid"] = hisec_struct.get("pid")
+        result["hisec_main_window_titles"] = hisec_struct.get("titles", [])
+        result["edr_client_window_found"] = edr_struct["found"]
+        result["edr_client_window_detected_by"] = edr_struct.get("owner")
+        result["edr_client_window_pid"] = edr_struct.get("pid")
+        result["edr_client_window_titles"] = edr_struct.get("titles", [])
 
     return json.dumps(result, ensure_ascii=False)
 
