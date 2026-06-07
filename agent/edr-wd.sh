@@ -26,9 +26,10 @@ USER="${EDR_WD_USER:-<TARGET_USER>}"
 SSH_PORT="${EDR_WD_SSH_PORT:-22}"
 LOCAL_PORT="${EDR_WD_LOCAL_PORT:-18765}"
 REMOTE_PORT="${EDR_WD_REMOTE_PORT:-8765}"
-TARGET_DIR="${EDR_WD_TARGET_DIR:-C:/path/to/edr-wd}"
+EDR_WD_TARGET_DIR="${EDR_WD_TARGET_DIR:-C:/path/to/edr-wd}"
 PASSFILE="${EDR_WD_PASSFILE:-$HOME/.ssh/.tunnelpass}"
 START_MODE="${EDR_WD_START_MODE:-auto}"
+TARGET_NAME="${EDR_WD_TARGET_NAME:-win-dev}"
 
 usage() {
     cat <<EOF
@@ -43,16 +44,34 @@ Commands:
 EOF
 }
 
-remote_deploy() {
+remote_lifecycle() {
+    # Call the Python lifecycle entry points on the Windows target via SSH.
+    # Uses the same target_manager.ensure_server_running / stop_server path
+    # as the main agent, without requiring deploy.ps1.
     local action="$1"
-    local remote_script="$TARGET_DIR/target/deploy.ps1"
-    local ssh_args=(-p "$SSH_PORT" -o StrictHostKeyChecking=no)
-    local remote_cmd="powershell -NoProfile -ExecutionPolicy Bypass -File \"$remote_script\" -Action $action -BindHost 127.0.0.1 -Port $REMOTE_PORT -StartMode $START_MODE"
+    local remote_py_cmd
 
+    case "$action" in
+        start)
+            remote_py_cmd="python -c \"from agent.target_manager import ensure_server_running; print(ensure_server_running('${TARGET_NAME}'))\""
+            ;;
+        stop)
+            remote_py_cmd="python -c \"from agent.target_manager import stop_server; print(stop_server('${TARGET_NAME}'))\""
+            ;;
+        status)
+            remote_py_cmd="python -c \"from agent.target_manager import probe_target; print(probe_target('${TARGET_NAME}'))\""
+            ;;
+        *)
+            echo "Unknown action: $action" >&2
+            return 1
+            ;;
+    esac
+
+    local ssh_args=(-p "$SSH_PORT" -o StrictHostKeyChecking=no)
     if command -v sshpass >/dev/null 2>&1 && [ -f "$PASSFILE" ]; then
-        sshpass -f "$PASSFILE" ssh "${ssh_args[@]}" "${USER}@${HOST}" "$remote_cmd"
+        sshpass -f "$PASSFILE" ssh "${ssh_args[@]}" "${USER}@${HOST}" "$remote_py_cmd"
     else
-        ssh "${ssh_args[@]}" -o BatchMode=yes "${USER}@${HOST}" "$remote_cmd"
+        ssh "${ssh_args[@]}" -o BatchMode=yes "${USER}@${HOST}" "$remote_py_cmd"
     fi
 }
 
@@ -62,7 +81,7 @@ ensure_tunnel() {
 
 do_up() {
     echo "[1/2] Starting Windows MCP server..."
-    remote_deploy start
+    remote_lifecycle start
     echo ""
     echo "[2/2] Starting local tunnel..."
     ensure_tunnel
@@ -73,7 +92,7 @@ do_up() {
 
 do_down() {
     echo "[1/2] Stopping Windows MCP server..."
-    remote_deploy stop || true
+    remote_lifecycle stop || true
     echo ""
     echo "[2/2] Stopping local tunnel..."
     bash "$SCRIPT_DIR/tunnel.sh" stop || true
@@ -81,14 +100,14 @@ do_down() {
 
 do_status() {
     echo "[1/2] Windows target status..."
-    remote_deploy status
+    remote_lifecycle status
     echo ""
     echo "[2/2] Tunnel status..."
     bash "$SCRIPT_DIR/tunnel.sh" status
 }
 
 do_push() {
-    local remote_path="$TARGET_DIR/incoming/"
+    local remote_path="${EDR_WD_TARGET_DIR}/incoming/"
     local sources=()
 
     while [ "$#" -gt 0 ]; do

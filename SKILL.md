@@ -36,7 +36,7 @@ flowchart LR
   Agent --> SSH[agent.ssh_runner]
   TM --> WL[agent.lifecycle.windows]
   TM --> ML[agent.lifecycle.macos]
-  WL --> W1[target/deploy.ps1\nWindows target]
+  WL --> W1[target/scripts/windows/*\nWindows target]
   ML --> M1[target/scripts/macos/*\nmacOS target]
   W1 --> S[target/server.py\nFastMCP]
   M1 --> S
@@ -108,23 +108,16 @@ Windows agents, call the Python modules directly from PowerShell or Python.
 ### Windows targets
 
 Windows lifecycle is handled by `agent/lifecycle/windows.py` and the scripts in
-`target/`:
+`target/scripts/windows/`:
 
-- `target/deploy.ps1` is the operator-facing lifecycle entrypoint
-- `target/scripts/install_task.ps1` registers the scheduled task
-- `target/scripts/start_server.ps1` starts the server in the interactive
+- `target/scripts/windows/install_task.ps1` registers the scheduled task
+- `target/scripts/windows/start_server.ps1` starts the server in the interactive
   desktop session
-- `target/scripts/stop_server.ps1` stops the listener on port 8765
-- `target/scripts/health.ps1` performs a quick port-level health check
+- `target/scripts/windows/stop_server.ps1` stops the listener on port 8765
+- `target/scripts/windows/health.ps1` performs a quick port-level health check
 
-Typical Windows flow:
-
-```powershell
-cd target
-.\deploy.ps1 -Action start
-.\deploy.ps1 -Action status
-.\deploy.ps1 -Action stop
-```
+Typical Windows flow — all via `agent/lifecycle/windows.py` through
+`target_manager.ensure_server_running()` and `target_manager.stop_server()`.
 
 ### macOS targets
 
@@ -217,7 +210,6 @@ python -m agent.target_config --list
 - [target/automation/base.py](target/automation/base.py)
 - [target/automation/windows_pywinauto.py](target/automation/windows_pywinauto.py)
 - [target/automation/macos_accessibility.py](target/automation/macos_accessibility.py)
-- [target/deploy.ps1](target/deploy.ps1)
 - [target/pywinauto_client.py](target/pywinauto_client.py)
 - [target/server.py](target/server.py)
 - [target/tests/smoke_mcp_client.py](target/tests/smoke_mcp_client.py)
