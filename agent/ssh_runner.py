@@ -437,3 +437,103 @@ def scp_from(ssh_config: dict, remote_path: str | os.PathLike,
         name = Path(missing).name if missing else "unknown"
         hint = " Ensure OpenSSH is installed and in PATH." if name in ("ssh", "scp") else ""
         return -1, f"Command not found: {missing or e}.{hint}"
+
+
+def scp_dir_to(ssh_config: dict, local_dir: str | os.PathLike,
+                remote_dir: str, *, timeout: int = 60,
+                tracked_only: bool = True) -> Tuple[int, str]:
+    """
+    Upload the contents of local_dir/ to remote_dir/, optionally restricting
+    to files tracked by git (via ``git ls-files``).
+
+    This prevents accidental upload of untracked debug scripts, __pycache__,
+    logs, and local config files.
+
+    Args:
+        ssh_config:      SSH connection config
+        local_dir:      Absolute path to the local source directory
+        remote_dir:     Remote destination directory (e.g. ``C:/Users/foo/edr-wd``)
+        timeout:        Per-file upload timeout in seconds
+        tracked_only:   If True (default), only upload files returned by
+                        ``git ls-files <local_dir>``. If False, upload the
+                        entire directory tree.
+
+    Returns (exit_code, message_summary).
+    """
+    local_dir = Path(local_dir).resolve()
+
+    if tracked_only:
+        try:
+            cp = subprocess.run(
+                ["git", "ls-files", "--", str(local_dir)],
+                capture_output=True, timeout=10,
+                cwd=local_dir.parent,
+            )
+            if cp.returncode == 0:
+                raw = cp.stdout.decode("utf-8", errors="replace")
+                rel_paths = [
+                    line.strip()
+                    for line in raw.splitlines()
+                    if line.strip() and not line.startswith("#")
+                ]
+            else:
+                return -1, f"git ls-files failed (rc={cp.returncode}): {cp.stderr.decode()[:200]}"
+        except subprocess.TimeoutExpired:
+            return -1, "git ls-files timed out"
+        except FileNotFoundError:
+            return -1, "git not found in PATH — cannot determine tracked files"
+
+        if not rel_paths:
+            return 0, f"No tracked files found under {local_dir}"
+    else:
+        # Upload everything under local_dir/
+        rel_paths = []
+        for item in local_dir.rglob("*"):
+            if item.is_file():
+                rel_paths.append(item.relative_to(local_dir).as_posix())
+
+    # Upload each tracked file individually so one failure doesn't block others.
+    # git returns paths like "target/__init__.py"; strip the top-level component
+    # (the directory name, e.g. "target") to get the relative path within it.
+    local_dir_name = local_dir.name          # e.g. "target"
+    repo_root = local_dir.parent            # AGENT_ROOT
+    failed = []
+    for git_rel in rel_paths:
+        # git_rel = "target/server.py"; strip the leading "target/" to get "server.py"
+        inner = Path(git_rel)
+        if inner.parts[0] != local_dir_name:
+            failed.append(f"{git_rel}: does not start with {local_dir_name}/ — skipping")
+            continue
+        rel_within = "/".join(inner.parts[1:])  # "server.py" or "automation/base.py"
+        src = repo_root / git_rel              # absolute local file
+        dst = _remote_join(remote_dir, rel_within)
+        if ssh_config.get("auth", {}).get("type") == "password":
+            rc, msg = _paramiko_scp_to(ssh_config, str(src), dst, timeout=timeout)
+        else:
+            rc, msg = _scp_file_key(ssh_config, str(src), dst, timeout=timeout)
+        if rc != 0:
+            failed.append(f"{git_rel} → {dst}: {msg[:80]}")
+
+    if failed:
+        return -1, f"Failed to upload {len(failed)} file(s): " + "; ".join(failed[:3])
+    return 0, f"Uploaded {len(rel_paths)} tracked file(s) to {remote_dir}"
+
+
+def _scp_file_key(ssh_config: dict, local_path: str, remote_path: str,
+                   timeout: int = 30) -> Tuple[int, str]:
+    """Upload a single file via OpenSSH scp (key auth only)."""
+    try:
+        base = _openssh_scp_base(ssh_config)
+    except UnsupportedAuthType:
+        raise
+    cmd = base + [str(local_path), f"{ssh_config['user']}@{ssh_config['host']}:{remote_path}"]
+    try:
+        cp = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        if cp.returncode != 0:
+            return cp.returncode, (cp.stdout + cp.stderr).decode("utf-8", errors="replace")
+        return 0, ""
+    except subprocess.TimeoutExpired:
+        return -1, f"SCP timed out after {timeout}s"
+    except FileNotFoundError as e:
+        missing = getattr(e, "filename", None)
+        return -1, f"scp not found: {missing or e}"
