@@ -20,6 +20,11 @@ Scripts uploaded by install() (target/scripts/macos/):
 
 Start trigger:  `launchctl kickstart -k gui/$(id -u)/<launch_name>`
 Stop by port:   `lsof -tiTCP:<port> -sTCP:LISTEN | xargs -r kill -TERM`
+
+Errors are structured:
+  - backend_mismatch
+  - gui_not_ready
+  - deploy_nested_path_error
 """
 
 from __future__ import annotations
@@ -27,12 +32,16 @@ from __future__ import annotations
 import socket
 import time
 from pathlib import Path
+from typing import Optional
 
 from agent.ssh_runner import run_ssh, scp_to
 
 AGENT_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_SCRIPTS = AGENT_ROOT / "target" / "scripts" / "macos"
+LOCAL_TARGET = AGENT_ROOT / "target"
 
+
+# ─── TCP helper ────────────────────────────────────────────────────────────────
 
 def _is_port_listening(host: str, port: int, timeout: float = 1.0) -> bool:
     try:
@@ -45,14 +54,30 @@ def _is_port_listening(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+# ─── Remote path helpers ───────────────────────────────────────────────────────
+
+def _remote_join(base: str, *parts: str) -> str:
+    """Join path components for a remote SFTP path, Unix-style."""
+    base = base.rstrip("/")
+    for p in parts:
+        segment = str(p).strip("/")
+        if segment:
+            base = f"{base}/{segment}"
+    return base
+
+
 def _remote_scripts_dir(macos_root: str) -> str:
     return f"{macos_root.rstrip('/')}/scripts/macos"
 
+
+# ─── Script discovery ───────────────────────────────────────────────────────────
 
 def _local_script(name: str) -> Path | None:
     p = LOCAL_SCRIPTS / name
     return p if p.exists() else None
 
+
+# ─── MacOSLifecycle ────────────────────────────────────────────────────────────
 
 class MacOSLifecycle:
     """Lifecycle backend for macOS targets (launchd LaunchAgent)."""
@@ -61,7 +86,77 @@ class MacOSLifecycle:
     def platform(self) -> str:
         return "macos"
 
-    # ── ensure_server_running ────────────────────────────────────────────────
+    # ── probe ────────────────────────────────────────────────────────────────
+
+    def probe(self, cfg: dict) -> dict:
+        """
+        Probe the macOS target: hostname, Python, Accessibility permissions.
+        Returns structured result — never raises.
+        """
+        ssh_cfg = cfg["ssh"]
+        mac_cfg = cfg["macos"]
+        python_path = mac_cfg.get("python_path", "python3")
+
+        stages = {}
+
+        # hostname / whoami
+        rc, out = run_ssh(ssh_cfg, "hostname && whoami", timeout=15)
+        stages["ssh"] = {"ok": rc == 0, "output": out.strip()[:200]}
+        if rc != 0:
+            return self._err("probe", "ssh_failed", out[:300], details=stages)
+
+        # Python
+        rc, out = run_ssh(
+            ssh_cfg,
+            f'"{python_path}" -c "import sys; print(sys.version)"',
+            timeout=15,
+        )
+        stages["python"] = {"ok": rc == 0, "output": out.strip()[:100]}
+        if rc != 0:
+            return self._err(
+                "probe", "python_not_found",
+                f"Python at '{python_path}' failed: {out[:200]}",
+                details=stages,
+            )
+
+        return self._ok("probe", data=stages)
+
+    # ── deploy ───────────────────────────────────────────────────────────────
+
+    def deploy(self, cfg: dict) -> dict:
+        """
+        Upload the local target/ directory to the remote macos.root.
+        Returns structured result.
+        """
+        ssh_cfg = cfg["ssh"]
+        mac_cfg = cfg["macos"]
+        macos_root = mac_cfg["root"]
+
+        # Upload entire local target/ directory contents to remote macos_root
+        rc, msg = scp_to(ssh_cfg, str(LOCAL_TARGET), macos_root, timeout=60)
+        if rc != 0:
+            return self._err("deploy", "deploy_failed", msg[:300])
+
+        # Verify key files landed at the correct level
+        for fname in ["server.py", "automation/__init__.py"]:
+            remote_check = _remote_join(macos_root, fname)
+            rc_check, _ = run_ssh(
+                ssh_cfg,
+                f"test -f '{remote_check}' && echo 'found' || echo 'missing'",
+                timeout=10,
+            )
+            if rc_check != 0:
+                return self._err(
+                    "deploy", "deploy_incomplete",
+                    f"Expected file not found: {remote_check}",
+                )
+
+        return self._ok("deploy", data={
+            "macos_root": macos_root,
+            "uploaded": "target/ contents",
+        })
+
+    # ── ensure_server_running ─────────────────────────────────────────────────
 
     def ensure_server_running(self, cfg: dict) -> dict:
         ssh_cfg = cfg["ssh"]
@@ -79,17 +174,18 @@ class MacOSLifecycle:
 
         # Phase 1: TCP probe
         if _is_port_listening(check_host, check_port):
+            gui_check = self._check_gui_readiness(cfg)
             return {
-                "ok": True, "stage": "ensure",
+                "ok": True,
+                "stage": "ensure",
                 "data": {
                     "status": "already_running",
                     "port": check_port,
-                    "ready_level": "tcp_only",
-                    "note": "MCP initialize handled by mcp_manager",
+                    **gui_check,
                 },
             }
 
-        # Phase 2: stop any process holding the port (avoid EADDRINUSE)
+        # Phase 2: stop any process holding the port
         stop_cmd = (
             f"lsof -tiTCP:{check_port} -sTCP:LISTEN 2>/dev/null "
             f"| xargs -r kill -TERM 2>/dev/null; "
@@ -98,24 +194,19 @@ class MacOSLifecycle:
             f"| xargs -r kill -KILL 2>/dev/null; "
             f"true"
         )
-        run_ssh(ssh_cfg, stop_cmd)
+        run_ssh(ssh_cfg, stop_cmd, timeout=15)
 
-        # Phase 3: upload start_server.sh so a manual start is possible
-        # (LaunchAgent with KeepAlive=true will also restart it).
+        # Phase 3: upload start_server.sh
         start_script = _local_script("start_server.sh")
         if start_script:
             scp_to(ssh_cfg, str(start_script), _remote_scripts_dir(target_root))
 
-        # Phase 4: kickstart the LaunchAgent.
-        # If the agent hasn't been installed yet, kickstart will fail — caller
-        # should run install() first.
+        # Phase 4: kickstart LaunchAgent
         kick_cmd = (
             f"UID_VAL=$(id -u); "
             f"launchctl kickstart -k \"gui/${{UID_VAL}}/{launch_name}\" 2>&1"
         )
-        rc, out = run_ssh(ssh_cfg, kick_cmd)
-        # Non-zero is non-fatal at this stage: the agent might just not be
-        # installed yet. We still try to wait for the port.
+        rc, out = run_ssh(ssh_cfg, kick_cmd, timeout=15)
 
         # Phase 5: wait for port
         max_wait = 20
@@ -127,28 +218,118 @@ class MacOSLifecycle:
             waited += 1
 
         if waited >= max_wait:
-            return {
-                "ok": False, "stage": "ensure",
-                "error": (
-                    f"Port {check_port} did not open within {max_wait}s. "
-                    f"kickstart output: {(out or '').strip()}. "
-                    f"Tip: run install_target_task() first to register the LaunchAgent."
-                ),
-            }
+            return self._err(
+                "ensure", "server_start_timeout",
+                f"Port {check_port} did not open within {max_wait}s. "
+                f"kickstart: {(out or '').strip()[:200]}. "
+                f"Tip: run install_target_task() first to register the LaunchAgent.",
+            )
+
+        time.sleep(2)
+        gui_check = self._check_gui_readiness(cfg)
 
         return {
-            "ok": True, "stage": "ensure",
+            "ok": True,
+            "stage": "ensure",
             "data": {
                 "status": "started",
                 "port": check_port,
                 "waited_seconds": waited,
-                "ready_level": "tcp_only",
-                "note": "MCP initialize handled by mcp_manager",
-                "kickstart_output": (out or "").strip(),
+                **gui_check,
             },
         }
 
-    # ── stop_server ──────────────────────────────────────────────────────────
+    def _check_gui_readiness(self, cfg: dict) -> dict:
+        """
+        Verify GUI readiness for macOS:
+          1. MCP backend = macos_accessibility
+          2. list_windows > 0
+        """
+        ssh_cfg = cfg["ssh"]
+        mcp_cfg = cfg["mcp"]
+        mac_cfg = cfg["macos"]
+
+        connect_mode = mcp_cfg.get("connect_mode", "direct")
+        if connect_mode == "direct":
+            check_host = ssh_cfg["host"]
+        else:
+            check_host = "127.0.0.1"
+        check_port = mcp_cfg["port"]
+
+        backend = mac_cfg.get("backend", "macos_accessibility")
+        window_count = 0
+
+        try:
+            import urllib.request
+            import json as _json
+
+            payload = _json.dumps({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "status",
+                    "arguments": {}
+                }
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                f"http://{check_host}:{check_port}/mcp",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                result = _json.load(resp)
+                content = result.get("result", {}).get("content", [])
+                for block in content:
+                    if block.get("type") == "text":
+                        try:
+                            data = _json.loads(block["text"])
+                            if data.get("backend") == backend:
+                                # Get window count
+                                wc_payload = _json.dumps({
+                                    "jsonrpc": "2.0",
+                                    "id": 2,
+                                    "method": "tools/call",
+                                    "params": {
+                                        "name": "list_windows",
+                                        "arguments": {}
+                                    }
+                                }).encode("utf-8")
+                                wc_req = urllib.request.Request(
+                                    f"http://{check_host}:{check_port}/mcp",
+                                    data=wc_payload,
+                                    headers={"Content-Type": "application/json"},
+                                    method="POST",
+                                )
+                                with urllib.request.urlopen(wc_req, timeout=5) as wc_resp:
+                                    wc_result = _json.load(wc_resp)
+                                    for wc_block in wc_result.get("result", {}).get("content", []):
+                                        if wc_block.get("type") == "text":
+                                            try:
+                                                wc_data = _json.loads(wc_block["text"])
+                                                window_count = len(wc_data.get("windows", []))
+                                            except Exception:
+                                                pass
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        server_gui_ready = window_count > 0
+        # server_gui_ready only means the backend can enumerate at least one window.
+        # It does NOT mean HiSec/EDR is ready for automation.
+
+        return {
+            "ready_level": "gui_ready" if server_gui_ready else "tcp_only",
+            "server_gui_ready": server_gui_ready,
+            # DEPRECATED alias
+            "gui_ready": server_gui_ready,
+            "backend": backend,
+            "list_windows_count": window_count,
+        }
+
+    # ── stop_server ───────────────────────────────────────────────────────────
 
     def stop_server(self, cfg: dict) -> dict:
         ssh_cfg = cfg["ssh"]
@@ -158,43 +339,33 @@ class MacOSLifecycle:
         launch_name = mac_cfg["launch_name"]
         port = mcp_cfg["port"]
 
-        # Use stop_server.sh if uploaded; otherwise fall back to lsof kill.
         stop_script = _local_script("stop_server.sh")
         if stop_script:
             scp_to(ssh_cfg, str(stop_script), _remote_scripts_dir(target_root))
             remote_stop = f"{_remote_scripts_dir(target_root)}/stop_server.sh"
-            rc, out = run_ssh(ssh_cfg, f"bash '{remote_stop}' --port {port}")
+            rc, out = run_ssh(ssh_cfg, f"bash '{remote_stop}' --port {port}", timeout=20)
         else:
-            # kill processes on the port; do NOT also bootout the LaunchAgent
-            # (caller may want to restart, not fully remove the service).
             rc, out = run_ssh(
                 ssh_cfg,
                 f"lsof -tiTCP:{port} -sTCP:LISTEN 2>/dev/null "
                 f"| xargs -r kill -TERM; sleep 0.5; "
                 f"lsof -tiTCP:{port} -sTCP:LISTEN 2>/dev/null "
                 f"| xargs -r kill -KILL; true",
+                timeout=20,
             )
 
         port_still_open = _is_port_listening("127.0.0.1", port)
-        return {
-            "ok": True, "stage": "stop",
-            "data": {
-                "port_killed": not port_still_open,
-                "output": (out or "").strip(),
-                "launch_name": launch_name,
-            },
-        }
+        return self._ok("stop", data={
+            "port_killed": not port_still_open,
+            "output": (out or "").strip()[:300],
+            "launch_name": launch_name,
+        })
 
-    # ── install ──────────────────────────────────────────────────────────────
+    # ── install ───────────────────────────────────────────────────────────────
 
     def install(self, cfg: dict) -> dict:
         """
         Upload LaunchAgent scripts and register the agent with launchd.
-
-        Steps:
-          1. Upload start_server.sh, stop_server.sh, install_launch_agent.sh
-          2. Run install_launch_agent.sh — which renders the plist, copies it
-             to ~/Library/LaunchAgents/, and bootstraps the agent.
         """
         ssh_cfg = cfg["ssh"]
         mac_cfg = cfg["macos"]
@@ -213,16 +384,16 @@ class MacOSLifecycle:
         ]:
             local = LOCAL_SCRIPTS / script
             if not local.exists():
-                return {
-                    "ok": False, "stage": "install",
-                    "error": f"Local script not found: {local}",
-                }
-            rc, err = scp_to(ssh_cfg, str(local), remote_scripts)
+                return self._err(
+                    "install", "local_script_missing",
+                    f"Local script not found: {local}",
+                )
+            rc, err = scp_to(ssh_cfg, str(local), remote_scripts, timeout=30)
             if rc != 0:
-                return {
-                    "ok": False, "stage": "install",
-                    "error": f"SCP upload failed for {script}: {err}",
-                }
+                return self._err(
+                    "install", "script_upload_failed",
+                    f"{script}: {err[:200]}",
+                )
             uploaded.append(script)
 
         install_cmd = (
@@ -231,19 +402,36 @@ class MacOSLifecycle:
             f"--root '{target_root}' "
             f"--python '{python_path}'"
         )
-        rc, out = run_ssh(ssh_cfg, install_cmd)
+        rc, out = run_ssh(ssh_cfg, install_cmd, timeout=30)
         if rc != 0:
-            return {
-                "ok": False, "stage": "install",
-                "error": f"install_launch_agent.sh failed (rc={rc}): {out}",
-            }
+            return self._err(
+                "install", "launchagent_registration_failed",
+                f"install_launch_agent.sh failed (rc={rc}): {out[:300]}",
+            )
+        return self._ok("install", data={
+            "uploaded": uploaded,
+            "install_output": (out or "").strip()[:300],
+            "launch_name": launch_name,
+        })
+
+    # ── Result helpers ─────────────────────────────────────────────────────────
+
+    def _ok(self, stage: str, data: Optional[dict] = None) -> dict:
+        return {"ok": True, "stage": stage, "data": data or {}}
+
+    def _err(
+        self,
+        stage: str,
+        code: str,
+        message: str,
+        details: Optional[dict] = None,
+    ) -> dict:
         return {
-            "ok": True, "stage": "install",
-            "data": {
-                "uploaded": uploaded,
-                "install_output": (out or "").strip(),
-                "launch_name": launch_name,
-            },
+            "ok": False,
+            "stage": stage,
+            "error": message,
+            "code": code,
+            "details": details or {},
         }
 
 
