@@ -44,22 +44,23 @@ Commands:
 EOF
 }
 
-remote_lifecycle() {
-    # Call the Python lifecycle entry points on the Windows target via SSH.
-    # Uses the same target_manager.ensure_server_running / stop_server path
-    # as the main agent, without requiring deploy.ps1.
+local_lifecycle() {
+    # Call the Python lifecycle entry points locally on the agent machine.
+    # target_manager is an agent-side orchestration module — it must run on
+    # the agent host, not on the target.  It connects to the target via SSH
+    # internally through ssh_runner; the SSH below is only for the tunnel.
     local action="$1"
-    local remote_py_cmd
+    local py_cmd
 
     case "$action" in
         start)
-            remote_py_cmd="python -c \"from agent.target_manager import ensure_server_running; print(ensure_server_running('${TARGET_NAME}'))\""
+            py_cmd="from agent.target_manager import ensure_server_running; print(ensure_server_running('${TARGET_NAME}'))"
             ;;
         stop)
-            remote_py_cmd="python -c \"from agent.target_manager import stop_server; print(stop_server('${TARGET_NAME}'))\""
+            py_cmd="from agent.target_manager import stop_server; print(stop_server('${TARGET_NAME}'))"
             ;;
         status)
-            remote_py_cmd="python -c \"from agent.target_manager import probe_target; print(probe_target('${TARGET_NAME}'))\""
+            py_cmd="from agent.target_manager import probe_target; print(probe_target('${TARGET_NAME}'))"
             ;;
         *)
             echo "Unknown action: $action" >&2
@@ -67,12 +68,11 @@ remote_lifecycle() {
             ;;
     esac
 
-    local ssh_args=(-p "$SSH_PORT" -o StrictHostKeyChecking=no)
-    if command -v sshpass >/dev/null 2>&1 && [ -f "$PASSFILE" ]; then
-        sshpass -f "$PASSFILE" ssh "${ssh_args[@]}" "${USER}@${HOST}" "$remote_py_cmd"
-    else
-        ssh "${ssh_args[@]}" -o BatchMode=yes "${USER}@${HOST}" "$remote_py_cmd"
-    fi
+    # Run locally on the agent.  We need the repo root on sys.path so the
+    # 'agent' package is importable; SCRIPT_DIR is .../edr-wd/agent, so the
+    # repo root is one level up.
+    cd "$SCRIPT_DIR/.." || return
+    python -c "$py_cmd"
 }
 
 ensure_tunnel() {
@@ -81,7 +81,7 @@ ensure_tunnel() {
 
 do_up() {
     echo "[1/2] Starting Windows MCP server..."
-    remote_lifecycle start
+    local_lifecycle start
     echo ""
     echo "[2/2] Starting local tunnel..."
     ensure_tunnel
@@ -92,7 +92,7 @@ do_up() {
 
 do_down() {
     echo "[1/2] Stopping Windows MCP server..."
-    remote_lifecycle stop || true
+    local_lifecycle stop || true
     echo ""
     echo "[2/2] Stopping local tunnel..."
     bash "$SCRIPT_DIR/tunnel.sh" stop || true
@@ -100,7 +100,7 @@ do_down() {
 
 do_status() {
     echo "[1/2] Windows target status..."
-    remote_lifecycle status
+    local_lifecycle status
     echo ""
     echo "[2/2] Tunnel status..."
     bash "$SCRIPT_DIR/tunnel.sh" status
