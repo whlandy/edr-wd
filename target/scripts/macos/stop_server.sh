@@ -42,14 +42,19 @@ if [[ -z "${PIDFILE}" ]]; then
 fi
 
 looks_like_our_server() {
-  # Args: <pid> <target_dir> — return 0 only if process is ours.
-  # Requires BOTH server.py AND --http AND target root path in cmdline,
-  # to avoid killing unrelated processes that happen to mention "edr-wd".
+  # Args: <pid> <target_dir> — return 0 only if the process is the
+  # managed server for THIS target root. Requires BOTH server.py AND
+  # the target root path in the command line.  The --http check is
+  # deliberately omitted here so that this also catches processes that
+  # are running but were started outside of the current launchd cycle
+  # (e.g. via SSH/nohup); stop_server needs to be able to clean those up.
   local pid="$1"
   local target_dir="$2"
   local cmd
   cmd="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
-  [[ "${cmd}" == *"server.py"* && "${cmd}" == *"--http"* && "${cmd}" == *"${target_dir}"* ]]
+  local norm_cmd="${cmd//\\//}"
+  local norm_root="${target_dir//\\//}"
+  [[ "${norm_cmd}" == *"server.py"* && "${norm_cmd}" == *"${norm_root}"* ]]
 }
 
 stop_pid() {

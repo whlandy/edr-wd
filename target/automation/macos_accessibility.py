@@ -373,17 +373,23 @@ class MacOSAccessibilityBackend:
                 return True, title, "cgwindowlist"
             return False, "", "system_events"
 
-        def _click_security_center(method: str = "auto") -> tuple[bool, str]:
+        def _click_security_center(method: str = "auto") -> tuple[bool, str, str]:
             """
             Call the helper script with the specified click method.
             method: "auto" | "ax_press" | "cgevent_center"
-            Returns (clicked, click_method).
+            Returns (clicked, click_method, error_message).
+            error_message is non-empty when clicked=False and tells WHY it failed.
             """
             rc, out = _run(["/usr/bin/swift", str(CLICK_HELPER), "--method", method], timeout=10)
             if rc == 0 and out.startswith("OK "):
                 actual_method = out.strip().split(" ")[1]
-                return True, actual_method
-            return False, ""
+                return True, actual_method, ""
+            # Failed — stderr tells us why
+            err = out.strip()
+            if not err:
+                # stdout may contain error text even without stderr separation
+                err = f"swift exited rc={rc}"
+            return False, "", err
 
         # Stage 1: check process existence (separate from window existence)
         hisec_process_found = _proc_exists("HiSecEndpointAgent")
@@ -419,6 +425,7 @@ class MacOSAccessibilityBackend:
                         "clicked": False,
                         "click_attempts": [],
                         "successful_click_method": None,
+                        "click_error": "HiSecEndpointAgent binary not found",
                         "window_found": False,
                         "window_title": "华为HiSec Endpoint",
                         "detected_by": None,
@@ -461,6 +468,7 @@ class MacOSAccessibilityBackend:
                         "clicked": False,
                         "click_attempts": [],
                         "successful_click_method": None,
+                        "click_error": "main window did not appear within timeout",
                         "window_found": _edr_client_window_visible()[0],
                         "window_title": "华为HiSec Endpoint",
                         "detected_by": None,
@@ -469,16 +477,22 @@ class MacOSAccessibilityBackend:
 
         # Stage 4: main window confirmed, click security center
         # Try ax_press first; if client window doesn't appear, fallback to cgevent_center.
-        click_attempts = []
+        click_attempts = []       # list of {method, error} per attempt
+        click_errors = []          # all errors seen (for structured return)
         client_window_found = False
         successful_click_method = None
         detected_by = None
         detected_window_title = ""
 
         for click_method_label in ["ax_press", "cgevent_center"]:
-            clicked, actual_method = _click_security_center(method=click_method_label)
-            if clicked:
-                click_attempts.append(actual_method)
+            clicked, actual_method, click_err = _click_security_center(method=click_method_label)
+            click_attempts.append({
+                "method": actual_method or click_method_label,
+                "clicked": clicked,
+                "error": click_err if not clicked else "",
+            })
+            if not clicked:
+                click_errors.append(click_err)
 
             if clicked:
                 # Poll for EDRClient window to appear (up to 5s per attempt)
@@ -499,6 +513,9 @@ class MacOSAccessibilityBackend:
         ok = main_window_found and client_window_found
         stage = "done" if ok else "client_window_not_found"
 
+        # Final click error: the most recent failure reason, for diagnostics
+        final_click_error = click_errors[-1] if click_errors else ""
+
         return {
             "ok": ok,
             "stage": stage,
@@ -513,9 +530,10 @@ class MacOSAccessibilityBackend:
             },
             "client": {
                 "process_found": edr_client_process_found,
-                "clicked": len(click_attempts) > 0,
+                "clicked": successful_click_method is not None,
                 "click_attempts": click_attempts,
                 "successful_click_method": successful_click_method,
+                "click_error": final_click_error,
                 "window_found": client_window_found,
                 "window_title": detected_window_title or "华为HiSec Endpoint",
                 "detected_by": detected_by,
@@ -798,3 +816,111 @@ class MacOSAccessibilityBackend:
             return int(out) if out else None
         except ValueError:
             return None
+
+
+def diagnose_windows() -> dict:
+    """
+    Probe all windows on the Mac desktop using BOTH CGWindowList and osascript,
+    then cross-reference to identify discrepancies.
+    Used for debugging window detection mismatches.
+    """
+    results = {}
+
+    # ── Method 1: CGWindowList (used by list_windows) ─────────────────────────
+    import subprocess as _subprocess, json as _json
+    cg_script = (
+        'use framework "CoreGraphics"\n'
+        'use framework "AppKit"\n'
+        'set wList to CGWindowListCopyWindowInfo(17, 0)\n'
+        'set out to ""\n'
+        'repeat with w in wList\n'
+        '    set owner to "" & (kCGWindowOwnerName of w as string)\n'
+        '    set wName to "" & (kCGWindowName of w as string)\n'
+        '    set wPID to kCGWindowOwnerPID of w\n'
+        '    set layer to 0\n'
+        '    try\n'
+        '        set layer to kCGWindowLayer of w\n'
+        '    end try\n'
+        '    if wName is not "" then\n'
+        '        set out to out & owner & "|" & wName & "|" & (wPID as string) & "|" & (layer as string) & "\n"\n'
+        '    end if\n'
+        'end repeat\n'
+        'return out\n'
+    )
+    rc1, out1 = _run(["osascript", "-e", cg_script], timeout=10)
+    cg_windows = []
+    if rc1 == 0:
+        for line in out1.strip().split("\n"):
+            if line.strip():
+                parts = line.split("|")
+                if len(parts) >= 4:
+                    cg_windows.append({
+                        "owner": parts[0],
+                        "title": parts[1],
+                        "pid": int(parts[2]) if parts[2].isdigit() else 0,
+                        "layer": int(parts[3]) if parts[3].isdigit() else 0,
+                    })
+    results["cgwindowlist"] = cg_windows
+    results["cgwindowlist_count"] = len(cg_windows)
+    results["cgwindowlist_error"] = None if rc1 == 0 else f"rc={rc1}"
+
+    # ── Method 2: osascript System Events (used by _hisec_window_visible) ─────
+    osa_script = (
+        'tell application "System Events"\n'
+        '  set out to ""\n'
+        '  repeat with p in (every process)\n'
+        '    set pName to name of p\n'
+        '    try\n'
+        '      repeat with w in (every window of p)\n'
+        '        set wName to name of w\n'
+        '        set out to out & pName & "|" & wName & "\n"\n'
+        '      end repeat\n'
+        '    end try\n'
+        '  end repeat\n'
+        'end tell\n'
+        'return out\n'
+    )
+    rc2, out2 = _run_osascript(osa_script, timeout=10)
+    osa_windows = []
+    if rc2 == 0:
+        for line in out2.strip().split("\n"):
+            if "|" in line:
+                parts = line.split("|", 1)
+                osa_windows.append({"owner": parts[0], "title": parts[1]})
+    results["osascript"] = osa_windows
+    results["osascript_count"] = len(osa_windows)
+    results["osascript_error"] = None if rc2 == 0 else f"rc={rc2}"
+
+    # ── Cross-reference for HiSec-related windows ─────────────────────────────
+    hisec_keywords = ["hisecond", "haisec", "华为", "endpoint", "baseline"]
+    results["hisec_analysis"] = []
+    cg_owners = {w["owner"] for w in cg_windows}
+    for w in osa_windows:
+        owner = w["owner"].lower()
+        title = w["title"].lower()
+        matched_kw = [k for k in hisec_keywords if k in owner or k in title]
+        if matched_kw:
+            in_cg = w["owner"] in cg_owners
+            results["hisec_analysis"].append({
+                "owner": w["owner"],
+                "title": w["title"],
+                "matched_keywords": matched_kw,
+                "seen_by_cgwindowlist": in_cg,
+                "seen_by_osascript": True,
+            })
+    for w in cg_windows:
+        owner = w["owner"].lower()
+        title = w["title"].lower()
+        matched_kw = [k for k in hisec_keywords if k in owner or k in title]
+        if matched_kw and not any(a["owner"] == w["owner"] for a in results["hisec_analysis"]):
+            results["hisec_analysis"].append({
+                "owner": w["owner"],
+                "title": w["title"],
+                "pid": w.get("pid"),
+                "layer": w.get("layer"),
+                "matched_keywords": matched_kw,
+                "seen_by_cgwindowlist": True,
+                "seen_by_osascript": False,
+            })
+
+    return results

@@ -174,6 +174,30 @@ class MacOSLifecycle:
 
         # Phase 1: TCP probe
         if _is_port_listening(check_host, check_port):
+            # Port is open — verify it is OUR managed server, not a stale orphan.
+            listener_info = self._get_listener_info(ssh_cfg, check_host, check_port, target_root)
+            if not listener_info["managed"]:
+                return {
+                    "ok": False,
+                    "stage": "ensure",
+                    "code": "stale_listener",
+                    "error": (
+                        f"Port {check_port} is occupied by an unmanaged process "
+                        f"(pid={listener_info['listener_pid']}). "
+                        f"This is not the current LaunchAgent-managed server. "
+                        f"Expected target root: {target_root}"
+                    ),
+                    "details": {
+                        "port": check_port,
+                        "listener_pid": listener_info["listener_pid"],
+                        "listener_cmdline": listener_info["listener_cmdline"],
+                        "expected_root": target_root,
+                        "next_action": (
+                            "stop_server() then ensure_server_running() again, "
+                            "or manually kill the stale process."
+                        ),
+                    },
+                }
             gui_check = self._check_gui_readiness(cfg)
             return {
                 "ok": True,
@@ -181,6 +205,7 @@ class MacOSLifecycle:
                 "data": {
                     "status": "already_running",
                     "port": check_port,
+                    "listener_pid": listener_info["listener_pid"],
                     **gui_check,
                 },
             }
@@ -239,95 +264,109 @@ class MacOSLifecycle:
             },
         }
 
+    def _get_listener_info(
+        self, ssh_cfg: dict, host: str, port: int, target_root: str,
+    ) -> dict:
+        """
+        Inspect the process listening on (host, port) via SSH + lsof + ps.
+        Returns a dict with:
+          managed   — True only if the listener's command line contains
+                      BOTH server.py AND the target_root path (i.e. it is
+                      the current LaunchAgent-managed server for this target).
+          listener_pid     — PID of the listening process, or None
+          listener_cmdline — full command line of that PID, or None
+        """
+        # Get PID first
+        pid_cmd = (
+            f"lsof -iTCP:{port} -sTCP:LISTEN -n -P 2>/dev/null "
+            f"| head -1 | awk '{{print $2}}' 2>/dev/null || echo ''"
+        )
+        rc_pid, pid_out = run_ssh(ssh_cfg, pid_cmd, timeout=10)
+        listener_pid = pid_out.strip() or None
+
+        if not listener_pid:
+            return {
+                "managed": False,
+                "listener_pid": None,
+                "listener_cmdline": None,
+            }
+
+        # Get command line for that PID
+        cmd_cmd = f"ps -p {listener_pid} -o command= 2>/dev/null || echo ''"
+        run_ssh(ssh_cfg, cmd_cmd, timeout=10)
+        # ps output goes to stdout via run_ssh
+        rc_cmd, cmdline = run_ssh(ssh_cfg, cmd_cmd, timeout=10)
+        cmdline = cmdline.strip()
+
+        if not cmdline:
+            return {
+                "managed": False,
+                "listener_pid": listener_pid,
+                "listener_cmdline": None,
+            }
+
+        norm_root = target_root.replace("\\", "/")
+        norm_cmdline = cmdline.replace("\\", "/")
+        managed = "server.py" in cmdline and norm_root in norm_cmdline
+        return {
+            "managed": managed,
+            "listener_pid": listener_pid,
+            "listener_cmdline": cmdline,
+        }
+
     def _check_gui_readiness(self, cfg: dict) -> dict:
         """
         Verify GUI readiness for macOS:
           1. MCP backend = macos_accessibility
           2. list_windows > 0
+
+        Uses mcp_manager.health_detail() which correctly handles SSE/MCP
+        session initialization — the same path that works for Windows and
+        for the real MCP tool calls.  Do NOT use raw urllib/curl here;
+        FastMCP StreamableHTTP requires proper session initialization and
+        will return 406 otherwise.
         """
-        ssh_cfg = cfg["ssh"]
-        mcp_cfg = cfg["mcp"]
-        mac_cfg = cfg["macos"]
-
-        connect_mode = mcp_cfg.get("connect_mode", "direct")
-        if connect_mode == "direct":
-            check_host = ssh_cfg["host"]
-        else:
-            check_host = "127.0.0.1"
-        check_port = mcp_cfg["port"]
-
-        backend = mac_cfg.get("backend", "macos_accessibility")
-        window_count = 0
+        target_name = cfg.get("_target_name", None)
+        if not target_name:
+            # Fallback if called without target_name in cfg
+            return {
+                "ready_level": "unknown",
+                "server_gui_ready": False,
+                "gui_ready": False,
+                "backend": None,
+                "list_windows_count": 0,
+                "error": "target_name not set in cfg",
+            }
 
         try:
-            import urllib.request
-            import json as _json
-
-            payload = _json.dumps({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {
-                    "name": "status",
-                    "arguments": {}
+            from agent import mcp_manager
+            hd = mcp_manager.health_detail(target_name)
+            if hd.get("ok"):
+                return {
+                    "ready_level": hd.get("ready_level", "unknown"),
+                    "server_gui_ready": hd.get("server_gui_ready", False),
+                    "gui_ready": hd.get("gui_ready", False),
+                    "backend": hd.get("backend"),
+                    "list_windows_count": hd.get("list_windows_count", 0),
                 }
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                f"http://{check_host}:{check_port}/mcp",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                result = _json.load(resp)
-                content = result.get("result", {}).get("content", [])
-                for block in content:
-                    if block.get("type") == "text":
-                        try:
-                            data = _json.loads(block["text"])
-                            if data.get("backend") == backend:
-                                # Get window count
-                                wc_payload = _json.dumps({
-                                    "jsonrpc": "2.0",
-                                    "id": 2,
-                                    "method": "tools/call",
-                                    "params": {
-                                        "name": "list_windows",
-                                        "arguments": {}
-                                    }
-                                }).encode("utf-8")
-                                wc_req = urllib.request.Request(
-                                    f"http://{check_host}:{check_port}/mcp",
-                                    data=wc_payload,
-                                    headers={"Content-Type": "application/json"},
-                                    method="POST",
-                                )
-                                with urllib.request.urlopen(wc_req, timeout=5) as wc_resp:
-                                    wc_result = _json.load(wc_resp)
-                                    for wc_block in wc_result.get("result", {}).get("content", []):
-                                        if wc_block.get("type") == "text":
-                                            try:
-                                                wc_data = _json.loads(wc_block["text"])
-                                                window_count = len(wc_data.get("windows", []))
-                                            except Exception:
-                                                pass
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-
-        server_gui_ready = window_count > 0
-        # server_gui_ready only means the backend can enumerate at least one window.
-        # It does NOT mean HiSec/EDR is ready for automation.
-
-        return {
-            "ready_level": "gui_ready" if server_gui_ready else "tcp_only",
-            "server_gui_ready": server_gui_ready,
-            # DEPRECATED alias
-            "gui_ready": server_gui_ready,
-            "backend": backend,
-            "list_windows_count": window_count,
-        }
+            else:
+                return {
+                    "ready_level": "unreachable",
+                    "server_gui_ready": False,
+                    "gui_ready": False,
+                    "backend": None,
+                    "list_windows_count": 0,
+                    "error": hd.get("error", "health_detail failed"),
+                }
+        except Exception as e:
+            return {
+                "ready_level": "error",
+                "server_gui_ready": False,
+                "gui_ready": False,
+                "backend": None,
+                "list_windows_count": 0,
+                "error": str(e),
+            }
 
     # ── stop_server ───────────────────────────────────────────────────────────
 

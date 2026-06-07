@@ -63,11 +63,16 @@ fi
 
 # Idempotency check: who's listening on the port?
 matches_our_server() {
-  # Args: <pid> — return 0 if ps shows a server.py / edr-wd server process.
+  # Args: <pid> <target_dir> — return 0 only if the process is the
+  # managed server for THIS target root. Requires BOTH server.py AND
+  # the target root path to be present in the command line.
   local pid="$1"
+  local target_dir="$2"
   local cmd
   cmd="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
-  [[ "${cmd}" == *"server.py"* || "${cmd}" == *"edr-wd"* ]]
+  local norm_cmd="${cmd//\\//}"
+  local norm_root="${target_dir//\\//}"
+  [[ "${norm_cmd}" == *"server.py"* && "${norm_cmd}" == *"${norm_root}"* ]]
 }
 
 if ! command -v lsof >/dev/null 2>&1; then
@@ -78,7 +83,7 @@ fi
 
 if lsof -iTCP:"${PORT}" -sTCP:LISTEN -n -P >/dev/null 2>&1; then
   listener_pid="$(lsof -tiTCP:"${PORT}" -sTCP:LISTEN -n -P | head -n1)"
-  if matches_our_server "${listener_pid}"; then
+  if matches_our_server "${listener_pid}" "${TARGET_DIR}"; then
     echo "${listener_pid}" > "${PIDFILE}"
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start_server.sh: port ${PORT} held by our own server (pid=${listener_pid}); exiting 0" \
       >> "${LOG_DIR}/start.log"
@@ -110,6 +115,6 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start_server.sh: launching ${PYTHON} server
 # exec so launchd sees python as the child. launchd tracks the
 # immediate child's lifetime for KeepAlive purposes.
 exec env \
-  EDR_WD_AUTOMATION_BACKEND="${AUTOMATION_BACKEND}" \
+  EDR_WD_ENABLE_POWERSHELL=1 EDR_WD_AUTOMATION_BACKEND="${AUTOMATION_BACKEND}" \
   "${PYTHON}" server.py --http --host "${HOST}" --port "${PORT}" \
   >> "${LOG_DIR}/server.log" 2>&1
