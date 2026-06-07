@@ -131,7 +131,59 @@ def _remote_script(target_root: str, name: str) -> str:
     return f"{_remote_scripts_path(target_root)}\\{name}"
 
 
+# ── MCP health detail ───────────────────────────────────────────────────────────
+
+def health_detail(target_name: str) -> dict:
+    """
+    Delegate GUI-readiness check to mcp_manager, which correctly handles
+    the MCP SSE/Session-Id protocol.
+    """
+    try:
+        from agent import mcp_manager
+        return mcp_manager.health_detail(target_name)
+    except Exception as e:
+        return {
+            "ok": False,
+            "ready_level": "unreachable",
+            "error": f"mcp_manager.health_detail failed: {e}",
+        }
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
+
+# Structured error codes used across all stages
+_ERROR_CODES = frozenset({
+    "ssh_auth_failed",
+    "ssh_connection_failed",
+    "python_not_found",
+    "powershell_not_found",
+    "backend_mismatch",
+    "deploy_failed",
+    "deploy_incomplete",
+    "deploy_nested_path_error",
+    "server_start_failed",
+    "server_start_timeout",
+    "server_not_running",
+    "session0_or_desktop_unavailable",
+    "desktop_session_disconnected",
+    "gui_not_ready",
+    "mcp_initialize_failed",
+    "launchagent_registration_failed",
+    "task_registration_failed",
+    "script_upload_failed",
+    "local_script_missing",
+    "unsupported_platform",
+})
+
+
+def _is_gui_error_code(code: str) -> bool:
+    """Return True for codes that indicate a GUI/session problem requiring user action."""
+    return code in {
+        "session0_or_desktop_unavailable",
+        "desktop_session_disconnected",
+        "gui_not_ready",
+    }
+
 
 def list_targets() -> dict:
     """List all configured targets. Returns {"ok": True, "targets": {...}, "default": str}."""
@@ -142,6 +194,58 @@ def list_targets() -> dict:
         default = tc.get_default_target()
         return {"ok": True, "targets": targets, "default": default}
     return _catch(tn, "list_targets", _impl)
+
+
+def probe_target(name: Optional[str] = None) -> dict:
+    """
+    Probe the target for basic capabilities (SSH, Python, platform tools).
+
+    Returns {"ok": True, "target": str, "stage": "probe", "data": {...}}
+    or {"ok": False, "target": str, "stage": "probe", "error": ..., "code": ...}.
+    """
+    def _do() -> dict:
+        tc = TargetConfig()
+        target_name = name or tc.get_default_target()
+        cfg = tc.get_resolved_target(target_name)
+        cfg["_target_name"] = target_name
+
+        lifecycle, err = _dispatch_lifecycle(cfg)
+        if err is not None:
+            return err
+        return lifecycle.probe(cfg)
+
+    try:
+        tc = TargetConfig()
+        tn = name or tc.get_default_target()
+    except Exception:
+        tn = name or "?"
+    return _catch(tn, "probe", _do)
+
+
+def deploy_target(name: Optional[str] = None) -> dict:
+    """
+    Upload the local target/ directory to the remote target_root.
+
+    Returns {"ok": True, "target": str, "stage": "deploy", "data": {...}}
+    or {"ok": False, "target": str, "stage": "deploy", "error": ..., "code": ...}.
+    """
+    def _do() -> dict:
+        tc = TargetConfig()
+        target_name = name or tc.get_default_target()
+        cfg = tc.get_resolved_target(target_name)
+        cfg["_target_name"] = target_name
+
+        lifecycle, err = _dispatch_lifecycle(cfg)
+        if err is not None:
+            return err
+        return lifecycle.deploy(cfg)
+
+    try:
+        tc = TargetConfig()
+        tn = name or tc.get_default_target()
+    except Exception:
+        tn = name or "?"
+    return _catch(tn, "deploy", _do)
 
 
 def get_target(name: Optional[str] = None) -> dict:
@@ -156,12 +260,10 @@ def get_target(name: Optional[str] = None) -> dict:
 
 
 def check_server_health(name: Optional[str] = None) -> dict:
-    """Check whether the MCP server TCP port is reachable.
+    """Check whether the MCP server is reachable and GUI-ready.
 
-    Returns {"ok": True, "target": str, "stage": "health_check", "data": {port_open, ready, ready_level, ...}}.
-
+    Returns {"ok": True, "target": str, "stage": "health_check", "data": {port_open, server_gui_ready, ...}}.
     Note: MCP-level ready (initialize handshake) is delegated to mcp_manager.py.
-    This function only verifies TCP reachability.
     """
     tn = name or "?"
     def _impl() -> dict:
@@ -169,7 +271,6 @@ def check_server_health(name: Optional[str] = None) -> dict:
         target_name = name or tc.get_default_target()
 
         # TCP reachability — does NOT need SSH auth.
-        # cfg_light is already normalized by get_target(), so mcp/ssh/windows exist.
         cfg_light = tc.get_target(target_name)
         mcp_cfg = cfg_light["mcp"]
         ssh_cfg = cfg_light["ssh"]
@@ -186,14 +287,28 @@ def check_server_health(name: Optional[str] = None) -> dict:
             mcp_path = mcp_cfg["path"]
             mcp_url = f"http://127.0.0.1:{check_port}{mcp_path}"
 
-        # TCP port check only — MCP initialize is handled by mcp_manager.py
         port_open = _is_port_listening(check_host, check_port)
+
+        # GUI readiness via mcp_manager (correct SSE/MCP session handling)
+        gui_data = {"server_gui_ready": False, "list_windows_count": 0, "backend": None}
+        if port_open:
+            gui_data = health_detail(target_name)
+            # health_detail returns full details; extract what we need
+            gui_data = {
+                "server_gui_ready": gui_data.get("server_gui_ready", False),
+                "list_windows_count": gui_data.get("list_windows_count", 0),
+                "backend": gui_data.get("backend"),
+                "ready_level": gui_data.get("ready_level", "tcp_only"),
+            }
 
         return _ok(target_name, "health_check", {
             "port_open": port_open,
             "mcp_responding": None,          # delegated to mcp_manager
             "ready": port_open,
-            "ready_level": "tcp_only",       # MCP initialize not in scope for target_manager
+            "ready_level": gui_data.get("ready_level", "tcp_only"),
+            "server_gui_ready": gui_data.get("server_gui_ready", False),
+            "list_windows_count": gui_data.get("list_windows_count", 0),
+            "backend": gui_data.get("backend"),
             "mcp_url": mcp_url,
             "check_host": check_host,
             "check_port": check_port,
@@ -230,22 +345,22 @@ def install_target_task(name: Optional[str] = None) -> dict:
 
 def ensure_server_running(name: Optional[str] = None) -> dict:
     """
-    Ensure the MCP server TCP port is listening on the target.
+    Ensure the MCP server is running and GUI-ready on the target.
 
-    Phase 1 (TCP probe only — no SSH): if port is already open, return early.
-    Phase 2: dispatch to the platform-specific lifecycle backend to start the
-    service if needed. Then wait for the port.
+    Phase 1: TCP probe — if port is already open, do full GUI readiness check
+      and return immediately (no restart).
+    Phase 2: if port closed, dispatch to platform lifecycle to start the server,
+      then wait for the port and check GUI readiness.
 
-    MCP-level ready (initialize handshake) is delegated to mcp_manager.py.
-
-    Returns {"ok": True, "target": str, "stage": "ensure", "data": {...}}.
+    Returns {"ok": True, "target": str, "stage": "ensure", "data": {...}} or
+            {"ok": False, "target": str, "stage": "ensure", "error": ...,
+             "code": ..., "details": {...}}.
     """
     tn = name or "?"
     def _do() -> dict:
         tc = TargetConfig()
         target_name = name or tc.get_default_target()
 
-        # Phase 1: TCP reachability check — does NOT require SSH/auth.
         cfg_light = tc.get_target(target_name)
         mcp_cfg = cfg_light["mcp"]
         ssh_cfg = cfg_light["ssh"]
@@ -256,30 +371,98 @@ def ensure_server_running(name: Optional[str] = None) -> dict:
         else:
             check_host = "127.0.0.1"
         check_port = mcp_cfg["port"]
+        mcp_path = mcp_cfg["path"]
 
         port_open = _is_port_listening(check_host, check_port)
+
         if port_open:
-            return _ok(tn, "ensure", {
+            # Phase 1: server already running — still need GUI readiness check
+            gui_data = health_detail(target_name)
+            result = _ok(tn, "ensure", {
                 "status": "already_running",
                 "port": check_port,
-                "ready_level": "tcp_only",
-                "note": "MCP initialize handled by mcp_manager",
                 "mcp_url": tc.build_mcp_url(target_name),
+                "ready_level": gui_data.get("ready_level", "tcp_only"),
+                "server_gui_ready": gui_data.get("server_gui_ready", False),
+                "list_windows_count": gui_data.get("list_windows_count", 0),
+                "backend": gui_data.get("backend"),
             })
+            # If GUI is not ready, tell the user what to do
+            if not gui_data.get("server_gui_ready"):
+                result["next_action"] = _gui_recovery_action(gui_data)
+            return result
 
-        # Phase 2: dispatch to platform lifecycle
+        # Phase 2: port closed — start via lifecycle
         cfg = tc.get_resolved_target(target_name)
         cfg["_target_name"] = target_name
         lifecycle, err = _dispatch_lifecycle(cfg)
         if err is not None:
             return err
         result = lifecycle.ensure_server_running(cfg)
-        # Decorate with mcp_url for callers
-        if result.get("ok") and "mcp_url" not in (result.get("data") or {}):
+
+        if result.get("ok"):
+            # Lifecycle succeeded — do a GUI readiness check
+            time.sleep(2)
+            gui_data = health_detail(target_name)
             result.setdefault("data", {})["mcp_url"] = _build_mcp_url(cfg)
+            for key in ("ready_level", "server_gui_ready", "list_windows_count", "backend"):
+                if key in gui_data and key not in result["data"]:
+                    result["data"][key] = gui_data[key]
+            if not gui_data.get("server_gui_ready"):
+                result["next_action"] = _gui_recovery_action(gui_data)
+        else:
+            # Lifecycle error — add next_action hint for GUI-related codes
+            code = result.get("code", "")
+            if _is_gui_error_code(code):
+                result["next_action"] = _gui_recovery_action(result.get("details", {}))
+            elif code == "server_start_timeout":
+                result["next_action"] = (
+                    "Server failed to start within the timeout. "
+                    "Check the server log on the target for errors. "
+                    "Then rerun ensure_server_running."
+                )
+
         return result
 
     return _catch(tn, "ensure", _do)
+
+
+def _gui_recovery_action(details: dict) -> str:
+    """Return a human-readable next_action string for GUI-related errors."""
+    code = details.get("code", "")
+    session_id = details.get("server_session_id") or details.get("session_id")
+    session_state = details.get("session_state", "")
+    window_count = details.get("list_windows_count", 0)
+
+    if code == "desktop_session_disconnected":
+        return (
+            f"RDP session {session_id} is disconnected. "
+            f"Reconnect via RDP or Parallels Console to unlock the desktop session, "
+            f"then rerun ensure_server_running."
+        )
+    if code == "session0_or_desktop_unavailable":
+        return (
+            f"Server is in Session {session_id} (Session 0). "
+            f"Configure auto-login or use Task Scheduler with LogonType=Interactive "
+            f"to run in an active desktop session, then rerun ensure_server_running."
+        )
+    if window_count == 0 and session_state == "active":
+        return (
+            "Server session is active but no windows are visible. "
+            "Ensure EDR/HISEC application is running and has visible windows, "
+            "then rerun ensure_server_running."
+        )
+    if window_count == 0:
+        return (
+            "GUI automation is unavailable (no visible windows detected). "
+            "Verify the desktop session is active and the EDR application is running, "
+            "then rerun ensure_server_running."
+        )
+    return (
+        "GUI automation prerequisites not met. "
+        "Check server logs and verify the desktop session is accessible, "
+        "then rerun ensure_server_running."
+    )
 
 
 def stop_server(name: Optional[str] = None) -> dict:
