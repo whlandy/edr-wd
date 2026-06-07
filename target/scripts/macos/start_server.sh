@@ -64,15 +64,28 @@ fi
 # Idempotency check: who's listening on the port?
 matches_our_server() {
   # Args: <pid> <target_dir> — return 0 only if the process is the
-  # managed server for THIS target root. Requires BOTH server.py AND
-  # the target root path to be present in the command line.
+  # managed server for THIS target root. Requires BOTH:
+  #   1. command line mentions server.py
+  #   2. PID's cwd equals target_dir
+  # Using cwd is more reliable than scanning the command line for the
+  # target path, because a server started with "cd <root>; python server.py"
+  # shows no root path in ps output.
   local pid="$1"
   local target_dir="$2"
-  local cmd
+  local cmd cwd norm_cmd norm_cwd norm_root
   cmd="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
-  local norm_cmd="${cmd//\\//}"
-  local norm_root="${target_dir//\\//}"
-  [[ "${norm_cmd}" == *"server.py"* && "${norm_cmd}" == *"${norm_root}"* ]]
+  norm_cmd="${cmd//\\//}"
+  if [[ "${norm_cmd}" != *"server.py"* ]]; then
+    return 1
+  fi
+  # Get cwd via lsof
+  cwd="$(lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n1 || true)"
+  norm_cwd="${cwd//\\//}"
+  norm_root="${target_dir//\\//}"
+  # Normalize trailing slashes for comparison
+  norm_cwd="${norm_cwd%/}"
+  norm_root="${norm_root%/}"
+  [[ "${norm_cwd}" == "${norm_root}" ]]
 }
 
 if ! command -v lsof >/dev/null 2>&1; then

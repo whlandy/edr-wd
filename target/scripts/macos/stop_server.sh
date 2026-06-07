@@ -43,18 +43,27 @@ fi
 
 looks_like_our_server() {
   # Args: <pid> <target_dir> — return 0 only if the process is the
-  # managed server for THIS target root. Requires BOTH server.py AND
-  # the target root path in the command line.  The --http check is
-  # deliberately omitted here so that this also catches processes that
-  # are running but were started outside of the current launchd cycle
-  # (e.g. via SSH/nohup); stop_server needs to be able to clean those up.
+  # managed server for THIS target root. Requires BOTH:
+  #   1. command line mentions server.py
+  #   2. PID's cwd equals target_dir
+  # Using cwd avoids false matches when two different target roots each
+  # have a server.py process; we only kill the one that owns the port
+  # AND is running from our target directory.
   local pid="$1"
   local target_dir="$2"
-  local cmd
+  local cmd cwd norm_cmd norm_cwd norm_root
   cmd="$(ps -p "${pid}" -o command= 2>/dev/null || true)"
-  local norm_cmd="${cmd//\\//}"
-  local norm_root="${target_dir//\\//}"
-  [[ "${norm_cmd}" == *"server.py"* && "${norm_cmd}" == *"${norm_root}"* ]]
+  norm_cmd="${cmd//\\//}"
+  if [[ "${norm_cmd}" != *"server.py"* ]]; then
+    return 1
+  fi
+  # Get cwd via lsof
+  cwd="$(lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n1 || true)"
+  norm_cwd="${cwd//\\//}"
+  norm_root="${target_dir//\\//}"
+  norm_cwd="${norm_cwd%/}"
+  norm_root="${norm_root%/}"
+  [[ "${norm_cwd}" == "${norm_root}" ]]
 }
 
 stop_pid() {

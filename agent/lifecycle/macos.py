@@ -184,17 +184,17 @@ class MacOSLifecycle:
                     "error": (
                         f"Port {check_port} is occupied by an unmanaged process "
                         f"(pid={listener_info['listener_pid']}). "
-                        f"This is not the current LaunchAgent-managed server. "
-                        f"Expected target root: {target_root}"
+                        f"The process is not the current LaunchAgent-managed server "
+                        f"for this target."
                     ),
                     "details": {
                         "port": check_port,
                         "listener_pid": listener_info["listener_pid"],
-                        "listener_cmdline": listener_info["listener_cmdline"],
-                        "expected_root": target_root,
+                        "contains_server_py": listener_info["contains_server_py"],
+                        "cwd_matches_target_root": listener_info["listener_cwd_matches"],
                         "next_action": (
                             "stop_server() then ensure_server_running() again, "
-                            "or manually kill the stale process."
+                            "or manually stop the stale process."
                         ),
                     },
                 }
@@ -206,6 +206,7 @@ class MacOSLifecycle:
                     "status": "already_running",
                     "port": check_port,
                     "listener_pid": listener_info["listener_pid"],
+                    "cwd_matches_target_root": listener_info["listener_cwd_matches"],
                     **gui_check,
                 },
             }
@@ -269,49 +270,63 @@ class MacOSLifecycle:
     ) -> dict:
         """
         Inspect the process listening on (host, port) via SSH + lsof + ps.
+
         Returns a dict with:
-          managed   — True only if the listener's command line contains
-                      BOTH server.py AND the target_root path (i.e. it is
-                      the current LaunchAgent-managed server for this target).
-          listener_pid     — PID of the listening process, or None
-          listener_cmdline — full command line of that PID, or None
+          managed              — True only if the listener's cwd equals the
+                                 target_root AND its command line contains
+                                 server.py.  Using cwd is more reliable than
+                                 scanning the command line for the target path,
+                                 because a server started with `cd <root>;
+                                 python3 server.py` shows no root path in ps.
+          listener_pid         — PID of the listening process, or None
+          listener_cwd_matches — whether the PID's cwd equals target_root
+          contains_server_py  — whether the command line mentions server.py
+
+        No real paths or command-line content are returned to callers; the
+        caller receives only structured booleans so that error messages can be
+        composed without leaking local paths.
         """
-        # Get PID first
+        # Get PID
         pid_cmd = (
             f"lsof -iTCP:{port} -sTCP:LISTEN -n -P 2>/dev/null "
             f"| head -1 | awk '{{print $2}}' 2>/dev/null || echo ''"
         )
-        rc_pid, pid_out = run_ssh(ssh_cfg, pid_cmd, timeout=10)
+        _, pid_out = run_ssh(ssh_cfg, pid_cmd, timeout=10)
         listener_pid = pid_out.strip() or None
 
         if not listener_pid:
             return {
                 "managed": False,
                 "listener_pid": None,
-                "listener_cmdline": None,
+                "listener_cwd_matches": False,
+                "contains_server_py": False,
             }
 
-        # Get command line for that PID
+        # Get command line
         cmd_cmd = f"ps -p {listener_pid} -o command= 2>/dev/null || echo ''"
-        run_ssh(ssh_cfg, cmd_cmd, timeout=10)
-        # ps output goes to stdout via run_ssh
-        rc_cmd, cmdline = run_ssh(ssh_cfg, cmd_cmd, timeout=10)
+        _, cmdline = run_ssh(ssh_cfg, cmd_cmd, timeout=10)
         cmdline = cmdline.strip()
+        contains_server_py = "server.py" in cmdline
 
-        if not cmdline:
-            return {
-                "managed": False,
-                "listener_pid": listener_pid,
-                "listener_cmdline": None,
-            }
+        # Get cwd via lsof
+        cwd_cmd = (
+            f"lsof -a -p {listener_pid} -d cwd -Fn 2>/dev/null "
+            f"| sed -n 's/^n//p' | head -n1 || echo ''"
+        )
+        _, cwd_out = run_ssh(ssh_cfg, cwd_cmd, timeout=10)
+        cwd_raw = cwd_out.strip().replace("\\", "/")
+        norm_target = target_root.replace("\\", "/").rstrip("/")
+        norm_cwd = cwd_raw.rstrip("/")
+        listener_cwd_matches = (
+            norm_cwd == norm_target if cwd_raw else False
+        )
 
-        norm_root = target_root.replace("\\", "/")
-        norm_cmdline = cmdline.replace("\\", "/")
-        managed = "server.py" in cmdline and norm_root in norm_cmdline
+        managed = contains_server_py and listener_cwd_matches
         return {
             "managed": managed,
             "listener_pid": listener_pid,
-            "listener_cmdline": cmdline,
+            "listener_cwd_matches": listener_cwd_matches,
+            "contains_server_py": contains_server_py,
         }
 
     def _check_gui_readiness(self, cfg: dict) -> dict:
