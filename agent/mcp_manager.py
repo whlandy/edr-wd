@@ -318,3 +318,83 @@ def _validate_name_or_raise(name: str, tc_or_targets: Optional[TargetConfig | di
         return
     if not tc.has_target(name):
         raise ValueError(f"Unknown target: {name}. Available: {list(tc.list_targets().keys())}")
+
+
+# ── GUI readiness check ─────────────────────────────────────────────────────────
+
+def health_detail(target_name: Optional[str] = None) -> dict:
+    """
+    Perform a full MCP health check: initialize + status + list_windows.
+
+    This is the single entry point for GUI-readiness detection. It uses the
+    existing MCP session management (SSE, Mcp-Session-Id) via initialize()
+    and call_mcp_tool(), so SSE/MCP protocol is handled correctly.
+
+    Returns:
+        {"ok": True,  "ready_level": "gui_ready",  "backend": "...", "list_windows_count": N}
+        {"ok": True,  "ready_level": "tcp_only",    "backend": None, "list_windows_count": 0}
+        {"ok": False, "ready_level": "unreachable", "error": "..."}
+    """
+    tc = TargetConfig()
+    name = target_name or _get_default_target_name(tc)
+    _validate_name_or_raise(name, tc)
+
+    mcp_url = tc.build_mcp_url(name)
+
+    # Step 1: initialize MCP session
+    init_result = initialize(name)
+    if not init_result.get("ok"):
+        return {
+            "ok": False,
+            "ready_level": "unreachable",
+            "error": init_result.get("error", "initialize failed"),
+            "mcp_url": mcp_url,
+        }
+
+    session_id = init_result["data"]["session_id"]
+    mcp_url = init_result["data"]["mcp_url"]
+
+    def _extract_text_from_result(result: dict) -> Optional[str]:
+        """Navigate FastMCP envelope: data.result.content[0].text."""
+        d = result.get("data", {})
+        result_obj = d.get("result", d)  # fall back if no "result" key
+        for block in result_obj.get("content", []):
+            if block.get("type") == "text":
+                return block["text"]
+        return None
+
+    # Step 2: call status tool → extract backend
+    backend = None
+    status_result = call_mcp_tool(session_id, mcp_url, "status", {})
+    if status_result.get("ok"):
+        text = _extract_text_from_result(status_result)
+        if text:
+            try:
+                data = json.loads(text)
+                backend = data.get("backend")
+            except json.JSONDecodeError:
+                pass
+
+    # Step 3: call list_windows tool → count windows
+    window_count = 0
+    lw_result = call_mcp_tool(session_id, mcp_url, "list_windows", {})
+    if lw_result.get("ok"):
+        text = _extract_text_from_result(lw_result)
+        if text:
+            try:
+                data = json.loads(text)
+                window_count = len(data.get("windows", []))
+            except json.JSONDecodeError:
+                pass
+
+    gui_ready = window_count > 0
+    ready_level = "gui_ready" if gui_ready else "tcp_only"
+
+    return {
+        "ok": True,
+        "ready_level": ready_level,
+        "server_gui_ready": gui_ready,
+        "gui_ready": gui_ready,  # DEPRECATED alias
+        "backend": backend,
+        "list_windows_count": window_count,
+    }
