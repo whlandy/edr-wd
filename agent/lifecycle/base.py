@@ -68,3 +68,23 @@ class LifecycleBackend(Protocol):
         Optional: implementations may return {"ok": False, "error": "not supported"}.
         """
         ...
+
+    def probe(self, cfg: dict) -> dict:
+        """
+        Probe the target for basic capabilities (SSH, Python, platform tools).
+
+        Returns {"ok": True, "stage": "probe", "data": {"ssh": ..., "python": ..., ...}}.
+        Returns {"ok": False, "stage": "probe", "error": ..., "code": ...} on failure.
+        Never raises — always returns a structured result.
+        """
+        ...
+
+    def deploy(self, cfg: dict) -> dict:
+        """
+        Upload the local target/ directory to the remote target_root.
+
+        Returns {"ok": True, "stage": "deploy", "data": {...}}.
+        Returns {"ok": False, "stage": "deploy", "error": ..., "code": ...} on failure.
+        Never raises — always returns a structured result.
+        """
+        ...
