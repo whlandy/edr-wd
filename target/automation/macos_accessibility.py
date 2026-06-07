@@ -336,7 +336,7 @@ class MacOSAccessibilityBackend:
                 'use framework "AppKit"\n'
                 'use framework "CoreGraphics"\n'
                 'set info to CFArrayCreateMutable(0, 0, 0)\n'
-                'set wList to CGWindowListCopyWindowInfo(CGWindowListOption(kCGWindowListOptionOnScreenOnly + kCGWindowListExcludeDesktopElements), 0)\n'
+                'set wList to CGWindowListCopyWindowInfo(3, 0)\n'
                 'set matched to ""\n'
                 'repeat with w in wList\n'
                 '    set owner to "" & (kCGWindowOwnerName of w as string)\n'
@@ -798,3 +798,111 @@ class MacOSAccessibilityBackend:
             return int(out) if out else None
         except ValueError:
             return None
+
+
+def diagnose_windows() -> dict:
+    """
+    Probe all windows on the Mac desktop using BOTH CGWindowList and osascript,
+    then cross-reference to identify discrepancies.
+    Used for debugging window detection mismatches.
+    """
+    results = {}
+
+    # ── Method 1: CGWindowList (used by list_windows) ─────────────────────────
+    import subprocess as _subprocess, json as _json
+    cg_script = (
+        'use framework "CoreGraphics"\n'
+        'use framework "AppKit"\n'
+        'set wList to CGWindowListCopyWindowInfo(3, 0)\n'
+        'set out to ""\n'
+        'repeat with w in wList\n'
+        '    set owner to "" & (kCGWindowOwnerName of w as string)\n'
+        '    set wName to "" & (kCGWindowName of w as string)\n'
+        '    set wPID to kCGWindowOwnerPID of w\n'
+        '    set layer to 0\n'
+        '    try\n'
+        '        set layer to kCGWindowLayer of w\n'
+        '    end try\n'
+        '    if wName is not "" then\n'
+        '        set out to out & owner & "|" & wName & "|" & (wPID as string) & "|" & (layer as string) & "\n"\n'
+        '    end if\n'
+        'end repeat\n'
+        'return out\n'
+    )
+    rc1, out1 = _run(["osascript", "-e", cg_script], timeout=10)
+    cg_windows = []
+    if rc1 == 0:
+        for line in out1.strip().split("\n"):
+            if line.strip():
+                parts = line.split("|")
+                if len(parts) >= 4:
+                    cg_windows.append({
+                        "owner": parts[0],
+                        "title": parts[1],
+                        "pid": int(parts[2]) if parts[2].isdigit() else 0,
+                        "layer": int(parts[3]) if parts[3].isdigit() else 0,
+                    })
+    results["cgwindowlist"] = cg_windows
+    results["cgwindowlist_count"] = len(cg_windows)
+    results["cgwindowlist_error"] = None if rc1 == 0 else f"rc={rc1}"
+
+    # ── Method 2: osascript System Events (used by _hisec_window_visible) ─────
+    osa_script = (
+        'tell application "System Events"\n'
+        '  set out to ""\n'
+        '  repeat with p in (every process)\n'
+        '    set pName to name of p\n'
+        '    try\n'
+        '      repeat with w in (every window of p)\n'
+        '        set wName to name of w\n'
+        '        set out to out & pName & "|" & wName & "\n"\n'
+        '      end repeat\n'
+        '    end try\n'
+        '  end repeat\n'
+        'end tell\n'
+        'return out\n'
+    )
+    rc2, out2 = _run_osascript(osa_script, timeout=10)
+    osa_windows = []
+    if rc2 == 0:
+        for line in out2.strip().split("\n"):
+            if "|" in line:
+                parts = line.split("|", 1)
+                osa_windows.append({"owner": parts[0], "title": parts[1]})
+    results["osascript"] = osa_windows
+    results["osascript_count"] = len(osa_windows)
+    results["osascript_error"] = None if rc2 == 0 else f"rc={rc2}"
+
+    # ── Cross-reference for HiSec-related windows ─────────────────────────────
+    hisec_keywords = ["hisecond", "haisec", "华为", "endpoint", "baseline"]
+    results["hisec_analysis"] = []
+    cg_owners = {w["owner"] for w in cg_windows}
+    for w in osa_windows:
+        owner = w["owner"].lower()
+        title = w["title"].lower()
+        matched_kw = [k for k in hisec_keywords if k in owner or k in title]
+        if matched_kw:
+            in_cg = w["owner"] in cg_owners
+            results["hisec_analysis"].append({
+                "owner": w["owner"],
+                "title": w["title"],
+                "matched_keywords": matched_kw,
+                "seen_by_cgwindowlist": in_cg,
+                "seen_by_osascript": True,
+            })
+    for w in cg_windows:
+        owner = w["owner"].lower()
+        title = w["title"].lower()
+        matched_kw = [k for k in hisec_keywords if k in owner or k in title]
+        if matched_kw and not any(a["owner"] == w["owner"] for a in results["hisec_analysis"]):
+            results["hisec_analysis"].append({
+                "owner": w["owner"],
+                "title": w["title"],
+                "pid": w.get("pid"),
+                "layer": w.get("layer"),
+                "matched_keywords": matched_kw,
+                "seen_by_cgwindowlist": True,
+                "seen_by_osascript": False,
+            })
+
+    return results

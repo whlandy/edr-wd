@@ -1,6 +1,6 @@
 """
-server.py — fastmcp HTTP Server for Windows EDR GUI Automation
-===============================================================
+server.py — fastmcp HTTP Server for cross-platform EDR GUI Automation
+======================================================================
 
 Usage:
     # Local stdio
@@ -53,10 +53,20 @@ logger = logging.getLogger("edr-wd")
 try:
     _backend: AutomationBackend = create_backend()
     _backend_error: str | None = None
+    _backend_kind = os.environ.get("EDR_WD_AUTOMATION_BACKEND") or (
+        "macos_accessibility" if sys.platform == "darwin" else "windows_pywinauto"
+    )
 except Exception as _e:  # pragma: no cover — defensive startup guard
     logger.error("Failed to construct automation backend: %s", _e)
     _backend = None  # type: ignore[assignment]
     _backend_error = str(_e)
+    _backend_kind = "unknown"
+
+
+# Server bind metadata. Updated by main() so status() can report the actual
+# runtime port instead of assuming the default 8765.
+_server_host = "127.0.0.1"
+_server_port = 8765
 
 
 def _backend_unavailable(tool_name: str) -> str:
@@ -462,11 +472,11 @@ import socket
 
 
 def _get_server_pid() -> int | None:
-    """Return the PID of the process listening on port 8765, or None."""
+    """Return the PID of the process listening on the configured port, or None."""
     try:
         import psutil
         for conn in psutil.net_connections(kind="inet"):
-            if conn.laddr.port == 8765 and conn.status == "LISTEN":
+            if conn.laddr.port == _server_port and conn.status == "LISTEN":
                 return conn.pid
     except Exception:
         pass
@@ -497,9 +507,9 @@ def status() -> str:
     if pid is None:
         warnings.append("server_pid unavailable on this platform / session")
 
-    port_open = _check_port(8765)
+    port_open = _check_port(_server_port)
     if not port_open:
-        warnings.append("port 8765 not reachable")
+        warnings.append(f"port {_server_port} not reachable")
 
     backend_name = "unknown"
     backend_ok = _backend is not None
@@ -513,8 +523,10 @@ def status() -> str:
     # do NOT gate on pid detection (platform/session-dependent)
     result: dict[str, object] = {
         "ok": backend_ok and port_open,
-        "port": 8765,
+        "host": _server_host,
+        "port": _server_port,
         "backend": backend_name,
+        "backend_kind": _backend_kind,
         "backend_loaded": backend_ok,
         "backend_error": _backend_error,
         "platform": sys.platform,
@@ -530,33 +542,81 @@ def status() -> str:
         "interactive_session": os.environ.get("SESSIONNAME", ""),
     }
 
-    # Probe HiSecEndpoint process and window presence (macOS-specific)
-    if _backend is not None and hasattr(_backend, "activate_edr"):
-        try:
-            # Use the backend's own detection helpers if available
-            proc_found = getattr(_backend, "_proc_exists", None)
-            if proc_found:
-                result["hisec_agent_process_found"] = proc_found("HiSecEndpointAgent")
-                result["edr_client_process_found"] = proc_found("EDRClient")
-            # Check windows via osascript
-            import subprocess
-            def _check_window(script: str) -> bool:
+    # Probe HiSecEndpoint process and window presence only on macOS.
+    # Windows backends already have their own activation/status flow and
+    # should not run the AppleScript/CGWindowList diagnostics here.
+    if backend_name == "macos_accessibility" and _backend is not None and hasattr(_backend, "activate_edr"):
+        proc_found = getattr(_backend, "_proc_exists", None)
+        if proc_found:
+            result["hisec_agent_process_found"] = proc_found("HiSecEndpointAgent")
+            result["edr_client_process_found"] = proc_found("EDRClient")
+
+        # Check windows with structured return (owner + pid + titles), not just bool
+        import subprocess
+
+        def _check_window_structured(proc_name: str) -> dict:
+            """
+            Returns {"found": bool, "owner": str, "pid": int|None, "titles": [str]}.
+            Never raises — always returns a structured dict.
+            """
+            script = (
+                f'tell application "System Events"\n'
+                f'  set winList to every window of process "{proc_name}"\n'
+                f'  set out to ""\n'
+                f'  repeat with w in winList\n'
+                f'    set out to out & (name of w) & "|"\n'
+                f'  end repeat\n'
+                f'  return out\n'
+                f'end tell'
+            )
+            try:
                 cp = subprocess.run(
                     ["osascript", "-e", script],
                     capture_output=True, text=True, timeout=5,
                 )
-                return cp.returncode == 0 and "华为" in (cp.stdout or "")
+                titles = []
+                if cp.returncode == 0 and cp.stdout:
+                    titles = [t for t in cp.stdout.strip().split("|") if t]
+                # Also get PID for the process
+                pid_script = f'tell application "System Events" to unix id of process "{proc_name}"'
+                pid_cp = subprocess.run(
+                    ["osascript", "-e", pid_script],
+                    capture_output=True, text=True, timeout=3,
+                )
+                pid = None
+                if pid_cp.returncode == 0:
+                    try:
+                        pid = int(pid_cp.stdout.strip())
+                    except ValueError:
+                        pass
+                found = bool(titles)
+                return {
+                    "found": found,
+                    "owner": proc_name,
+                    "pid": pid,
+                    "titles": titles,
+                    "has_chinese": any("\u4e00" <= c <= "\u9fff" for t in titles for c in t),
+                }
+            except Exception as e:
+                return {
+                    "found": False,
+                    "owner": proc_name,
+                    "pid": None,
+                    "titles": [],
+                    "error": str(e),
+                }
 
-            hisec_main_check = (
-                'tell application "System Events" to get name of every window of process "HiSecEndpointAgent"'
-            )
-            edr_client_check = (
-                'tell application "System Events" to get name of every window of process "EDRClient"'
-            )
-            result["hisec_main_window_found"] = _check_window(hisec_main_check)
-            result["edr_client_window_found"] = _check_window(edr_client_check)
-        except Exception:
-            pass
+        hisec_struct = _check_window_structured("HiSecEndpointAgent")
+        edr_struct = _check_window_structured("EDRClient")
+
+        result["hisec_main_window_found"] = hisec_struct["found"]
+        result["hisec_main_window_detected_by"] = hisec_struct.get("owner")
+        result["hisec_main_window_pid"] = hisec_struct.get("pid")
+        result["hisec_main_window_titles"] = hisec_struct.get("titles", [])
+        result["edr_client_window_found"] = edr_struct["found"]
+        result["edr_client_window_detected_by"] = edr_struct.get("owner")
+        result["edr_client_window_pid"] = edr_struct.get("pid")
+        result["edr_client_window_titles"] = edr_struct.get("titles", [])
 
     return json.dumps(result, ensure_ascii=False)
 
@@ -736,16 +796,45 @@ def cancel_job(job_id: str) -> str:
     return json.dumps({"ok": True}, ensure_ascii=False)
 
 
+@mcp.tool(
+    name="diagnose_windows",
+    description=(
+        "macOS-only debug tool: probe windows using both CGWindowList and "
+        "System Events, then cross-reference. Useful for diagnosing why "
+        "list_windows and activate_edr report different results for the same "
+        "window."
+    ),
+)
+def diagnose_windows() -> str:
+    if _backend is None:
+        return _backend_unavailable("diagnose_windows")
+
+    backend_name = getattr(_backend, "backend", "unknown")
+    if backend_name != "macos_accessibility":
+        return json.dumps({
+            "ok": False,
+            "error": "diagnose_windows is only supported by the macos_accessibility backend",
+            "backend": backend_name,
+        }, ensure_ascii=False)
+
+    from automation.macos_accessibility import diagnose_windows as _diag
+    result = _diag()
+    return json.dumps(result, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
+    global _server_host, _server_port
     parser = argparse.ArgumentParser(description="EDR-WD MCP Server")
     parser.add_argument("--http", action="store_true", help="Run in HTTP mode")
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765, help="HTTP port (default: 8765)")
     args = parser.parse_args()
+    _server_host = args.host
+    _server_port = args.port
 
     if args.http:
         logger.info(f"Starting HTTP server on {args.host}:{args.port}")

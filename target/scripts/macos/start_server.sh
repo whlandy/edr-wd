@@ -110,6 +110,6 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start_server.sh: launching ${PYTHON} server
 # exec so launchd sees python as the child. launchd tracks the
 # immediate child's lifetime for KeepAlive purposes.
 exec env \
-  EDR_WD_AUTOMATION_BACKEND="${AUTOMATION_BACKEND}" \
+  EDR_WD_ENABLE_POWERSHELL=1 EDR_WD_AUTOMATION_BACKEND="${AUTOMATION_BACKEND}" \
   "${PYTHON}" server.py --http --host "${HOST}" --port "${PORT}" \
   >> "${LOG_DIR}/server.log" 2>&1

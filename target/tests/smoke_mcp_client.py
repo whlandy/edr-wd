@@ -125,7 +125,11 @@ def parse_tool_json(result):
 def main():
     parser = argparse.ArgumentParser(description="Smoke test the EDR-WD MCP server")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    parser.add_argument("--gui", action="store_true", help="Also test GUI connect/dump_tree flow")
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Also test a GUI flow. Windows uses HiSec connect/dump_tree; macOS uses Finder window plumbing.",
+    )
     parser.add_argument("--timeout", type=int, default=30)
     args = parser.parse_args()
 
@@ -137,7 +141,7 @@ def main():
         session_id,
         "initialize",
         {
-            "protocolVersion": "2025-11-25",
+            "protocolVersion": "2025-03-26",
             "capabilities": {},
             "clientInfo": {"name": "edr-wd-smoke-test", "version": "1.0"},
         },
@@ -145,84 +149,130 @@ def main():
     )
     print(f"[ok] initialize status={list(init_result.keys())}")
 
-    tool_list = rpc(args.base_url, session_id, "tools/list", {}, 2)
+    status_result = call_tool(args.base_url, session_id, "status", {}, 2)
+    status_json = parse_tool_json(status_result)
+    backend_name = status_json.get("backend", "unknown")
+    backend_kind = status_json.get("backend_kind", backend_name)
+    print(f"[ok] status backend={backend_name!r} kind={backend_kind!r}")
+
+    tool_list = rpc(args.base_url, session_id, "tools/list", {}, 3)
     tool_names = [tool["name"] for tool in tool_list.get("result", {}).get("tools", [])]
-    expected = {"connect", "run_powershell", "start_powershell", "get_job", "cancel_job", "activate_edr"}
-    if args.gui:
-        expected.add("dump_tree")
+    expected = {"connect", "status", "activate_app", "list_windows", "is_window_open", "wait_window", "screenshot"}
+    if backend_kind == "windows_pywinauto":
+        expected.update({"run_powershell", "start_powershell", "get_job", "cancel_job", "activate_edr"})
+        if args.gui:
+            expected.add("dump_tree")
+    elif backend_kind == "macos_accessibility":
+        # PowerShell helpers are registered but may be disabled; we do not
+        # require them for the macOS smoke path.
+        pass
     missing = sorted(expected - set(tool_names))
     if missing:
         raise RuntimeError(f"Missing tools: {', '.join(missing)}")
     print(f"[ok] tools={', '.join(sorted(expected))}")
 
-    sync_result = call_tool(
-        args.base_url,
-        session_id,
-        "run_powershell",
-        {"command": "Write-Output smoke-sync", "timeout": 10},
-        3,
-    )
-    sync_json = parse_tool_json(sync_result)
-    if not sync_json.get("ok"):
-        raise RuntimeError(f"run_powershell failed: {sync_json}")
-    print(f"[ok] run_powershell stdout={sync_json.get('stdout', '').strip()!r}")
-
-    job_result = call_tool(
-        args.base_url,
-        session_id,
-        "start_powershell",
-        {"command": 'Start-Sleep -Seconds 1; Write-Output "smoke-async"', "timeout": 10},
-        4,
-    )
-    job_json = parse_tool_json(job_result)
-    job_id = job_json.get("job_id")
-    if not job_id:
-        raise RuntimeError(f"start_powershell did not return job_id: {job_json}")
-
-    deadline = time.time() + args.timeout
-    while time.time() < deadline:
-        poll_result = call_tool(
+    if backend_kind == "windows_pywinauto":
+        sync_result = call_tool(
             args.base_url,
             session_id,
-            "get_job",
-            {"job_id": job_id},
+            "run_powershell",
+            {"command": "Write-Output smoke-sync", "timeout": 10},
+            4,
+        )
+        sync_json = parse_tool_json(sync_result)
+        if not sync_json.get("ok"):
+            raise RuntimeError(f"run_powershell failed: {sync_json}")
+        print(f"[ok] run_powershell stdout={sync_json.get('stdout', '').strip()!r}")
+
+        job_result = call_tool(
+            args.base_url,
+            session_id,
+            "start_powershell",
+            {"command": 'Start-Sleep -Seconds 1; Write-Output "smoke-async"', "timeout": 10},
             5,
         )
-        poll_json = parse_tool_json(poll_result)
-        if poll_json.get("status") == "done":
-            if not poll_json.get("ok"):
-                raise RuntimeError(f"Async job failed: {poll_json}")
-            print(f"[ok] async job stdout={poll_json.get('stdout', '').strip()!r}")
-            break
-        time.sleep(0.5)
-    else:
-        raise RuntimeError("Timed out waiting for async job to finish")
+        job_json = parse_tool_json(job_result)
+        job_id = job_json.get("job_id")
+        if not job_id:
+            raise RuntimeError(f"start_powershell did not return job_id: {job_json}")
+
+        deadline = time.time() + args.timeout
+        while time.time() < deadline:
+            poll_result = call_tool(
+                args.base_url,
+                session_id,
+                "get_job",
+                {"job_id": job_id},
+                6,
+            )
+            poll_json = parse_tool_json(poll_result)
+            if poll_json.get("status") == "done":
+                if not poll_json.get("ok"):
+                    raise RuntimeError(f"Async job failed: {poll_json}")
+                print(f"[ok] async job stdout={poll_json.get('stdout', '').strip()!r}")
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError("Timed out waiting for async job to finish")
 
     if args.gui:
-        connect_result = call_tool(
-            args.base_url,
-            session_id,
-            "connect",
-            {"title_re": ".*HiSec.*", "timeout": 5, "auto_activate": True},
-            6,
-        )
-        connect_json = parse_tool_json(connect_result)
-        print(f"[info] connect result={connect_json}")
-        if not connect_json.get("ok"):
-            raise RuntimeError(f"GUI connect failed: {connect_json}")
+        if backend_kind == "windows_pywinauto":
+            connect_result = call_tool(
+                args.base_url,
+                session_id,
+                "connect",
+                {"title_re": ".*HiSec.*", "timeout": 5, "auto_activate": True},
+                7,
+            )
+            connect_json = parse_tool_json(connect_result)
+            print(f"[info] connect result={connect_json}")
+            if not connect_json.get("ok"):
+                raise RuntimeError(f"GUI connect failed: {connect_json}")
 
-        dump_result = call_tool(
-            args.base_url,
-            session_id,
-            "dump_tree",
-            {"max_depth": 3},
-            7,
-        )
-        dump_json = parse_tool_json(dump_result)
-        controls = dump_json.get("controls", [])
-        if not isinstance(controls, list):
-            raise RuntimeError(f"dump_tree returned unexpected payload: {dump_json}")
-        print(f"[ok] dump_tree controls={len(controls)}")
+            dump_result = call_tool(
+                args.base_url,
+                session_id,
+                "dump_tree",
+                {"max_depth": 3},
+                8,
+            )
+            dump_json = parse_tool_json(dump_result)
+            controls = dump_json.get("controls", [])
+            if not isinstance(controls, list):
+                raise RuntimeError(f"dump_tree returned unexpected payload: {dump_json}")
+            print(f"[ok] dump_tree controls={len(controls)}")
+        elif backend_kind == "macos_accessibility":
+            list_result = call_tool(args.base_url, session_id, "list_windows", {}, 6)
+            list_json = parse_tool_json(list_result)
+            if not list_json.get("ok"):
+                raise RuntimeError(f"list_windows failed: {list_json}")
+            print(f"[ok] list_windows count={list_json.get('count', 0)}")
+
+            connect_result = call_tool(
+                args.base_url,
+                session_id,
+                "connect",
+                {"process_name": "Finder", "timeout": 5, "auto_activate": True},
+                8,
+            )
+            connect_json = parse_tool_json(connect_result)
+            print(f"[info] connect result={connect_json}")
+            if not connect_json.get("ok"):
+                raise RuntimeError(f"GUI connect failed: {connect_json}")
+
+            activate_result = call_tool(
+                args.base_url,
+                session_id,
+                "activate_app",
+                {"app_name": "Finder"},
+                9,
+            )
+            activate_json = parse_tool_json(activate_result)
+            if not activate_json.get("ok"):
+                raise RuntimeError(f"activate_app failed: {activate_json}")
+            print("[ok] activate_app Finder")
+        else:
+            print(f"[warn] GUI smoke skipped for unsupported backend {backend_kind!r}")
 
     print("[ok] smoke test finished")
     return 0
