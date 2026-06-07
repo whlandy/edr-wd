@@ -3,11 +3,11 @@
 # stop_server.sh — Stop the EDR-WD MCP server.
 #
 # Stops in this order, all best-effort:
-#   1. PID file (logs/server.pid by default). Verifies the recorded
+#   1. PID file (logs/server.pid by default).  Verifies the recorded
 #      PID's command line still looks like our server before killing.
 #   2. lsof for PIDs listening on --port, filtered to processes whose
-#      command line contains BOTH "server.py" AND "--http" AND the target root
-#      path. Other processes holding the port are reported but NOT killed.
+#      command line mentions server.py AND whose cwd equals the target root.
+#      Other processes holding the port are reported but NOT killed.
 #
 # Usage:
 #   stop_server.sh --port 8765
@@ -69,7 +69,7 @@ looks_like_our_server() {
 stop_pid() {
   local pid="$1"
   if ! looks_like_our_server "${pid}" "${TARGET_DIR}"; then
-    echo "stop_server.sh: pid=${pid} command line does not match server.py+--http+target root; skipping" >&2
+    echo "stop_server.sh: pid=${pid} is not our server (cwd mismatch or not server.py); skipping" >&2
     return 0
   fi
   echo "stop_server.sh: stopping pid=${pid}"
