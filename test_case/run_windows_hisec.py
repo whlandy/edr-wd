@@ -5,6 +5,9 @@ Extracted from the original run_tests.py so that the Windows profile
 remains bit-for-bit equivalent to the 16/16 regression we shipped.
 
 Tests:
+  Baseline:
+    - activate_edr + visible HisecEndpointAgent window
+
   Integration:
     - list_windows returns ok
     - is_window_open explorer.exe
@@ -60,6 +63,30 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, li
     print("=" * 60)
     print("Integration Tests")
     print("=" * 60)
+
+    print("\n  activate_edr baseline... ", end="", flush=True)
+    try:
+        baseline = call_tool("activate_edr", {"wait": True, "timeout": 15.0})
+        if verbose:
+            print(f"\n    {json.dumps(baseline, ensure_ascii=False)[:400]}")
+            print("    ", end="")
+        if baseline.get("ok") is not True:
+            print(f"FAIL: {baseline.get('error', 'unknown')}")
+            failed += 1
+            errors.append("activate_edr baseline")
+        else:
+            main_window = call_tool("is_window_open", {"process_name": "HisecEndpointAgent.exe"})
+            if main_window.get("ok") is True and main_window.get("found") is True:
+                print("PASS")
+                passed += 1
+            else:
+                print(f"FAIL: HisecEndpointAgent.exe not visible after activate_edr (found={main_window.get('found')})")
+                failed += 1
+                errors.append("activate_edr baseline")
+    except Exception as e:
+        print(f"ERROR: {e}")
+        failed += 1
+        errors.append("activate_edr baseline")
 
     tests_integration = [
         ("list_windows returns ok",

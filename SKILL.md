@@ -36,7 +36,7 @@ flowchart LR
   Agent --> SSH[agent.ssh_runner]
   TM --> WL[agent.lifecycle.windows]
   TM --> ML[agent.lifecycle.macos]
-  WL --> W1[target/scripts/windows/*\nWindows target]
+  WL --> W1[target/deploy.ps1\nWindows target]
   ML --> M1[target/scripts/macos/*\nmacOS target]
   W1 --> S[target/server.py\nFastMCP]
   M1 --> S
@@ -64,6 +64,7 @@ Useful commands:
 python -m agent.target_config --init
 python -m agent.target_config --validate
 python -m agent.target_config --list
+python -m agent.target_config --guide
 ```
 
 ## Agent Side Workflow
@@ -101,20 +102,23 @@ bash agent/edr-wd.sh down
 ```
 
 `agent/edr-wd.sh` is a thin shell wrapper around the same Python APIs. On
-Windows agents, call the Python modules directly from PowerShell or Python.
+Windows agents, use [agent/deploy.ps1](agent/deploy.ps1) for the same control
+plane, including config guidance, deploy/install, `up/down/status`, `push`,
+and `smoke`.
 
 ## Target Lifecycle
 
 ### Windows targets
 
 Windows lifecycle is handled by `agent/lifecycle/windows.py` and the scripts in
-`target/scripts/windows/`:
+`target/`:
 
-- `target/scripts/windows/install_task.ps1` registers the scheduled task
-- `target/scripts/windows/start_server.ps1` starts the server in the interactive
+- [target/deploy.ps1](target/deploy.ps1) is the operator-facing lifecycle entrypoint
+- `target/scripts/install_task.ps1` registers the scheduled task
+- `target/scripts/start_server.ps1` starts the server in the interactive
   desktop session
-- `target/scripts/windows/stop_server.ps1` stops the listener on port 8765
-- `target/scripts/windows/health.ps1` performs a quick port-level health check
+- `target/scripts/stop_server.ps1` stops the listener on port 8765
+- `target/scripts/health.ps1` performs a quick port-level health check
 
 Typical Windows flow — all via `agent/lifecycle/windows.py` through
 `target_manager.ensure_server_running()` and `target_manager.stop_server()`.
@@ -171,6 +175,7 @@ The smoke client is backend-aware:
 - `status` is backend-aware; macOS-only window diagnostics stay on the macOS backend
 - `status.backend_kind` is the stable backend selector (`windows_pywinauto` / `macos_accessibility`)
 - `status.host` / `status.port` report the actual runtime bind address, not a hard-coded 8765
+- Windows baseline coverage starts with `activate_edr` + a visible `HisecEndpointAgent.exe` window in `test_case/run_windows_hisec.py`
 
 Full profile-dispatched tests:
 
@@ -184,6 +189,7 @@ If you need low-level config validation:
 ```bash
 python -m agent.target_config --validate
 python -m agent.target_config --list
+python -m agent.target_config --guide
 ```
 
 ## Important Notes
@@ -202,6 +208,7 @@ python -m agent.target_config --list
 - [agent/target_config.py](agent/target_config.py)
 - [agent/target_manager.py](agent/target_manager.py)
 - [agent/mcp_manager.py](agent/mcp_manager.py)
+- [agent/deploy.ps1](agent/deploy.ps1)
 - [agent/lifecycle/windows.py](agent/lifecycle/windows.py)
 - [agent/lifecycle/macos.py](agent/lifecycle/macos.py)
 - [agent/ssh_runner.py](agent/ssh_runner.py)
@@ -210,10 +217,12 @@ python -m agent.target_config --list
 - [target/automation/base.py](target/automation/base.py)
 - [target/automation/windows_pywinauto.py](target/automation/windows_pywinauto.py)
 - [target/automation/macos_accessibility.py](target/automation/macos_accessibility.py)
+- [target/deploy.ps1](target/deploy.ps1)
 - [target/pywinauto_client.py](target/pywinauto_client.py)
 - [target/server.py](target/server.py)
 - [target/tests/smoke_mcp_client.py](target/tests/smoke_mcp_client.py)
 - [test_case/run_tests.py](test_case/run_tests.py)
+- [test_case/run_windows_hisec.py](test_case/run_windows_hisec.py)
 - [test_case/conftest.py](test_case/conftest.py)
 
 ## Troubleshooting
@@ -226,3 +235,4 @@ python -m agent.target_config --list
   backend features that enumerate or capture windows.
 - On Windows, `EDR_WD_ENABLE_POWERSHELL=1` must be set for PowerShell tools
   and HiSec activation.
+- On Windows, use `agent/deploy.ps1 -Action config-guide` to generate a concise setup walkthrough.

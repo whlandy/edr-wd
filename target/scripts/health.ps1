@@ -1,5 +1,8 @@
+param(
+    [int]$Port = 8765
+)
+
 $ErrorActionPreference = 'Continue'
-$Port = 8765
 
 function Get-TargetRoot {
     $scriptsDir = $PSScriptRoot

@@ -269,6 +269,37 @@ def _validate_platform_specific(t: dict) -> list[str]:
     return errors
 
 
+def _print_guide() -> None:
+    """Print a concise config setup guide."""
+    print("EDR-WD config guide")
+    print("=" * 60)
+    print("1. Generate a skeleton config:")
+    print("   python -m agent.target_config --init")
+    print("")
+    print("2. Edit config/targets.local.json with real values:")
+    print("   - default_target")
+    print("   - ssh.host / ssh.user / ssh.auth")
+    print("   - mcp.host / mcp.port / mcp.path / mcp.connect_mode")
+    print("   - windows.* for platform=windows")
+    print("   - macos.* for platform=macos")
+    print("")
+    print("3. Validate the file:")
+    print("   python -m agent.target_config --validate")
+    print("")
+    print("4. Inspect targets:")
+    print("   python -m agent.target_config --list")
+    print("")
+    print("5. Use the deployment entrypoints:")
+    print("   Windows agent: agent/deploy.ps1")
+    print("   Windows target: target/deploy.ps1")
+    print("   macOS/Linux agent: agent/edr-wd.sh")
+    print("")
+    print("Helpful notes:")
+    print("   - Set EDR_WD_CONFIG to point at an alternate config file.")
+    print("   - Use scripts/redact_config.py to inspect a config without secrets.")
+    print("   - Use agent.target_config --list to verify per-target platform/profile fields.")
+
+
 # ── TargetConfig class ────────────────────────────────────────────────────────
 
 class TargetConfig:
@@ -529,6 +560,7 @@ def main() -> None:
     group.add_argument("--list", action="store_true", help="List all targets")
     group.add_argument("--validate", action="store_true", help="Validate config")
     group.add_argument("--init", action="store_true", help="Initialize skeleton config")
+    group.add_argument("--guide", action="store_true", help="Show a concise config setup guide")
     parser.add_argument("--force", action="store_true", help="Overwrite existing config with --init")
     args = parser.parse_args()
 
@@ -538,10 +570,13 @@ def main() -> None:
         try:
             p = tc.init_config(args.config, force=args.force)
             print(f"Created: {p}")
-            print("Edit the file and fill in ssh.host, ssh.user, auth.password_env,")
-            print("windows.python_path, windows.target_root, etc.")
+            print("Next: run 'python -m agent.target_config --guide' for the setup walkthrough.")
         except FileExistsError as e:
             print(f"SKIP: {e}")
+        sys.exit(0)
+
+    if args.guide:
+        _print_guide()
         sys.exit(0)
 
     if args.list:

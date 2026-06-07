@@ -6,7 +6,7 @@ PowerShell for stop-by-port operations. Communicates with the target
 via SSH (delegated to agent.ssh_runner).
 
 Service definition: Windows Task Scheduler task (created by
-target/scripts/windows/install_task.ps1 — uploaded by install()).
+target/scripts/install_task.ps1 — uploaded by install()).
 
 Start trigger:  `schtasks /Run /TN <task_name> /I`
 Stop by port:   `Get-NetTCPConnection -LocalPort <port> -State Listen |

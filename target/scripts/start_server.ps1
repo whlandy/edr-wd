@@ -1,3 +1,10 @@
+param(
+    [string]$TargetRoot,
+    [string]$BindHost = '0.0.0.0',
+    [int]$Port = 8765,
+    [string]$PythonPath
+)
+
 $ErrorActionPreference = 'Continue'
 
 function Get-TargetRoot {
@@ -9,7 +16,13 @@ function Get-TargetRoot {
 }
 
 function Get-PythonPath {
-    param([string]$TargetRoot)
+    param(
+        [string]$TargetRoot,
+        [string]$PythonPath
+    )
+    if ($PythonPath -and (Test-Path $PythonPath)) {
+        return $PythonPath
+    }
     $configPath = Join-Path $TargetRoot 'config.json'
     if (Test-Path $configPath) {
         $config = Get-Content $configPath -Raw | ConvertFrom-Json
@@ -42,11 +55,12 @@ function Write-StartLog {
     Add-Content -Path $logFile -Value $entry
 }
 
-$TargetRoot = Get-TargetRoot
+$TargetRoot = if ($TargetRoot) { $TargetRoot } else { Get-TargetRoot }
 $ServerDir = $TargetRoot
 $LogDir = Join-Path $TargetRoot 'logs'
 $ScreenshotsDir = Join-Path $TargetRoot 'screenshots'
-$Port = 8765
+$BindHost = if ($BindHost) { $BindHost } else { '0.0.0.0' }
+$Port = if ($Port -gt 0) { $Port } else { 8765 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ScreenshotsDir | Out-Null
@@ -59,7 +73,7 @@ if ($listening) {
 }
 
 try {
-    $PythonExe = Get-PythonPath $TargetRoot
+    $PythonExe = Get-PythonPath -TargetRoot $TargetRoot -PythonPath $PythonPath
 } catch {
     Write-Host "[ERROR] $($_)"
     Write-StartLog "ERROR: $_" $TargetRoot
@@ -75,10 +89,10 @@ $serverLog = Join-Path $LogDir ('server.' + (Get-Date -Format 'yyyyMMdd-HHmmss')
 $startLog = Join-Path $LogDir 'start.log'
 
 Write-StartLog "Python=$PythonExe TargetRoot=$TargetRoot" $TargetRoot
-Write-StartLog "Command: $PythonExe server.py --http --host 0.0.0.0 --port $Port" $TargetRoot
+Write-StartLog "Command: $PythonExe server.py --http --host $BindHost --port $Port" $TargetRoot
 
 $proc = Start-Process -FilePath $PythonExe `
-    -ArgumentList 'server.py', '--http', '--host', '0.0.0.0', '--port', $Port `
+    -ArgumentList 'server.py', '--http', '--host', $BindHost, '--port', $Port `
     -WorkingDirectory $ServerDir `
     -PassThru `
     -RedirectStandardOutput $serverLog `
@@ -95,8 +109,8 @@ if ($proc.HasExited) {
 
 $stillListening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($stillListening) {
-    Write-Host "[OK] Server PID=$($proc.Id) listening on 0.0.0.0:$Port"
-    Write-StartLog "OK: PID=$($proc.Id) listening on 0.0.0.0:$Port" $TargetRoot
+    Write-Host "[OK] Server PID=$($proc.Id) listening on $BindHost:$Port"
+    Write-StartLog "OK: PID=$($proc.Id) listening on $BindHost:$Port" $TargetRoot
     exit 0
 } else {
     Write-Host "[ERROR] Server PID=$($proc.Id) started but port $Port not listening"
