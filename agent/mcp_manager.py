@@ -366,7 +366,11 @@ def health_detail(target_name: Optional[str] = None) -> dict:
     backend = None
     status_result = call_mcp_tool(session_id, mcp_url, "status", {}, timeout=5.0)
     if status_result.get("ok"):
-        for block in status_result.get("data", {}).get("content", []):
+        # FastMCP wraps tool results in {data: {result: {content: [...]}}}
+        # where result.content[0].text is the tool's JSON return value.
+        d = status_result.get("data", {})
+        result_obj = d.get("result", d)
+        for block in result_obj.get("content", []):
             if block.get("type") == "text":
                 try:
                     data = json.loads(block["text"])
@@ -378,7 +382,10 @@ def health_detail(target_name: Optional[str] = None) -> dict:
     window_count = 0
     lw_result = call_mcp_tool(session_id, mcp_url, "list_windows", {}, timeout=5.0)
     if lw_result.get("ok"):
-        for block in lw_result.get("data", {}).get("content", []):
+        # Navigate through FastMCP envelope: data → result → content blocks
+        d = lw_result.get("data", {})
+        result_obj = d.get("result", d)
+        for block in result_obj.get("content", []):
             if block.get("type") == "text":
                 try:
                     data = json.loads(block["text"])
