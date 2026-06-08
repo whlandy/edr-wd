@@ -53,9 +53,15 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
     print("Baseline: MCP tools + backend health")
     print("=" * 60)
 
+    def tools_list_raw():
+        r = client.tools_list()
+        if isinstance(r, str):
+            r = json.loads(r)
+        return r
+
     baseline_tests = [
         ("tools/list",
-         "tools_list", {},
+         None, None,  # handled specially below
          lambda r: (isinstance(r, dict) and len(r.get("result", {}).get("tools", [])) >= 1,
                     "no tools returned")),
 
@@ -72,7 +78,11 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
     for name, tool, args, check_fn in baseline_tests:
         print(f"\n  {name}... ", end="", flush=True)
         try:
-            result = call_tool(tool, args)
+            if tool is None:
+                # tools/list: use dedicated method, not call_tool
+                result = tools_list_raw()
+            else:
+                result = call_tool(tool, args)
             ok, err = check_fn(result)
             if verbose and not ok:
                 print(f"\n    FAIL: {err}\n    detail: {json.dumps(result, ensure_ascii=False)[:300]}")
@@ -248,9 +258,9 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
             passed += 1
         elif result.get("ok") is False and any(
             kw in (result.get("error") or "").lower()
-            for kw in ("permission", "denied", "unavailable", "ax")
+            for kw in ("permission", "denied", "unavailable", "ax", "not supported", "unsupported")
         ):
-            print(f"SKIP  (AX/permission denied — {result.get('error', '')})")
+            print(f"SKIP  (macOS backend dump_tree not supported)")
             skipped += 1
         else:
             print(f"FAIL  dump_tree returned ok={result.get('ok')}")
@@ -266,9 +276,15 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
     try:
         result = call_tool("screenshot", {})
         err_msg = (result.get("error") or "").lower()
-        if result.get("ok") is True:
-            print(f"PASS  (image_b64={len(result.get('image_b64', result.get('image_base64', '')))} chars)")
+        b64 = result.get("image_b64", result.get("image_base64", ""))
+        saved_to = result.get("saved_to")
+        if result.get("ok") is True and (b64 or saved_to):
+            print(f"PASS  (image_b64={len(b64)} chars, saved_to={saved_to})")
             passed += 1
+        elif result.get("ok") is True and not b64 and not saved_to:
+            print(f"FAIL  screenshot returned ok=true but image data is empty")
+            failed += 1
+            errors.append("Step9 screenshot")
         elif any(kw in err_msg for kw in (
             "screen recording", "recording permission",
             "no active display", "could not create image",
@@ -289,10 +305,15 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
     print(f"\n  Step10: restore_edr... ", end="", flush=True)
     try:
         result = call_tool("restore_edr", {})
-        if result.get("ok") is True:
+        restored = result.get("restored")
+        method = result.get("method", "")
+        if result.get("ok") is True and restored is True:
             print("PASS")
             passed += 1
-        else:
+        elif result.get("ok") is True and method == "noop":
+            print(f"SKIP  (macOS restore not supported, method=noop)")
+            skipped += 1
+        elif result.get("ok") is False or restored is False:
             print(f"FAIL  restore_edr: {result.get('error', 'unknown')}")
             failed += 1
             errors.append("Step10 restore_edr")

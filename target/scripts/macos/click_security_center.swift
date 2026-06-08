@@ -40,6 +40,43 @@ var preferredMethod: ClickMethod = .auto
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+func dumpAXElement(_ el: AXUIElement, depth: Int, into results: inout [[String: String]], targetText: String) {
+    var roleRef: CFTypeRef?
+    var valueRef: CFTypeType?
+    var titleRef: CFTypeRef?
+    var descRef: CFTypeRef?
+
+    AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
+    AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef)
+    AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleRef)
+    AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descRef)
+
+    let role = (roleRef as? String) ?? ""
+    let value = (valueRef as? String) ?? ""
+    let title = (titleRef as? String) ?? ""
+    let desc = (descRef as? String) ?? ""
+
+    let prefix = String(repeating: "  ", count: depth)
+    if !role.isEmpty {
+        var entry: [String: String] = ["depth": String(depth), "role": role]
+        if !value.isEmpty { entry["value"] = value }
+        if !title.isEmpty { entry["title"] = title }
+        if !desc.isEmpty { entry["desc"] = desc }
+        if value.contains(targetText) || title.contains(targetText) {
+            entry["MATCH"] = "YES"
+        }
+        results.append(entry)
+    }
+
+    var childrenRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+       let children = childrenRef as? [AXUIElement] {
+        for child in children {
+            dumpAXElement(child, depth: depth + 1, into: &results, targetText: targetText)
+        }
+    }
+}
+
 func findHiSecAgent() -> NSRunningApplication? {
     NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "HiSecEndpointAgent" })
 }
@@ -187,6 +224,33 @@ func detectEdrClientWindow() -> (found: Bool, info: WindowInfo?) {
     return (false, nil)
 }
 
+// Also scan ALL HiSecEndpoint windows (even small stubs) to find the best candidate
+func findBestEdrClientWindow() -> (found: Bool, info: WindowInfo?) {
+    let opts = CGWindowListOption.optionAll.union(.excludeDesktopElements)
+    guard let winList = CGWindowListCopyWindowInfo(opts, 0) as? [[String: Any]] else {
+        return (false, nil)
+    }
+    var best: WindowInfo? = nil
+    for w in winList {
+        guard let ownerName = w[kCGWindowOwnerName as String] as? String,
+              ownerName == "HiSecEndpoint" else { continue }
+        let windowTitle = w[kCGWindowName as String] as? String ?? ""
+        let boundsDict = w[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+        let bounds = CGRect(
+            x: boundsDict["X"] ?? 0,
+            y: boundsDict["Y"] ?? 0,
+            width: boundsDict["Width"] ?? 0,
+            height: boundsDict["Height"] ?? 0
+        )
+        let info = WindowInfo(ownerName: ownerName, windowTitle: windowTitle, bounds: bounds)
+        // Prefer larger windows
+        if best == nil || bounds.width * bounds.height > best!.bounds.width * best!.bounds.height {
+            best = info
+        }
+    }
+    return (best != nil, best)
+}
+
 // ── JSON output ───────────────────────────────────────────────────────────────
 
 struct Output: Codable {
@@ -293,7 +357,7 @@ guard let parentEl = parentOf(el) else {
 if preferredMethod == .auto {
     // Step 1: AXPress
     let axPressed = tryAXPress(parentEl)
-    usleep(50_000)  // 50ms settle
+    usleep(200_000)  // 200ms settle
 
     let (found, info) = detectEdrClientWindow()
     if found {
@@ -307,7 +371,7 @@ if preferredMethod == .auto {
     guard let cliclick = findCliclick() as CliclickResult?, cliclick.available else {
         print(jsonResult(ok: false, clicked: axPressed, clickMethod: "ax_press",
                          clientWindowFound: false, stage: "cliclick_not_found",
-                         error: "cliclick not found. Install: brew install cliclick or set EDR_WD_CLICLICK_PATH"))
+                         error: "cliclick not found and no fallback available. Install: brew install cliclick"))
         exit(1)
     }
 
