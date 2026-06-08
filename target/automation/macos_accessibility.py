@@ -253,28 +253,26 @@ class MacOSAccessibilityBackend:
         edr_widget_auto_id: Optional[str] = None,
     ) -> dict:
         """
-        macOS-specific: ensure HiSecEndpoint GUI is visible via direct binary invocations.
+        macOS-specific: ensure the EDRClient GUI is visible.
 
         Core principle: process_found cannot represent window_found.
-        The only reliable way to ensure the main window exists is
-        HiSecEndpointAgent cmd ui.
+        The only reliable success signal is the EDRClient application window,
+        not the HiSecEndpointAgent entry window or a process hit.
 
-        Two windows must both be visible for ok=true:
-          - HiSecEndpointAgent  main window "华为智能终端安全系统"
-            via: HiSecEndpointAgent cmd ui
-          - EDRClient           sub-window "华为HiSec Endpoint"
-            via: sudo root_start_client.sh first, then AX/CGEvent click fallback
+        The target application/window is EDRClient ("华为HiSec Endpoint").
+        HiSecEndpointAgent ("华为智能终端安全系统") is only an entry window used by
+        the fallback click path.
 
         EDRClient is first started through
         /Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh.
         That script requires root privileges, so we call it with `sudo -n`:
         it succeeds only when the server account can sudo without an interactive
-        password prompt. If that fails, we trigger EDRClient by clicking the
-        "前往安全防护中心" button inside the HiSecEndpoint window — the same
-        action a human user would take.
+        password prompt. If that fails or does not produce the EDRClient window,
+        we open HiSecEndpointAgent and click "前往安全防护中心" — the same action a
+        human user would take.
 
         exe_path: optional path to a custom HiSecEndpointAgent binary.
-        wait:    if True, poll for both windows to appear (up to timeout).
+        wait:    if True, poll for the EDRClient window to appear (up to timeout).
         timeout: seconds to wait for process/window appearance.
         edr_widget_auto_id: not used on macOS; accepted for API symmetry.
 
@@ -284,9 +282,11 @@ class MacOSAccessibilityBackend:
         Returns:
           {
             "ok": true/false,
-            "stage": "done" / "main_window_not_found" / "client_window_not_found",
+            "stage": "done" / "fallback_main_window_not_found" / "client_window_not_found",
             "backend": "macos_accessibility",
-            "already_open": true,  -- only when main && client windows both found
+            "target_application": "EDRClient",
+            "entry_application": "HiSecEndpointAgent",
+            "already_open": true,  -- when EDRClient window is already visible
             "main": {
               "process_found": bool,
               "window_found": bool,
@@ -304,7 +304,8 @@ class MacOSAccessibilityBackend:
             }
           }
 
-        ok=true only when main.window_found and client.window_found are both true.
+        ok=true only when the EDRClient window is visible. main.window_found
+        describes the fallback entry window, not the target application.
         """
         import subprocess as _subprocess
         import os as _os
@@ -348,7 +349,7 @@ class MacOSAccessibilityBackend:
                 'repeat with w in wList\n'
                 '    set owner to "" & (kCGWindowOwnerName of w as string)\n'
                 '    set wName to "" & (kCGWindowName of w as string)\n'
-                '    if (owner contains "EDRClient" or owner contains "HiSec" or owner contains "华为") and (wName contains "HiSec" or wName contains "华为" or wName contains "Endpoint") then\n'
+                '    if owner contains "EDRClient" and (wName contains "HiSec" or wName contains "华为" or wName contains "Endpoint") then\n'
                 '        set matched to wName\n'
                 '        exit repeat\n'
                 '    end if\n'
@@ -421,52 +422,164 @@ class MacOSAccessibilityBackend:
                 "path": ROOT_START_CLIENT,
             }
 
+        def _mark_edr_client_connected() -> dict:
+            """
+            Best-effort record of the EDRClient window as the connected target.
+            This keeps later backend state aligned with the app we actually
+            activated; HiSecEndpointAgent is only a fallback entry window.
+            """
+            r = self.is_window_open(process_name="EDRClient")
+            if r.get("found") and r.get("windows"):
+                w = r["windows"][0]
+                self._connected_pid = w.get("pid")
+                self._connected_app = "EDRClient"
+                return {"ok": True, "pid": self._connected_pid}
+            return {"ok": False, "error": "EDRClient window not visible via System Events"}
+
+        def _result(
+            *,
+            ok: bool,
+            stage: str,
+            already_open: bool,
+            main_window_found: bool,
+            hisec_process_found: bool,
+            cmd_ui_attempted: bool,
+            client_window_found: bool,
+            root_start_client: dict,
+            click_attempts: list,
+            successful_click_method: Optional[str],
+            click_error: str,
+            detected_window_title: str,
+            detected_by: Optional[str],
+            connected: Optional[dict] = None,
+            error: Optional[str] = None,
+        ) -> dict:
+            out = {
+                "ok": ok,
+                "stage": stage,
+                "backend": "macos_accessibility",
+                "target_application": "EDRClient",
+                "entry_application": "HiSecEndpointAgent",
+                "already_open": already_open,
+                "main": {
+                    "application": "HiSecEndpointAgent",
+                    "role": "fallback_entry_window",
+                    "process_found": hisec_process_found,
+                    "window_found": main_window_found,
+                    "window_title": "华为智能终端安全系统",
+                    "activated_by": "HiSecEndpointAgent cmd ui",
+                    "cmd_ui_attempted": cmd_ui_attempted,
+                },
+                "client": {
+                    "application": "EDRClient",
+                    "role": "target_window",
+                    "process_found": _proc_exists("EDRClient"),
+                    "root_start_client": root_start_client,
+                    "clicked": successful_click_method is not None,
+                    "click_attempts": click_attempts,
+                    "successful_click_method": successful_click_method,
+                    "click_error": click_error,
+                    "window_found": client_window_found,
+                    "window_title": detected_window_title or "华为HiSec Endpoint",
+                    "detected_by": detected_by,
+                    "connected": connected or {"ok": False},
+                },
+            }
+            if error:
+                out["error"] = error
+            return out
+
         # Stage 1: check process existence (separate from window existence)
         hisec_process_found = _proc_exists("HiSecEndpointAgent")
-        edr_client_process_found = _proc_exists("EDRClient")
 
-        # Stage 2: check if main window already exists
+        # Stage 2: check if the target EDRClient window already exists
         main_window_found = _hisec_window_visible()
-        client_window_found, _, _ = _edr_client_window_visible()
+        client_window_found, detected_window_title, detected_by = _edr_client_window_visible()
 
-        # already_open means both windows are visible
-        already_open = main_window_found and client_window_found
-
-        # Stage 3: ensure main window exists (main path: HiSecEndpointAgent cmd ui)
+        root_start_client = {
+            "attempted": False,
+            "ok": False,
+            "error": "not needed",
+            "path": ROOT_START_CLIENT,
+        }
+        click_attempts = []       # list of {method, error} per attempt
+        click_errors = []          # all errors seen (for structured return)
+        successful_click_method = None
         cmd_ui_attempted = False
+
+        # already_open means the target app window is visible; the fallback
+        # HiSecEndpointAgent window does not need to be visible.
+        already_open = client_window_found
+        if already_open:
+            connected = _mark_edr_client_connected()
+            return _result(
+                ok=True,
+                stage="done",
+                already_open=True,
+                main_window_found=main_window_found,
+                hisec_process_found=hisec_process_found,
+                cmd_ui_attempted=False,
+                client_window_found=True,
+                root_start_client=root_start_client,
+                click_attempts=click_attempts,
+                successful_click_method=None,
+                click_error="",
+                detected_window_title=detected_window_title,
+                detected_by=detected_by,
+                connected=connected,
+            )
+
+        # Stage 3: primary EDRClient path. This does not require the
+        # HiSecEndpointAgent entry window.
+        root_start_client = _run_root_start_client()
+        if root_start_client.get("ok"):
+            deadline = time.time() + min(timeout, 5.0)
+            while time.time() < deadline:
+                found, title, detection_method = _edr_client_window_visible()
+                if found:
+                    connected = _mark_edr_client_connected()
+                    return _result(
+                        ok=True,
+                        stage="done",
+                        already_open=False,
+                        main_window_found=_hisec_window_visible(),
+                        hisec_process_found=_proc_exists("HiSecEndpointAgent"),
+                        cmd_ui_attempted=False,
+                        client_window_found=True,
+                        root_start_client=root_start_client,
+                        click_attempts=click_attempts,
+                        successful_click_method=None,
+                        click_error="",
+                        detected_window_title=title,
+                        detected_by=detection_method,
+                        connected=connected,
+                    )
+                time.sleep(0.5)
+            root_start_client["error"] = (
+                "root_start_client.sh returned success, but EDRClient window "
+                "did not appear within 5s"
+            )
+
+        # Stage 4: fallback: ensure the HiSecEndpointAgent entry window exists.
         if not main_window_found:
             cmd_ui_attempted = True
             if not Path(HISEC_AGENT_BIN).exists():
-                return {
-                    "ok": False,
-                    "stage": "main_window_not_found",
-                    "backend": "macos_accessibility",
-                    "already_open": False,
-                    "error": "HiSecEndpointAgent binary not found",
-                    "main": {
-                        "process_found": hisec_process_found,
-                        "window_found": False,
-                        "window_title": "华为智能终端安全系统",
-                        "activated_by": "HiSecEndpointAgent cmd ui",
-                        "cmd_ui_attempted": False,
-                    },
-                    "client": {
-                        "process_found": edr_client_process_found,
-                        "root_start_client": {
-                            "attempted": False,
-                            "ok": False,
-                            "error": "HiSecEndpointAgent binary not found",
-                            "path": ROOT_START_CLIENT,
-                        },
-                        "clicked": False,
-                        "click_attempts": [],
-                        "successful_click_method": None,
-                        "click_error": "HiSecEndpointAgent binary not found",
-                        "window_found": False,
-                        "window_title": "华为HiSec Endpoint",
-                        "detected_by": None,
-                    },
-                }
+                return _result(
+                    ok=False,
+                    stage="fallback_main_window_not_found",
+                    already_open=False,
+                    main_window_found=False,
+                    hisec_process_found=hisec_process_found,
+                    cmd_ui_attempted=False,
+                    client_window_found=False,
+                    root_start_client=root_start_client,
+                    click_attempts=click_attempts,
+                    successful_click_method=None,
+                    click_error="HiSecEndpointAgent binary not found",
+                    detected_window_title="",
+                    detected_by=None,
+                    error="HiSecEndpointAgent binary not found",
+                )
 
             # Main path: HiSecEndpointAgent cmd ui (not activate_app)
             _subprocess.Popen(
@@ -487,63 +600,25 @@ class MacOSAccessibilityBackend:
                 time.sleep(0.5)
             else:
                 # Timeout: main window never appeared
-                return {
-                    "ok": False,
-                    "stage": "main_window_not_found",
-                    "backend": "macos_accessibility",
-                    "already_open": False,
-                    "main": {
-                        "process_found": hisec_process_found,
-                        "window_found": False,
-                        "window_title": "华为智能终端安全系统",
-                        "activated_by": "HiSecEndpointAgent cmd ui",
-                        "cmd_ui_attempted": True,
-                    },
-                    "client": {
-                        "process_found": edr_client_process_found,
-                        "root_start_client": {
-                            "attempted": False,
-                            "ok": False,
-                            "error": "main window did not appear within timeout",
-                            "path": ROOT_START_CLIENT,
-                        },
-                        "clicked": False,
-                        "click_attempts": [],
-                        "successful_click_method": None,
-                        "click_error": "main window did not appear within timeout",
-                        "window_found": _edr_client_window_visible()[0],
-                        "window_title": "华为HiSec Endpoint",
-                        "detected_by": None,
-                    },
-                }
-
-        # Stage 4: main window confirmed, prefer root_start_client.sh.
-        # If sudo/script startup cannot show EDRClient, fallback to clicking
-        # "前往安全防护中心" with AXPress and then CGEvent centre click.
-        click_attempts = []       # list of {method, error} per attempt
-        click_errors = []          # all errors seen (for structured return)
-        client_window_found = False
-        successful_click_method = None
-        detected_by = None
-        detected_window_title = ""
-
-        root_start_client = _run_root_start_client()
-        if root_start_client.get("ok"):
-            deadline = time.time() + 5.0
-            while time.time() < deadline:
                 found, title, detection_method = _edr_client_window_visible()
-                if found:
-                    client_window_found = True
-                    detected_by = detection_method
-                    detected_window_title = title
-                    break
-                time.sleep(0.5)
-            if not client_window_found:
-                root_start_client["error"] = (
-                    "root_start_client.sh returned success, but EDRClient window "
-                    "did not appear within 5s"
+                return _result(
+                    ok=False,
+                    stage="fallback_main_window_not_found",
+                    already_open=False,
+                    main_window_found=False,
+                    hisec_process_found=hisec_process_found,
+                    cmd_ui_attempted=True,
+                    client_window_found=found,
+                    root_start_client=root_start_client,
+                    click_attempts=click_attempts,
+                    successful_click_method=None,
+                    click_error="main window did not appear within timeout",
+                    detected_window_title=title,
+                    detected_by=detection_method if found else None,
+                    error="HiSecEndpointAgent fallback window did not appear within timeout",
                 )
 
+        # Stage 5: fallback click from HiSecEndpointAgent to open EDRClient.
         if not client_window_found:
             for click_method_label in ["ax_press", "cgevent_center"]:
                 clicked, actual_method, click_err = _click_security_center(method=click_method_label)
@@ -571,37 +646,31 @@ class MacOSAccessibilityBackend:
                 if client_window_found:
                     break  # Success — don't try second click method
 
-        ok = main_window_found and client_window_found
+        ok = client_window_found
         stage = "done" if ok else "client_window_not_found"
 
         # Final activation error: prefer click helper errors, otherwise report
         # why the root_start_client path did not produce a visible window.
         final_click_error = click_errors[-1] if click_errors else root_start_client.get("error", "")
 
-        return {
-            "ok": ok,
-            "stage": stage,
-            "backend": "macos_accessibility",
-            "already_open": already_open,
-            "main": {
-                "process_found": hisec_process_found,
-                "window_found": main_window_found,
-                "window_title": "华为智能终端安全系统",
-                "activated_by": "HiSecEndpointAgent cmd ui",
-                "cmd_ui_attempted": cmd_ui_attempted,
-            },
-            "client": {
-                "process_found": _proc_exists("EDRClient"),
-                "root_start_client": root_start_client,
-                "clicked": successful_click_method is not None,
-                "click_attempts": click_attempts,
-                "successful_click_method": successful_click_method,
-                "click_error": final_click_error,
-                "window_found": client_window_found,
-                "window_title": detected_window_title or "华为HiSec Endpoint",
-                "detected_by": detected_by,
-            },
-        }
+        connected = _mark_edr_client_connected() if client_window_found else {"ok": False}
+        return _result(
+            ok=ok,
+            stage=stage,
+            already_open=False,
+            main_window_found=main_window_found,
+            hisec_process_found=hisec_process_found,
+            cmd_ui_attempted=cmd_ui_attempted,
+            client_window_found=client_window_found,
+            root_start_client=root_start_client,
+            click_attempts=click_attempts,
+            successful_click_method=successful_click_method,
+            click_error=final_click_error,
+            detected_window_title=detected_window_title,
+            detected_by=detected_by,
+            connected=connected,
+            error=None if ok else final_click_error,
+        )
 
     def click_at(self, x: int, y: int) -> dict:
         """

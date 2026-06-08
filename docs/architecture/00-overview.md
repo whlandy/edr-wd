@@ -277,7 +277,7 @@ Parallels VM proxy window
 backend = macos_accessibility
 server running in GUI session
 HiSecEndpointAgent process_found = true
-main.window_found = true
+main.window_found = optional fallback-entry diagnostic
 EDRClient process_found = true
 client.window_found = true
 activate_edr.ok = true
@@ -310,7 +310,7 @@ EDRClient.exe
 backend = windows_pywinauto
 server running in interactive desktop session
 HisecEndpointAgent.exe process_found = true
-main.window_found = true
+main.window_found = optional fallback-entry diagnostic
 EDRClient.exe process_found = true
 client.window_found = true
 dump_tree works

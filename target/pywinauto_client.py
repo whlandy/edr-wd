@@ -319,11 +319,15 @@ class WindowsGUI:
         # ── Step 1: EDRClient already open? ─────────────────────────────
         edr_client = self.is_window_open(process_name="EDRClient.exe")
         if edr_client.get("found"):
+            conn_edr = self.connect_by_process("EDRClient.exe", timeout=10) if wait else {"ok": False}
             return {
                 "ok": True,
                 "already_open": True,
                 "target": "EDRClient.exe",
+                "target_application": "EDRClient.exe",
+                "entry_application": "HisecEndpointAgent.exe",
                 "note": "EDRClient already running",
+                "edr_client_connected": conn_edr.get("ok", False),
                 "windows": edr_client["windows"],
             }
 
@@ -355,6 +359,8 @@ class WindowsGUI:
                     "ok": True,
                     "already_open": False,
                     "activated_by": "EDRClient.exe 17 --show",
+                    "target_application": "EDRClient.exe",
+                    "entry_application": "HisecEndpointAgent.exe",
                     "direct_start": direct_start,
                 }
 
@@ -367,6 +373,8 @@ class WindowsGUI:
                     "ok": True,
                     "already_open": False,
                     "activated_by": "EDRClient.exe 17 --show",
+                    "target_application": "EDRClient.exe",
+                    "entry_application": "HisecEndpointAgent.exe",
                     "direct_start": direct_start,
                     "edr_client_connected": conn_edr.get("ok", False),
                     "edr_client": edr_client,
@@ -393,6 +401,8 @@ class WindowsGUI:
                     "ok": True,
                     "already_open": False,
                     "activated_by": "HisecEndpointAgent.exe cmd ui",
+                    "target_application": "EDRClient.exe",
+                    "entry_application": "HisecEndpointAgent.exe",
                     "direct_start": direct_start,
                     "exe_path": exe,
                 }
@@ -432,6 +442,8 @@ class WindowsGUI:
                 "ok": False,
                 "error": "EDRClient.exe window did not appear after clicking edrWidget",
                 "stage": "post_click_wait",
+                "target_application": "EDRClient.exe",
+                "entry_application": "HisecEndpointAgent.exe",
                 "click_ok": click_result.get("ok", False),
                 "edr_client_found": False,
                 "hisec_connected": True,
@@ -445,6 +457,8 @@ class WindowsGUI:
                 "already_open": False,
                 "edr_client_found": True,
                 "activated_by": "HisecEndpointAgent edrWidget fallback",
+                "target_application": "EDRClient.exe",
+                "entry_application": "HisecEndpointAgent.exe",
                 "direct_start": direct_start,
                 "exe_path": exe,
             }
@@ -455,6 +469,8 @@ class WindowsGUI:
             "ok": True,
             "already_open": False,
             "activated_by": "HisecEndpointAgent edrWidget fallback",
+            "target_application": "EDRClient.exe",
+            "entry_application": "HisecEndpointAgent.exe",
             "direct_start": direct_start,
             "hisec_connected": True,
             "edr_client_connected": conn_edr.get("ok", False),

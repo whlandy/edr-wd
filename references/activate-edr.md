@@ -16,9 +16,15 @@ activate_edr()
 ```
 
 On Windows, `activate_edr()` uses `EDRClient.exe 17 --show` as the primary
-method. If the EDRClient window does not appear, it falls back to
-`HisecEndpointAgent.exe cmd ui` and clicks the `edrWidget` card in the main
-window.
+method and treats the `EDRClient.exe` window as the target application. If the
+EDRClient window does not appear, it falls back to `HisecEndpointAgent.exe cmd
+ui` and clicks the `edrWidget` card in the main window as an entry path.
+
+On macOS, `activate_edr()` uses
+`/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh` as the
+primary EDRClient startup path and only reports success after detecting the
+`EDRClient` window. `HiSecEndpointAgent` is used only for the fallback Swift
+helper click on "前往安全防护中心".
 
 ## Standard Operation Sequence
 

@@ -344,10 +344,12 @@ def screenshot(path: str = None) -> str:
     description=(
         "Activate the HiSec/EDR GUI using the active target backend. "
         "Windows first runs EDRClient.exe 17 --show from the EDR core "
-        "directory, then falls back to HisecEndpointAgent.exe cmd ui plus "
-        "the EDR widget click. macOS uses HiSecEndpointAgent cmd ui, then "
-        "tries sudo -n root_start_client.sh before falling back to the Swift "
-        "Accessibility click helper. If the window is already open, returns "
+        "directory and treats the EDRClient.exe window as the target; it falls "
+        "back to HisecEndpointAgent.exe cmd ui plus the EDR widget click only "
+        "as an entry path. macOS tries sudo -n root_start_client.sh and "
+        "validates the EDRClient window; only if that fails does it open "
+        "HiSecEndpointAgent and use the Swift Accessibility click helper. "
+        "If the target window is already open, returns "
         "already_open=true. exe_path can override the default agent binary "
         "path. Windows requires EDR_WD_ENABLE_POWERSHELL=1."
     ),

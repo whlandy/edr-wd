@@ -359,7 +359,7 @@ Pass criteria:
 ```
 backend = windows_pywinauto
 HisecEndpointAgent.exe process_found = true
-main.window_found = true
+main.window_found = optional fallback-entry diagnostic
 EDRClient.exe process_found = true
 client.window_found = true
 dump_tree returns controls
@@ -470,7 +470,7 @@ Phase 3 passes when ALL of:
 6. backend = windows_pywinauto
 7. list_windows能看到 VM 内 Windows 窗口
 8. activate_edr.ok = true
-9. main.window_found = true
+9. main.window_found optional fallback-entry diagnostic
 10. client.window_found = true
 11. dump_tree available
 12. click available or dry-run available

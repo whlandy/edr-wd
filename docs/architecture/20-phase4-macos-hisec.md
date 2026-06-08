@@ -350,7 +350,7 @@ Pass criteria:
 backend = macos_accessibility
 server running in GUI session
 HiSecEndpointAgent process_found = true
-main.window_found = true
+main.window_found = optional fallback-entry diagnostic
 EDRClient process_found = true
 client.window_found = true
 activate_edr.ok = true
@@ -505,7 +505,7 @@ Phase 4 passes when ALL of:
 3. list_windows returns Mac native windows
 4. activate_app Finder succeeds
 5. HiSecEndpointAgent process_found = true
-6. main.window_found = true
+6. main.window_found optional fallback-entry diagnostic
 7. EDRClient process_found = true
 8. client.window_found = true
 9. activate_edr.ok = true

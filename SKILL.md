@@ -180,11 +180,13 @@ The macOS backend is intentionally narrower than the Windows backend:
 
 - `dump_tree` / control_id workflows are Windows-first
 - macOS uses Accessibility/System Events plus app/window detection
-- `activate_edr` on macOS uses the native HiSecEndpoint binaries and window
-  detection flow. It first tries
+- `activate_edr` on macOS targets the `EDRClient` application window. It first
+  tries
   `/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh` via
-  non-interactive sudo; if sudo/script startup fails, it falls back to the Swift
-  Accessibility helper that clicks "前往安全防护中心".
+  non-interactive sudo and only accepts success when an `EDRClient` window is
+  detected. If sudo/script startup fails, it opens `HiSecEndpointAgent` as the
+  fallback entry window and uses the Swift Accessibility helper to click
+  "前往安全防护中心".
 
 ## MCP Server
 
