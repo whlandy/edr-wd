@@ -223,7 +223,9 @@ The smoke client is backend-aware:
 - `status` is backend-aware; macOS-only window diagnostics stay on the macOS backend
 - `status.backend_kind` is the stable backend selector (`windows_pywinauto` / `macos_accessibility`)
 - `status.host` / `status.port` report the actual runtime bind address, not a hard-coded 8765
-- Windows baseline coverage starts with `activate_edr` + a visible `EDRClient.exe` window in `test_case/run_windows_hisec.py`
+- Windows GUI smoke/E2E coverage opens `HisecEndpointAgent.exe` first, then
+  `EDRClient.exe`, and verifies both desktop windows with `wait_window` /
+  `is_window_open`.
 
 Full profile-dispatched tests:
 

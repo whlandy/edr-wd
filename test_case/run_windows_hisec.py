@@ -18,8 +18,10 @@ Tests:
 
   E2E: EDR Full Workflow (Step0..Step10)
     - is_window_open(EDRClient.exe)
+    - open HisecEndpointAgent.exe and verify its desktop window
     - activate_edr
     - wait_window(EDRClient.exe)
+    - verify both HisecEndpointAgent.exe and EDRClient.exe desktop windows
     - connect(EDRClient.exe, auto_activate fallback)
     - dump_tree
     - screenshot
@@ -56,6 +58,16 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, li
             return False, f"ok=false: {result.get('error', '')}"
         return True, None
 
+    def launch_hisec_agent_entry_window() -> dict:
+        """Open the HisecEndpointAgent entry window through MCP PowerShell."""
+        command = (
+            "$p = 'C:\\Program Files\\HiSec-Endpoint\\core\\safra\\HisecEndpointAgent.exe'; "
+            "if (-not (Test-Path $p)) { throw \"HisecEndpointAgent.exe not found: $p\" }; "
+            "Start-Process -FilePath $p -ArgumentList @('cmd','ui'); "
+            "Write-Output 'started'"
+        )
+        return call_tool("run_powershell", {"command": command, "timeout": 10})
+
     # ── Integration tests ──────────────────────────────────────────
     print()
     print("=" * 60)
@@ -85,6 +97,46 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, li
         print(f"ERROR: {e}")
         failed += 1
         errors.append("activate_edr baseline")
+
+    print("\n  E2E window pair baseline (HisecEndpointAgent -> EDRClient)... ", end="", flush=True)
+    try:
+        launch = launch_hisec_agent_entry_window()
+        if launch.get("ok") is not True:
+            print(f"FAIL: launch HisecEndpointAgent failed: {launch.get('error', launch)}")
+            failed += 1
+            errors.append("E2E window pair baseline")
+        else:
+            hisec_wait = call_tool(
+                "wait_window",
+                {"process_name": "HisecEndpointAgent.exe", "timeout": 15.0, "interval": 0.5},
+            )
+            activate = call_tool("activate_edr", {"wait": True, "timeout": 15.0})
+            edr_wait = call_tool(
+                "wait_window",
+                {"process_name": "EDRClient.exe", "timeout": 15.0, "interval": 0.5},
+            )
+            hisec_ok = hisec_wait.get("ok") is not False and hisec_wait.get("found") is True
+            edr_ok = (
+                activate.get("ok") is True
+                and edr_wait.get("ok") is not False
+                and edr_wait.get("found") is True
+            )
+            if hisec_ok and edr_ok:
+                print("PASS")
+                passed += 1
+            else:
+                print(
+                    "FAIL: "
+                    f"HisecEndpointAgent found={hisec_wait.get('found')} "
+                    f"EDRClient found={edr_wait.get('found')} "
+                    f"activate_ok={activate.get('ok')}"
+                )
+                failed += 1
+                errors.append("E2E window pair baseline")
+    except Exception as e:
+        print(f"ERROR: {e}")
+        failed += 1
+        errors.append("E2E window pair baseline")
 
     tests_integration = [
         ("list_windows returns ok",
@@ -136,13 +188,17 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, li
 
     e2e_steps = [
         ("Step0: is_window_open(EDRClient.exe)",            "is_window_open", {"process_name": "EDRClient.exe"}, False),
-        ("Step1: activate_edr",                             "activate_edr",   {"wait": True, "timeout": 15.0}, True),
-        ("Step2: wait_window(EDRClient.exe)",               "wait_window",    {"process_name": "EDRClient.exe", "timeout": 15.0, "interval": 0.5}, True),
-        ("Step3: connect(EDRClient.exe, auto_activate fallback)", "connect", {"process_name": "EDRClient.exe", "timeout": 10.0, "auto_activate": True}, True),
-        ("Step4: dump_tree (max_depth=10)",                 "dump_tree",      {"max_depth": 10}, True),
-        ("Step5: screenshot",                               "screenshot",     {"path": "C:\\Users\\<TARGET_USER>\\Desktop\\maa-fw运行记录\\e2e_edr_full_workflow.png"}, True),
-        ("Step6: restore_edr",                              "restore_edr",    {}, False),
-        ("Step7: is_window_open verify",                    "is_window_open", {"process_name": "EDRClient.exe"}, False),
+        ("Step1: open HisecEndpointAgent entry window",     "run_powershell", {"command": "$p = 'C:\\Program Files\\HiSec-Endpoint\\core\\safra\\HisecEndpointAgent.exe'; if (-not (Test-Path $p)) { throw \"HisecEndpointAgent.exe not found: $p\" }; Start-Process -FilePath $p -ArgumentList @('cmd','ui'); Write-Output 'started'", "timeout": 10}, True),
+        ("Step2: wait_window(HisecEndpointAgent.exe)",      "wait_window",    {"process_name": "HisecEndpointAgent.exe", "timeout": 15.0, "interval": 0.5}, True),
+        ("Step3: activate_edr",                             "activate_edr",   {"wait": True, "timeout": 15.0}, True),
+        ("Step4: wait_window(EDRClient.exe)",               "wait_window",    {"process_name": "EDRClient.exe", "timeout": 15.0, "interval": 0.5}, True),
+        ("Step5: verify HisecEndpointAgent window",         "is_window_open", {"process_name": "HisecEndpointAgent.exe"}, True),
+        ("Step6: verify EDRClient window",                  "is_window_open", {"process_name": "EDRClient.exe"}, True),
+        ("Step7: connect(EDRClient.exe, auto_activate fallback)", "connect", {"process_name": "EDRClient.exe", "timeout": 10.0, "auto_activate": True}, True),
+        ("Step8: dump_tree (max_depth=10)",                 "dump_tree",      {"max_depth": 10}, True),
+        ("Step9: screenshot",                               "screenshot",     {"path": "C:\\Users\\<TARGET_USER>\\Desktop\\maa-fw运行记录\\e2e_edr_full_workflow.png"}, True),
+        ("Step10: restore_edr",                             "restore_edr",    {}, False),
+        ("Step11: is_window_open verify",                   "is_window_open", {"process_name": "EDRClient.exe"}, False),
     ]
 
     for name, tool, args, must_pass in e2e_steps:
@@ -158,6 +214,8 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, li
                 print(f"\n    {json.dumps(result, ensure_ascii=False)[:400].replace(chr(10), chr(10) + '    ')}")
                 print("    ", end="")
             ok = result.get("ok") is not False
+            if must_pass and "found" in result:
+                ok = ok and result.get("found") is True
             if ok:
                 extra = ""
                 if "windows" in result:

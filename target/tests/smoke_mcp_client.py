@@ -7,7 +7,9 @@ This script validates the live server workflow end-to-end:
 3. Verify core tools are exposed.
 4. Run a synchronous PowerShell command.
 5. Run an asynchronous PowerShell job and poll its result.
-6. Optionally verify GUI connection / activation flows.
+6. Optionally verify GUI connection / activation flows. Windows GUI smoke
+   opens HisecEndpointAgent first, then EDRClient, and verifies both desktop
+   windows via MCP window detection.
 
 Usage:
     python target/tests/smoke_mcp_client.py
@@ -217,12 +219,84 @@ def main():
 
     if args.gui:
         if backend_kind == "windows_pywinauto":
+            launch_result = call_tool(
+                args.base_url,
+                session_id,
+                "run_powershell",
+                {
+                    "command": (
+                        "$p = 'C:\\Program Files\\HiSec-Endpoint\\core\\safra\\HisecEndpointAgent.exe'; "
+                        "if (-not (Test-Path $p)) { throw \"HisecEndpointAgent.exe not found: $p\" }; "
+                        "Start-Process -FilePath $p -ArgumentList @('cmd','ui'); "
+                        "Write-Output 'started'"
+                    ),
+                    "timeout": 10,
+                },
+                7,
+            )
+            launch_json = parse_tool_json(launch_result)
+            if not launch_json.get("ok"):
+                raise RuntimeError(f"Open HisecEndpointAgent failed: {launch_json}")
+            print("[ok] opened HisecEndpointAgent entry window")
+
+            hisec_wait = call_tool(
+                args.base_url,
+                session_id,
+                "wait_window",
+                {"process_name": "HisecEndpointAgent.exe", "timeout": 15, "interval": 0.5},
+                8,
+            )
+            hisec_wait_json = parse_tool_json(hisec_wait)
+            if hisec_wait_json.get("ok") is False or hisec_wait_json.get("found") is not True:
+                raise RuntimeError(f"HisecEndpointAgent desktop window not found: {hisec_wait_json}")
+            print(f"[ok] HisecEndpointAgent window count={hisec_wait_json.get('count', 0)}")
+
+            activate_result = call_tool(
+                args.base_url,
+                session_id,
+                "activate_edr",
+                {"wait": True, "timeout": 15},
+                9,
+            )
+            activate_json = parse_tool_json(activate_result)
+            if not activate_json.get("ok"):
+                raise RuntimeError(f"activate_edr failed: {activate_json}")
+            print("[ok] activated EDRClient")
+
+            edr_wait = call_tool(
+                args.base_url,
+                session_id,
+                "wait_window",
+                {"process_name": "EDRClient.exe", "timeout": 15, "interval": 0.5},
+                10,
+            )
+            edr_wait_json = parse_tool_json(edr_wait)
+            if edr_wait_json.get("ok") is False or edr_wait_json.get("found") is not True:
+                raise RuntimeError(f"EDRClient desktop window not found: {edr_wait_json}")
+            print(f"[ok] EDRClient window count={edr_wait_json.get('count', 0)}")
+
+            for request_id, process_name in (
+                (11, "HisecEndpointAgent.exe"),
+                (12, "EDRClient.exe"),
+            ):
+                window_result = call_tool(
+                    args.base_url,
+                    session_id,
+                    "is_window_open",
+                    {"process_name": process_name},
+                    request_id,
+                )
+                window_json = parse_tool_json(window_result)
+                if window_json.get("ok") is not True or window_json.get("found") is not True:
+                    raise RuntimeError(f"{process_name} is not visible on desktop: {window_json}")
+                print(f"[ok] window detection {process_name} count={window_json.get('count', 0)}")
+
             connect_result = call_tool(
                 args.base_url,
                 session_id,
                 "connect",
-                {"title_re": ".*HiSec.*", "timeout": 5, "auto_activate": True},
-                7,
+                {"process_name": "EDRClient.exe", "timeout": 10, "auto_activate": True},
+                13,
             )
             connect_json = parse_tool_json(connect_result)
             print(f"[info] connect result={connect_json}")
@@ -234,7 +308,7 @@ def main():
                 session_id,
                 "dump_tree",
                 {"max_depth": 3},
-                8,
+                14,
             )
             dump_json = parse_tool_json(dump_result)
             controls = dump_json.get("controls", [])
