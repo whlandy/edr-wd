@@ -3,8 +3,8 @@ test_profiles.py — Dispatch table from target.app_profile to test suite.
 
 Each test suite is a function with the same signature as the existing
 run_tests() body: it receives a McpClient (already initialized) and a
-verbose flag, and returns (passed, failed, errors, ok_bool) where
-ok_bool is True if the runner should exit 0 (all pass) and False
+verbose flag, and returns (passed, failed, skipped, errors, ok_bool)
+where ok_bool is True if the runner should exit 0 (all pass) and False
 otherwise.
 
 The Windows profile keeps the legacy behaviour — all 16/16 steps from

@@ -225,7 +225,8 @@ The smoke client is backend-aware:
 - `status.host` / `status.port` report the actual runtime bind address, not a hard-coded 8765
 - Windows GUI smoke/E2E coverage opens `HisecEndpointAgent.exe` first, then
   `EDRClient.exe`, and verifies both desktop windows with `wait_window` /
-  `is_window_open`.
+  `is_window_open`. The same window-pair E2E is part of the basic pytest
+  integration suite in `test_case/test_integration/test_edr_window_pair_e2e.py`.
 
 Full profile-dispatched tests:
 

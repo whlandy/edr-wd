@@ -36,9 +36,10 @@ import time
 from typing import Optional
 
 
-def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, list, bool]:
+def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int, list, bool]:
     passed = 0
     failed = 0
+    skipped = 0
     errors: list[str] = []
 
     def call_tool(name, args=None):
@@ -68,10 +69,10 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, li
         )
         return call_tool("run_powershell", {"command": command, "timeout": 10})
 
-    # ── Integration tests ──────────────────────────────────────────
+    # ── Basic / integration tests ─────────────────────────────────
     print()
     print("=" * 60)
-    print("Integration Tests")
+    print("Basic / Integration Tests")
     print("=" * 60)
 
     print("\n  activate_edr baseline... ", end="", flush=True)
@@ -98,13 +99,13 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, li
         failed += 1
         errors.append("activate_edr baseline")
 
-    print("\n  E2E window pair baseline (HisecEndpointAgent -> EDRClient)... ", end="", flush=True)
+    print("\n  Basic E2E: HisecEndpointAgent + EDRClient desktop windows... ", end="", flush=True)
     try:
         launch = launch_hisec_agent_entry_window()
         if launch.get("ok") is not True:
             print(f"FAIL: launch HisecEndpointAgent failed: {launch.get('error', launch)}")
             failed += 1
-            errors.append("E2E window pair baseline")
+            errors.append("Basic E2E window pair")
         else:
             hisec_wait = call_tool(
                 "wait_window",
@@ -132,11 +133,11 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, li
                     f"activate_ok={activate.get('ok')}"
                 )
                 failed += 1
-                errors.append("E2E window pair baseline")
+                errors.append("Basic E2E window pair")
     except Exception as e:
         print(f"ERROR: {e}")
         failed += 1
-        errors.append("E2E window pair baseline")
+        errors.append("Basic E2E window pair")
 
     tests_integration = [
         ("list_windows returns ok",
@@ -236,4 +237,4 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, li
             errors.append(name)
 
     ok = (failed == 0)
-    return passed, failed, errors, ok
+    return passed, failed, skipped, errors, ok
