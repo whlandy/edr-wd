@@ -381,23 +381,36 @@ class MacOSAccessibilityBackend:
                 return True, title, "cgwindowlist"
             return False, "", "system_events"
 
-        def _click_security_center(method: str = "auto") -> tuple[bool, str, str]:
+        def _click_security_center(method: str = "auto") -> tuple[bool, str, str, bool, dict]:
             """
             Call the helper script with the specified click method.
             method: "auto" | "ax_press" | "cgevent_center"
-            Returns (clicked, click_method, error_message).
-            error_message is non-empty when clicked=False and tells WHY it failed.
+
+            Returns (clicked, click_method, error_message, client_window_found, window_bounds).
+            - clicked: True if the helper's click action succeeded
+            - click_method: the actual method used ("ax_press" or "cgevent_center")
+            - error_message: non-empty when clicked=False
+            - client_window_found: True when the EDRClient window was detected by the helper
+            - window_bounds: {"x", "y", "w", "h"} when client_window_found is True
             """
             rc, out = _run(["/usr/bin/swift", str(CLICK_HELPER), "--method", method], timeout=10)
+            import json as _json
+            try:
+                data = _json.loads(out.strip())
+                clicked = data.get("ok", False) and data.get("client_window_found", False)
+                click_method_out = data.get("click_method", method)
+                bounds = data.get("window_bounds", {})
+                return clicked, click_method_out, "", data.get("client_window_found", False), bounds
+            except _json.JSONDecodeError:
+                pass
+            # Fallback: old "OK <method>" plain text format
             if rc == 0 and out.startswith("OK "):
                 actual_method = out.strip().split(" ")[1]
-                return True, actual_method, ""
-            # Failed — stderr tells us why
+                return True, actual_method, "", False, {}
             err = out.strip()
             if not err:
-                # stdout may contain error text even without stderr separation
                 err = f"swift exited rc={rc}"
-            return False, "", err
+            return False, "", err, False, {}
 
         def _run_root_start_client() -> dict:
             """
@@ -494,6 +507,7 @@ class MacOSAccessibilityBackend:
 
         # Stage 2: check if the target EDRClient window already exists
         main_window_found = _hisec_window_visible()
+        # Stage 1: check if EDRClient window is already visible.
         client_window_found, detected_window_title, detected_by = _edr_client_window_visible()
 
         root_start_client = {
@@ -507,8 +521,18 @@ class MacOSAccessibilityBackend:
         successful_click_method = None
         cmd_ui_attempted = False
 
-        # already_open means the target app window is visible; the fallback
-        # HiSecEndpointAgent window does not need to be visible.
+        # already_open means the target app window is visible.  CGWindowList
+        # can report a stale window (process killed but X window still in the
+        # list), so when the initial detection came from CGWindowList we use
+        # the helper's strict bounds check (width>=800 && height>=500) to
+        # confirm before accepting already_open=True.
+        if client_window_found and detected_by == "cgwindowlist":
+            _, _, _, helper_found, _ = _click_security_center(method="ax_press")
+            if not helper_found:
+                client_window_found = False
+                detected_window_title = ""
+                detected_by = None
+
         already_open = client_window_found
         if already_open:
             connected = _mark_edr_client_connected()
@@ -621,18 +645,26 @@ class MacOSAccessibilityBackend:
         # Stage 5: fallback click from HiSecEndpointAgent to open EDRClient.
         if not client_window_found:
             for click_method_label in ["ax_press", "cgevent_center"]:
-                clicked, actual_method, click_err = _click_security_center(method=click_method_label)
+                clicked, actual_method, click_err, helper_client_found, helper_bounds = _click_security_center(method=click_method_label)
                 click_attempts.append({
                     "method": actual_method or click_method_label,
                     "clicked": clicked,
+                    "helper_window_found": helper_client_found,
                     "error": click_err if not clicked else "",
                 })
                 if not clicked:
                     click_errors.append(click_err)
 
-                if clicked:
-                    # Poll for EDRClient window to appear (up to 5s per attempt)
-                    deadline = time.time() + 5.0
+                if helper_client_found:
+                    # The helper already confirmed the EDRClient window appeared
+                    client_window_found = True
+                    successful_click_method = actual_method
+                    detected_by = "swift_helper"
+                    detected_window_title = "华为HiSec Endpoint"
+                    break  # Success — don't try second click method
+                elif clicked:
+                    # Click succeeded but window detection missed it — poll briefly
+                    deadline = time.time() + 2.0
                     while time.time() < deadline:
                         found, title, detection_method = _edr_client_window_visible()
                         if found:
@@ -641,7 +673,7 @@ class MacOSAccessibilityBackend:
                             detected_by = detection_method
                             detected_window_title = title
                             break
-                        time.sleep(0.5)
+                        time.sleep(0.3)
 
                 if client_window_found:
                     break  # Success — don't try second click method
