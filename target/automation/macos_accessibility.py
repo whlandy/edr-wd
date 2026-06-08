@@ -263,11 +263,14 @@ class MacOSAccessibilityBackend:
           - HiSecEndpointAgent  main window "华为智能终端安全系统"
             via: HiSecEndpointAgent cmd ui
           - EDRClient           sub-window "华为HiSec Endpoint"
-            via: AX click on "前往安全防护中心" inside HiSecEndpointAgent window
+            via: sudo root_start_client.sh first, then AX/CGEvent click fallback
 
-        EDRClient cannot be launched via direct DYLD_LIBRARY_PATH exec because it
-        requires a console-user GUI session. Instead, we trigger it by clicking
-        the "前往安全防护中心" button inside the HiSecEndpoint window — the same
+        EDRClient is first started through
+        /Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh.
+        That script requires root privileges, so we call it with `sudo -n`:
+        it succeeds only when the server account can sudo without an interactive
+        password prompt. If that fails, we trigger EDRClient by clicking the
+        "前往安全防护中心" button inside the HiSecEndpoint window — the same
         action a human user would take.
 
         exe_path: optional path to a custom HiSecEndpointAgent binary.
@@ -293,6 +296,7 @@ class MacOSAccessibilityBackend:
             },
             "client": {
               "process_found": bool,
+              "root_start_client": {"attempted": bool, "ok": bool, "error": str},
               "clicked": bool,
               "click_method": "ax_press" / "cgevent_center" / null,
               "window_found": bool,
@@ -308,6 +312,9 @@ class MacOSAccessibilityBackend:
         HISEC_AGENT_BIN = (
             exe_path
             or "/Applications/HiSecEndpoint.app/Contents/MacOS/safra/HiSecEndpointAgent"
+        )
+        ROOT_START_CLIENT = (
+            "/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh"
         )
         CLICK_HELPER = (
             Path(__file__).resolve().parents[1]
@@ -391,6 +398,29 @@ class MacOSAccessibilityBackend:
                 err = f"swift exited rc={rc}"
             return False, "", err
 
+        def _run_root_start_client() -> dict:
+            """
+            Try the official HiSec root launcher without prompting for a password.
+            Returns a structured result so callers can see why the fallback path
+            was used.
+            """
+            if not Path(ROOT_START_CLIENT).exists():
+                return {
+                    "attempted": False,
+                    "ok": False,
+                    "error": "root_start_client.sh not found",
+                    "path": ROOT_START_CLIENT,
+                }
+
+            rc, out = _run(["/usr/bin/sudo", "-n", ROOT_START_CLIENT], timeout=15)
+            return {
+                "attempted": True,
+                "ok": rc == 0,
+                "returncode": rc,
+                "error": "" if rc == 0 else out.strip(),
+                "path": ROOT_START_CLIENT,
+            }
+
         # Stage 1: check process existence (separate from window existence)
         hisec_process_found = _proc_exists("HiSecEndpointAgent")
         edr_client_process_found = _proc_exists("EDRClient")
@@ -422,6 +452,12 @@ class MacOSAccessibilityBackend:
                     },
                     "client": {
                         "process_found": edr_client_process_found,
+                        "root_start_client": {
+                            "attempted": False,
+                            "ok": False,
+                            "error": "HiSecEndpointAgent binary not found",
+                            "path": ROOT_START_CLIENT,
+                        },
                         "clicked": False,
                         "click_attempts": [],
                         "successful_click_method": None,
@@ -465,6 +501,12 @@ class MacOSAccessibilityBackend:
                     },
                     "client": {
                         "process_found": edr_client_process_found,
+                        "root_start_client": {
+                            "attempted": False,
+                            "ok": False,
+                            "error": "main window did not appear within timeout",
+                            "path": ROOT_START_CLIENT,
+                        },
                         "clicked": False,
                         "click_attempts": [],
                         "successful_click_method": None,
@@ -475,8 +517,9 @@ class MacOSAccessibilityBackend:
                     },
                 }
 
-        # Stage 4: main window confirmed, click security center
-        # Try ax_press first; if client window doesn't appear, fallback to cgevent_center.
+        # Stage 4: main window confirmed, prefer root_start_client.sh.
+        # If sudo/script startup cannot show EDRClient, fallback to clicking
+        # "前往安全防护中心" with AXPress and then CGEvent centre click.
         click_attempts = []       # list of {method, error} per attempt
         click_errors = []          # all errors seen (for structured return)
         client_window_found = False
@@ -484,37 +527,56 @@ class MacOSAccessibilityBackend:
         detected_by = None
         detected_window_title = ""
 
-        for click_method_label in ["ax_press", "cgevent_center"]:
-            clicked, actual_method, click_err = _click_security_center(method=click_method_label)
-            click_attempts.append({
-                "method": actual_method or click_method_label,
-                "clicked": clicked,
-                "error": click_err if not clicked else "",
-            })
-            if not clicked:
-                click_errors.append(click_err)
+        root_start_client = _run_root_start_client()
+        if root_start_client.get("ok"):
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                found, title, detection_method = _edr_client_window_visible()
+                if found:
+                    client_window_found = True
+                    detected_by = detection_method
+                    detected_window_title = title
+                    break
+                time.sleep(0.5)
+            if not client_window_found:
+                root_start_client["error"] = (
+                    "root_start_client.sh returned success, but EDRClient window "
+                    "did not appear within 5s"
+                )
 
-            if clicked:
-                # Poll for EDRClient window to appear (up to 5s per attempt)
-                deadline = time.time() + 5.0
-                while time.time() < deadline:
-                    found, title, detection_method = _edr_client_window_visible()
-                    if found:
-                        client_window_found = True
-                        successful_click_method = actual_method
-                        detected_by = detection_method
-                        detected_window_title = title
-                        break
-                    time.sleep(0.5)
+        if not client_window_found:
+            for click_method_label in ["ax_press", "cgevent_center"]:
+                clicked, actual_method, click_err = _click_security_center(method=click_method_label)
+                click_attempts.append({
+                    "method": actual_method or click_method_label,
+                    "clicked": clicked,
+                    "error": click_err if not clicked else "",
+                })
+                if not clicked:
+                    click_errors.append(click_err)
 
-            if client_window_found:
-                break  # Success — don't try second click method
+                if clicked:
+                    # Poll for EDRClient window to appear (up to 5s per attempt)
+                    deadline = time.time() + 5.0
+                    while time.time() < deadline:
+                        found, title, detection_method = _edr_client_window_visible()
+                        if found:
+                            client_window_found = True
+                            successful_click_method = actual_method
+                            detected_by = detection_method
+                            detected_window_title = title
+                            break
+                        time.sleep(0.5)
+
+                if client_window_found:
+                    break  # Success — don't try second click method
 
         ok = main_window_found and client_window_found
         stage = "done" if ok else "client_window_not_found"
 
-        # Final click error: the most recent failure reason, for diagnostics
-        final_click_error = click_errors[-1] if click_errors else ""
+        # Final activation error: prefer click helper errors, otherwise report
+        # why the root_start_client path did not produce a visible window.
+        final_click_error = click_errors[-1] if click_errors else root_start_client.get("error", "")
 
         return {
             "ok": ok,
@@ -529,7 +591,8 @@ class MacOSAccessibilityBackend:
                 "cmd_ui_attempted": cmd_ui_attempted,
             },
             "client": {
-                "process_found": edr_client_process_found,
+                "process_found": _proc_exists("EDRClient"),
+                "root_start_client": root_start_client,
                 "clicked": successful_click_method is not None,
                 "click_attempts": click_attempts,
                 "successful_click_method": successful_click_method,

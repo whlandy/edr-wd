@@ -19,7 +19,7 @@ Usage:
     # URL builder
     tc.build_mcp_url("win-dev")          # → "http://<TARGET_IP>:8765/mcp"
 
-    # Auth resolver (replaces password_env with actual password from env)
+    # Auth resolver (prefers inline password; password_env remains supported)
     tc.resolve_auth("win-dev")            # → {"host": ..., "user": ..., "auth": {"type": "password", "password": "***"}}
 
     # CLI
@@ -95,7 +95,7 @@ SKELETON = {
                 "host": "",
                 "port": 22,
                 "user": "",
-                "auth": {"type": "password", "password_env": "EDR_WD_WIN_DEV_PASSWORD"},
+                "auth": {"type": "password", "password": ""},
             },
             "mcp": {
                 "host": "0.0.0.0",
@@ -119,7 +119,7 @@ SKELETON = {
                 "host": "",
                 "port": 22,
                 "user": "",
-                "auth": {"type": "password", "password_env": "EDR_WD_TARGET_PASSWORD"},
+                "auth": {"type": "password", "password": ""},
             },
             "mcp": {
                 "host": "0.0.0.0",
@@ -279,6 +279,7 @@ def _print_guide() -> None:
     print("2. Edit config/targets.local.json with real values:")
     print("   - default_target")
     print("   - ssh.host / ssh.user / ssh.auth")
+    print("   - ssh.auth.type=password with ssh.auth.password for intranet targets")
     print("   - mcp.host / mcp.port / mcp.path / mcp.connect_mode")
     print("   - windows.* for platform=windows")
     print("   - macos.* for platform=macos")
@@ -296,6 +297,8 @@ def _print_guide() -> None:
     print("")
     print("Helpful notes:")
     print("   - Set EDR_WD_CONFIG to point at an alternate config file.")
+    print("   - Password auth is preferred; password_env/key auth are compatibility paths.")
+    print("   - TODO security hardening: move secrets out of local JSON when needed.")
     print("   - Use scripts/redact_config.py to inspect a config without secrets.")
     print("   - Use agent.target_config --list to verify per-target platform/profile fields.")
 
@@ -429,18 +432,23 @@ class TargetConfig:
 
     def resolve_auth(self, target_name: str | None = None) -> dict:
         """
-        Return a copy of the target config with password_env replaced by the
-        actual password from the environment.
+        Return a copy of the SSH config. Inline auth.password is preferred.
+        auth.password_env is still supported for compatibility and TODO
+        hardening, but it is no longer required for intranet targets.
 
-        Raises EnvironmentError if password_env is set but the env var is missing.
+        Raises EnvironmentError if password auth is selected and neither
+        auth.password nor a resolvable auth.password_env is present.
         """
         t = self.get_target(target_name)
         ssh = dict(t.get("ssh", {}))
         auth = dict(ssh.get("auth", {}))
 
         if auth.get("type") == "password":
+            password = auth.get("password")
             penv = auth.get("password_env")
-            if penv:
+            if password:
+                auth.pop("password_env", None)
+            elif penv:
                 password = os.environ.get(penv)
                 if not password:
                     raise EnvironmentError(
@@ -450,6 +458,11 @@ class TargetConfig:
                 auth["password"] = password
                 # remove the env reference — caller gets the actual password
                 auth.pop("password_env", None)
+            else:
+                raise EnvironmentError(
+                    f"Target '{target_name}': auth.type='password' but "
+                    "auth.password is empty and auth.password_env is not set"
+                )
 
         ssh["auth"] = auth
         return ssh
@@ -459,7 +472,7 @@ class TargetConfig:
     def get_resolved_target(self, name: str | None = None) -> dict:
         """
         Return a fully resolved target config:
-          - replaces password_env with actual password from env
+          - resolves password auth (inline password preferred; password_env supported)
           - adds mcp_url (built from ssh.host + mcp config)
         """
         t = self.get_target(name)
@@ -529,12 +542,26 @@ class TargetConfig:
                 errors.append(f"[{name}] ssh.user is required")
             auth = ssh.get("auth", {})
             if auth.get("type") == "password":
+                if auth.get("password"):
+                    pass
+                elif not auth.get("password_env"):
+                    errors.append(
+                        f"[{name}] auth.type='password' requires auth.password "
+                        "or auth.password_env"
+                    )
                 penv = auth.get("password_env")
-                if penv and not os.environ.get(penv):
+                if not auth.get("password") and penv and not os.environ.get(penv):
                     errors.append(
                         f"[{name}] auth.password_env='{penv}' is set but "
                         f"env var '{penv}' is not defined"
                     )
+            elif auth.get("type") == "key":
+                pass
+            else:
+                errors.append(
+                    f"[{name}] ssh.auth.type must be 'password' (preferred) "
+                    "or 'key' (compatibility)"
+                )
 
             # mcp
             mcp = t.get("mcp", {})

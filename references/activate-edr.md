@@ -5,8 +5,8 @@
 If the EDR window is not visible, activate it first:
 
 ```powershell
-$exe = "C:\Program Files\HiSec-Endpoint\core\safra\HisecEndpointAgent.exe"
-Start-Process -FilePath $exe -ArgumentList "cmd ui"
+cd "C:\Program Files\HiSec-Endpoint\core"
+.\EDRClient.exe 17 --show
 ```
 
 Or via MCP tool:
@@ -14,6 +14,11 @@ Or via MCP tool:
 ```
 activate_edr()
 ```
+
+On Windows, `activate_edr()` uses `EDRClient.exe 17 --show` as the primary
+method. If the EDRClient window does not appear, it falls back to
+`HisecEndpointAgent.exe cmd ui` and clicks the `edrWidget` card in the main
+window.
 
 ## Standard Operation Sequence
 

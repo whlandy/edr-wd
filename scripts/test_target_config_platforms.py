@@ -7,7 +7,7 @@ Runs without pytest; suitable for `python scripts/test_target_config_platforms.p
 
 Covers the M1 acceptance criteria:
   - legacy win-dev without platform field normalizes to platform=windows
-  - macos target validates macos.{root, python_path, backend, launch_name}
+  - macos target validates password auth and macos.{root, python_path, backend, launch_name}
   - macos target missing a required field produces a clear error
   - platform=invalid produces a clear error
   - get_target_platform / get_target_app_profile return the right values
@@ -91,7 +91,7 @@ def main() -> int:
     # ── 3. macos target: valid → no errors ──────────────────────
     macos_raw = {
         "platform": "macos",
-        "ssh": {"host": "x", "port": 22, "user": "x", "auth": {"type": "key", "key_path": "/dev/null"}},
+        "ssh": {"host": "x", "port": 22, "user": "x", "auth": {"type": "password", "password": "pw"}},
         "mcp": {"host": "0.0.0.0", "port": 8765, "path": "/mcp", "connect_mode": "direct", "tunnel": {"enabled": False, "local_port": 18765}},
         "macos": {
             "python_path": "/opt/homebrew/bin/python3",
@@ -173,6 +173,12 @@ def main() -> int:
             "validate() reports legacy schema for win-legacy",
             len(legacy_warnings) == 1 and "win-legacy" in legacy_warnings[0],
             f"got legacy_warnings={legacy_warnings}",
+        )
+        ssh = tc.resolve_auth("mac-test")
+        check(
+            "resolve_auth prefers inline password",
+            ssh.get("auth", {}).get("password") == "pw" and "password_env" not in ssh.get("auth", {}),
+            f"got auth keys={list(ssh.get('auth', {}).keys())}",
         )
     finally:
         os.unlink(cfg_path)

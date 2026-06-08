@@ -1,9 +1,10 @@
 # EDR-WD
-# Local config (contains real passwords / credentials)
 
 # ── Runtime artifacts (must never be committed) ──────────────────────────
 *.log
 *.log.*
+logs/
+target/logs/
 
 # Local config (contains real passwords / credentials)
 config/targets.local.json
@@ -18,6 +19,8 @@ target/config/test_machines.json
 *.secrets
 
 # Python
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -29,5 +32,4 @@ build/
 Thumbs.db
 
 # Test
-test_case/__pycache__/
 .pytest_cache/

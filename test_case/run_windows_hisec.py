@@ -1,12 +1,13 @@
 """
 run_windows_hisec.py — Legacy Windows HiSec EDR full-workflow test suite.
 
-Extracted from the original run_tests.py so that the Windows profile
-remains bit-for-bit equivalent to the 16/16 regression we shipped.
+Extracted from the original run_tests.py. The current Windows profile uses
+EDRClient.exe 17 --show as the primary activation path, with the legacy
+HisecEndpointAgent edrWidget click retained as activate_edr fallback.
 
 Tests:
   Baseline:
-    - activate_edr + visible HisecEndpointAgent window
+    - activate_edr + visible EDRClient window
 
   Integration:
     - list_windows returns ok
@@ -16,17 +17,14 @@ Tests:
     - wait_window timeout
 
   E2E: EDR Full Workflow (Step0..Step10)
-    - is_window_open(HisecEndpointAgent.exe)
-    - activate_edr
-    - wait_window(HisecEndpointAgent.exe)
-    - connect(HisecEndpointAgent.exe, auto_activate fallback)
-    - dump_tree
-    - click(edrWidget GroupBox)
-    - wait 2s
     - is_window_open(EDRClient.exe)
+    - activate_edr
+    - wait_window(EDRClient.exe)
+    - connect(EDRClient.exe, auto_activate fallback)
+    - dump_tree
     - screenshot
     - restore_edr
-    - is_window_open(HisecEndpointAgent.exe) verify
+    - is_window_open(EDRClient.exe) verify
 """
 
 from __future__ import annotations
@@ -75,12 +73,12 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, li
             failed += 1
             errors.append("activate_edr baseline")
         else:
-            main_window = call_tool("is_window_open", {"process_name": "HisecEndpointAgent.exe"})
-            if main_window.get("ok") is True and main_window.get("found") is True:
+            edr_window = call_tool("is_window_open", {"process_name": "EDRClient.exe"})
+            if edr_window.get("ok") is True and edr_window.get("found") is True:
                 print("PASS")
                 passed += 1
             else:
-                print(f"FAIL: HisecEndpointAgent.exe not visible after activate_edr (found={main_window.get('found')})")
+                print(f"FAIL: EDRClient.exe not visible after activate_edr (found={edr_window.get('found')})")
                 failed += 1
                 errors.append("activate_edr baseline")
     except Exception as e:
@@ -137,17 +135,14 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, li
     print("=" * 60)
 
     e2e_steps = [
-        ("Step0: is_window_open(HisecEndpointAgent.exe)", "is_window_open", {"process_name": "HisecEndpointAgent.exe"}, False),
-        ("Step1: activate_edr",                             "activate_edr",  {"wait": True, "timeout": 15.0}, True),
-        ("Step2: wait_window(HisecEndpointAgent.exe)",      "wait_window",   {"process_name": "HisecEndpointAgent.exe", "timeout": 15.0, "interval": 0.5}, True),
-        ("Step3: connect(HisecEndpointAgent.exe, auto_activate fallback)", "connect", {"process_name": "HisecEndpointAgent.exe", "timeout": 10.0, "auto_activate": True}, True),
-        ("Step4: dump_tree (max_depth=10, find edrLanel)",  "dump_tree",     {"max_depth": 10}, True),
-        ("Step5: click(edrWidget GroupBox)",                "click",          {"automation_id": "SafraUIMainWindow.MainWidget.content_widget.featureWidget.EdrUIMainWindow.centralwidget.edrWidget"}, True),
-        ("Step6: wait 2s for UI to react",                  None,             None,             False),
-        ("Step7: verify EDRClient window appeared",       "is_window_open", {"process_name": "EDRClient.exe"}, True),
-        ("Step8: screenshot",                               "screenshot",    {"path": "C:\\Users\\<TARGET_USER>\\Desktop\\maa-fw运行记录\\e2e_edr_full_workflow.png"}, True),
-        ("Step9: restore_edr",                              "restore_edr",   {}, False),
-        ("Step10: is_window_open verify",                   "is_window_open", {"process_name": "HisecEndpointAgent.exe"}, False),
+        ("Step0: is_window_open(EDRClient.exe)",            "is_window_open", {"process_name": "EDRClient.exe"}, False),
+        ("Step1: activate_edr",                             "activate_edr",   {"wait": True, "timeout": 15.0}, True),
+        ("Step2: wait_window(EDRClient.exe)",               "wait_window",    {"process_name": "EDRClient.exe", "timeout": 15.0, "interval": 0.5}, True),
+        ("Step3: connect(EDRClient.exe, auto_activate fallback)", "connect", {"process_name": "EDRClient.exe", "timeout": 10.0, "auto_activate": True}, True),
+        ("Step4: dump_tree (max_depth=10)",                 "dump_tree",      {"max_depth": 10}, True),
+        ("Step5: screenshot",                               "screenshot",     {"path": "C:\\Users\\<TARGET_USER>\\Desktop\\maa-fw运行记录\\e2e_edr_full_workflow.png"}, True),
+        ("Step6: restore_edr",                              "restore_edr",    {}, False),
+        ("Step7: is_window_open verify",                    "is_window_open", {"process_name": "EDRClient.exe"}, False),
     ]
 
     for name, tool, args, must_pass in e2e_steps:

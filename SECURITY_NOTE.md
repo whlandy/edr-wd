@@ -22,5 +22,6 @@ All remote branches (`main`, `hermes`, `mcp_auto_v1.0`, `mcp_manual`) were force
 
 - Never `cat` or `git diff` real config files in issues, PRs, or chat.
 - Never use `sshpass -p` with real passwords.
-- Store real credentials in `config/targets.local.json` (already in `.gitignore`) or environment variables.
+- Current intranet targets may store credentials directly in `config/targets.local.json` (already in `.gitignore`); `password_env` remains a compatibility option.
+- TODO: move credentials out of local JSON if the workflow leaves the trusted intranet setup.
 - All redacted output only — never paste real IPs, usernames, passwords, or full paths.

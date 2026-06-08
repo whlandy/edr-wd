@@ -2,8 +2,8 @@
 ssh_runner.py — Pure SSH/SCP execution for EDR-WD.
 
 Supports two auth backends:
-  - key auth   → OpenSSH (ssh/scp with -i)
-  - password auth → Paramiko (pure Python, no sshpass needed)
+  - password auth → Paramiko (preferred for current intranet targets)
+  - key auth      → OpenSSH (compatibility path)
 
 Password auth never appears in shell commands or logs — credentials are
 passed directly to Paramiko's SSHClient.connect().
@@ -20,8 +20,8 @@ ssh_config shape (password auth):
         "user": "<TARGET_USER>",
         "auth": {
             "type": "password",
-            "password": "<YOUR_PASSWORD>",          # or
-            "password_env": "EDR_WD_TARGET_PASSWORD"  # env var name
+            "password": "<YOUR_PASSWORD>",          # preferred
+            "password_env": "EDR_WD_TARGET_PASSWORD"  # optional fallback
         }
     }
 
@@ -71,8 +71,11 @@ class ParamikoNotAvailable(SSHAuthError):
 
 
 def _get_password(ssh_config: dict) -> str:
-    """Extract password from ssh_config, checking password_env first."""
+    """Extract password from ssh_config, preferring inline auth.password."""
     auth = ssh_config.get("auth", {})
+    password = auth.get("password")
+    if password:
+        return password
     password_env = auth.get("password_env")
     if password_env:
         password = os.environ.get(password_env)
@@ -81,12 +84,9 @@ def _get_password(ssh_config: dict) -> str:
                 "auth.password_env is set but the environment variable is not defined"
             )
         return password
-    password = auth.get("password")
-    if not password:
-        raise SSHAuthError(
-            "auth.type='password' but no password or password_env is configured"
-        )
-    return password
+    raise SSHAuthError(
+        "auth.type='password' but no password or password_env is configured"
+    )
 
 
 def _resolve_key_path(key_path: str) -> Path:
@@ -341,8 +341,8 @@ def run_ssh(ssh_config: dict, command: str, *, timeout: int = 30) -> Tuple[int, 
     """
     Run `command` on the remote host via SSH.
 
+    - password auth → Paramiko (preferred; no sshpass needed)
     - key auth → OpenSSH subprocess
-    - password auth → Paramiko (no sshpass needed)
 
     Returns (exit_code, combined_stdout_stderr).
     """

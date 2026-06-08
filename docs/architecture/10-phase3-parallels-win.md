@@ -104,7 +104,7 @@ New target: `parallels-win`
         "user": "<WINDOWS_USER>",
         "auth": {
           "type": "password",
-          "password_env": "EDR_WD_TARGET_PASSWORD"
+          "password": "<TARGET_PASSWORD>"
         }
       },
       "mcp": {
@@ -122,13 +122,16 @@ New target: `parallels-win`
 }
 ```
 
-### 4.1 No plaintext password
+### 4.1 Password auth policy
 
-FORBIDDEN: `"password": "<REAL_PASSWORD>"`
-REQUIRED: `"password_env": "EDR_WD_TARGET_PASSWORD"`
+Current intranet targets use direct username/password auth from ignored local
+config. `password_env` and key auth remain compatibility paths only.
 
-Agent side only checks: `EDR_WD_TARGET_PASSWORD = SET / NOT SET`
+REQUIRED: `"password": "<TARGET_PASSWORD>"`
+
+Agent side only checks: `auth.password = SET / NOT SET`
 Must NOT print password value, length, or hash.
+TODO: harden credential storage if this workflow leaves the trusted intranet.
 
 ---
 
@@ -140,8 +143,7 @@ Before any SSH operation, verify:
 ssh.host is not a placeholder
 ssh.user is not a placeholder
 windows.target_root is not a placeholder
-auth.password_env exists
-EDR_WD_TARGET_PASSWORD is set
+auth.password exists
 ```
 
 If incomplete, return:
@@ -423,7 +425,7 @@ EDR_WD_TARGET_PASSWORD=SET/NOT SET
 4. Use RDP as MCP automation acceptance substitute
 5. Treat 8765 open as GUI automation success
 6. Treat process_found as window_found
-7. Plaintext password in config
+7. Committed or printed target credentials
 ```
 
 ---
@@ -460,7 +462,7 @@ dump_tree result
 Phase 3 passes when ALL of:
 
 ```
-1. parallels-win config complete with password_env
+1. parallels-win config complete with password auth
 2. SSH login succeeds
 3. target/ deployed successfully
 4. Windows MCP server started

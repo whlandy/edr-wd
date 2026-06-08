@@ -101,11 +101,11 @@ Key rule: Agent OS only affects SSH/SFTP implementation details. Target OS deter
 
 ### Agent OS Differences
 
-**Windows agent:** Paramiko password auth, OpenSSH key auth, no sshpass, PowerShell local execution, Windows path handling.
+**Windows agent:** Paramiko password auth by default, OpenSSH key auth compatibility, no sshpass, PowerShell local execution, Windows path handling.
 
-**macOS agent:** OpenSSH password/key, sshpass optional, Paramiko password auth, Unix path handling, launchctl management for remote macOS targets.
+**macOS agent:** Paramiko password auth by default, OpenSSH key auth compatibility, Unix path handling, launchctl management for remote macOS targets.
 
-**Unified:** All agents use `agent/ssh_runner.py` — caller does NOT care whether underlying transport is Paramiko, OpenSSH, or sshpass.
+**Unified:** All agents use `agent/ssh_runner.py` — caller does NOT care whether underlying transport is Paramiko or OpenSSH.
 
 ---
 
@@ -337,7 +337,7 @@ Every target must contain:
     "user": "<TARGET_USER>",
     "auth": {
       "type": "password",
-      "password_env": "EDR_WD_TARGET_PASSWORD"
+      "password": "<TARGET_PASSWORD>"
     }
   },
   "mcp": {
@@ -363,7 +363,7 @@ Every target must contain:
       "user": "<WINDOWS_USER>",
       "auth": {
         "type": "password",
-        "password_env": "EDR_WD_TARGET_PASSWORD"
+        "password": "<TARGET_PASSWORD>"
       }
     },
     "mcp": {
@@ -394,7 +394,7 @@ Every target must contain:
       "user": "<MAC_USER>",
       "auth": {
         "type": "password",
-        "password_env": "EDR_WD_TARGET_PASSWORD"
+        "password": "<TARGET_PASSWORD>"
       }
     },
     "mcp": {
@@ -418,7 +418,7 @@ Must verify before setting:
 host is not a placeholder
 user is not a placeholder
 target_root is not a placeholder
-password_env is set
+auth.password is set
 ```
 
 Otherwise return:
@@ -436,11 +436,13 @@ All targets use by default:
 ```json
 {
   "type": "password",
-  "password_env": "EDR_WD_TARGET_PASSWORD"
+  "password": "<TARGET_PASSWORD>"
 }
 ```
 
-Key auth is allowed but not default.
+For the current intranet workflow, inline password auth in ignored local config
+is preferred. `password_env` and key auth are compatibility paths only. TODO:
+harden credential storage if this leaves the trusted intranet setup.
 
 ### Agent Compatibility
 
@@ -452,7 +454,7 @@ key auth     → OpenSSH
 
 **macOS agent:**
 ```
-password auth → Paramiko or sshpass/OpenSSH
+password auth → Paramiko
 key auth     → OpenSSH
 ```
 
@@ -462,7 +464,6 @@ key auth     → OpenSSH
 
 **FORBIDDEN:**
 ```
-password: "<plaintext>"
 cat targets.local.json
 git diff targets.local.json
 print(config)
@@ -471,7 +472,8 @@ sshpass -p "<password>"
 
 **ALLOWED:**
 ```
-EDR_WD_TARGET_PASSWORD: SET / NOT SET
+auth.password: SET / NOT SET
+password_env: compatibility fallback
 host=<REDACTED>
 user=<REDACTED>
 target_root=<REDACTED>
@@ -587,7 +589,7 @@ Each combination must verify:
 Must distinguish:
 ```
 config_incomplete        — missing/placeholder config fields
-auth_missing            — password_env not set
+auth_missing            — auth.password not set and password_env unresolved
 ssh_failed              — cannot connect
 target_not_deployed     — target/ not on remote
 python_missing          — no Python on target
@@ -659,7 +661,7 @@ Debug builds
 
 ### Phase 1: Config Layer Unification
 - target_config supports agent × target matrix
-- Unified target schema with password_env default
+- Unified target schema with password auth default
 - Placeholder validation
 - default_target protection
 

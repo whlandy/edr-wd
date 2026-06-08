@@ -50,7 +50,10 @@ git ls-files config/targets.local.json config/test_machines.json target/config.j
 
 如果有任何输出，禁止 push。
 
-**SSH 密码认证**：使用 `sshpass -e`（从 `SSHPASS` 环境变量读取），不要在命令中明文写密码。
+**SSH 密码认证**：当前内网 target 优先使用 `config/targets.local.json`
+里的 `ssh.auth.type=password` + `ssh.auth.password`，由 Paramiko 登录，不使用
+密钥，也不要使用 `sshpass -p`。`password_env` / key auth 仅作为兼容路径保留。
+TODO: 后续如果脱离可信内网，再做凭据存储加固。
 
 ### 本地配置
 

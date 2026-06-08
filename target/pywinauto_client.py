@@ -23,6 +23,7 @@ logger = logging.getLogger("edr_wd.pywinauto_client")
 
 # Default EDR executable path (can be overridden via EDR_WD_EDR_EXE env var)
 DEFAULT_EDR_EXE = r"C:\Program Files\HiSec-Endpoint\core\safra\HisecEndpointAgent.exe"
+DEFAULT_EDR_CLIENT_EXE = r"C:\Program Files\HiSec-Endpoint\core\EDRClient.exe"
 
 
 class WindowsGUI:
@@ -281,16 +282,19 @@ class WindowsGUI:
                      timeout: float = 15.0,
                      edr_widget_auto_id: str = None) -> dict:
         """
-        Activate EDR GUI: connect HisecEndpointAgent main window, click edrWidget
-        to trigger EDRClient popup, then optionally wait for and connect EDRClient.
+        Activate EDR GUI: launch EDRClient directly from the EDR core
+        directory, then optionally wait for and connect EDRClient. If direct
+        startup fails, fall back to connecting HisecEndpointAgent and clicking
+        edrWidget.
 
         Flow:
           1. If EDRClient already open → return immediately (already_open=True).
-          2. If HisecEndpointAgent not open → launch via exe_path + "cmd ui".
-          3. Connect HisecEndpointAgent main window.
-          4. Click edrWidget (parent of "前往安全防护中心" link).
-          5. Wait for EDRClient window to appear.
-          6. Connect EDRClient (if wait=True).
+          2. Primary path: cd EDR core dir; EDRClient.exe 17 --show.
+          3. Wait for EDRClient window; connect it when wait=True.
+          4. Fallback path: launch/connect HisecEndpointAgent cmd ui.
+          5. Click edrWidget (parent of "前往安全防护中心" link).
+          6. Wait for EDRClient window to appear.
+          7. Connect EDRClient (if wait=True).
 
         Args:
             exe_path: path to HisecEndpointAgent.exe.
@@ -300,6 +304,8 @@ class WindowsGUI:
                 Defaults to the known EDR path.
         """
         exe = exe_path or os.environ.get("EDR_WD_EDR_EXE", DEFAULT_EDR_EXE)
+        edr_client_exe = os.environ.get("EDR_WD_EDR_CLIENT_EXE", DEFAULT_EDR_CLIENT_EXE)
+        edr_core_dir = os.path.dirname(edr_client_exe) or os.path.dirname(os.path.dirname(exe))
 
         # Default automation_id for the edrWidget GroupBox (card-button parent
         # of the "前往安全防护中心" Static label). This path is stable for
@@ -313,18 +319,66 @@ class WindowsGUI:
         # ── Step 1: EDRClient already open? ─────────────────────────────
         edr_client = self.is_window_open(process_name="EDRClient.exe")
         if edr_client.get("found"):
-            # NOTE: do NOT auto-connect to EDRClient here — callers expect to
-            # stay on HisecEndpointAgent until they explicitly connect it.
             return {
                 "ok": True,
                 "already_open": True,
                 "target": "EDRClient.exe",
-                "note": "EDRClient already running; connect to HisecEndpointAgent first, "
-                        "then click edrWidget to trigger popup, then connect EDRClient",
+                "note": "EDRClient already running",
                 "windows": edr_client["windows"],
             }
 
-        # ── Step 2: HisecEndpointAgent already open? ────────────────────
+        # ── Step 2: primary path: cd core; EDRClient.exe 17 --show ───────
+        direct_start = {
+            "attempted": True,
+            "ok": False,
+            "path": edr_client_exe,
+            "cwd": edr_core_dir,
+            "args": ["17", "--show"],
+            "error": "",
+        }
+        try:
+            if not os.path.exists(edr_client_exe):
+                direct_start["error"] = "EDRClient.exe not found"
+            else:
+                subprocess.Popen(
+                    [edr_client_exe, "17", "--show"],
+                    cwd=edr_core_dir,
+                )
+                direct_start["ok"] = True
+        except Exception as e:
+            logger.exception("activate_edr: failed to launch EDRClient directly")
+            direct_start["error"] = str(e)
+
+        if direct_start["ok"]:
+            if not wait:
+                return {
+                    "ok": True,
+                    "already_open": False,
+                    "activated_by": "EDRClient.exe 17 --show",
+                    "direct_start": direct_start,
+                }
+
+            edr_client = self.wait_window(
+                process_name="EDRClient.exe", timeout=timeout, interval=0.5
+            )
+            if edr_client.get("found"):
+                conn_edr = self.connect_by_process("EDRClient.exe", timeout=10)
+                return {
+                    "ok": True,
+                    "already_open": False,
+                    "activated_by": "EDRClient.exe 17 --show",
+                    "direct_start": direct_start,
+                    "edr_client_connected": conn_edr.get("ok", False),
+                    "edr_client": edr_client,
+                    "edr_client_exe": edr_client_exe,
+                    "edr_core_dir": edr_core_dir,
+                }
+            direct_start["error"] = (
+                "EDRClient.exe 17 --show returned no immediate error, "
+                "but EDRClient.exe window did not appear"
+            )
+
+        # ── Step 3: fallback: HisecEndpointAgent already open? ───────────
         hisec_win = self.is_window_open(process_name="HisecEndpointAgent.exe")
         if not hisec_win.get("found"):
             # Not open → launch it
@@ -335,7 +389,13 @@ class WindowsGUI:
                 return {"ok": False, "error": f"Failed to launch: {e}"}
 
             if not wait:
-                return {"ok": True, "already_open": False, "exe_path": exe}
+                return {
+                    "ok": True,
+                    "already_open": False,
+                    "activated_by": "HisecEndpointAgent.exe cmd ui",
+                    "direct_start": direct_start,
+                    "exe_path": exe,
+                }
 
             # Wait for HisecEndpointAgent window to appear
             hisec_win = self.wait_window(
@@ -345,15 +405,20 @@ class WindowsGUI:
                 return {
                     "ok": False,
                     "error": "HisecEndpointAgent.exe window did not appear",
+                    "direct_start": direct_start,
                     "exe_path": exe,
                 }
 
-        # ── Step 3: Connect HisecEndpointAgent ───────────────────────────
+        # ── Step 4: Connect HisecEndpointAgent ───────────────────────────
         conn = self.connect_by_process("HisecEndpointAgent.exe", timeout=10)
         if not conn.get("ok"):
-            return {"ok": False, "error": f"Cannot connect to HisecEndpointAgent: {conn.get('error')}"}
+            return {
+                "ok": False,
+                "error": f"Cannot connect to HisecEndpointAgent: {conn.get('error')}",
+                "direct_start": direct_start,
+            }
 
-        # ── Step 4: Click edrWidget GroupBox to trigger EDRClient ───────
+        # ── Step 5: Click edrWidget GroupBox to trigger EDRClient ───────
         click_result = self.click(automation_id=edr_widget_auto_id)
         if not click_result.get("ok"):
             logger.warning("activate_edr: click edrWidget failed: %s", click_result.get("error"))
@@ -370,6 +435,7 @@ class WindowsGUI:
                 "click_ok": click_result.get("ok", False),
                 "edr_client_found": False,
                 "hisec_connected": True,
+                "direct_start": direct_start,
                 "exe_path": exe,
             }
 
@@ -378,6 +444,8 @@ class WindowsGUI:
                 "ok": True,
                 "already_open": False,
                 "edr_client_found": True,
+                "activated_by": "HisecEndpointAgent edrWidget fallback",
+                "direct_start": direct_start,
                 "exe_path": exe,
             }
 
@@ -386,6 +454,8 @@ class WindowsGUI:
         return {
             "ok": True,
             "already_open": False,
+            "activated_by": "HisecEndpointAgent edrWidget fallback",
+            "direct_start": direct_start,
             "hisec_connected": True,
             "edr_client_connected": conn_edr.get("ok", False),
             "edr_client": edr_client,

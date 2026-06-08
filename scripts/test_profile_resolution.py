@@ -68,20 +68,20 @@ def main() -> int:
             },
             "macos-no-profile": {  # platform=macos, NO app_profile
                 "platform": "macos",
-                "ssh": {"host": "x", "port": 22, "user": "x", "auth": {"type": "key", "key_path": "/dev/null"}},
+                "ssh": {"host": "x", "port": 22, "user": "x", "auth": {"type": "password", "password": "pw"}},
                 "mcp": {"host": "0.0.0.0", "port": 8765, "path": "/mcp", "connect_mode": "direct", "tunnel": {"enabled": False, "local_port": 18765}},
                 "macos": {"python_path": "/usr/bin/python3", "root": "/tmp", "backend": "macos_accessibility", "launch_name": "com.test"},
             },
             "macos-with-profile": {  # platform=macos, app_profile=macos_generic
                 "platform": "macos",
                 "app_profile": "macos_generic",
-                "ssh": {"host": "x", "port": 22, "user": "x", "auth": {"type": "key", "key_path": "/dev/null"}},
+                "ssh": {"host": "x", "port": 22, "user": "x", "auth": {"type": "password", "password": "pw"}},
                 "mcp": {"host": "0.0.0.0", "port": 8765, "path": "/mcp", "connect_mode": "direct", "tunnel": {"enabled": False, "local_port": 18765}},
                 "macos": {"python_path": "/usr/bin/python3", "root": "/tmp", "backend": "macos_accessibility", "launch_name": "com.test"},
             },
             "alien-no-profile": {  # platform=linux (not in lifecycle), no app_profile
                 "platform": "linux",
-                "ssh": {"host": "x", "port": 22, "user": "x", "auth": {"type": "key", "key_path": "/dev/null"}},
+                "ssh": {"host": "x", "port": 22, "user": "x", "auth": {"type": "password", "password": "pw"}},
                 "mcp": {"host": "0.0.0.0", "port": 8765, "path": "/mcp", "connect_mode": "direct", "tunnel": {"enabled": False, "local_port": 18765}},
             },
         },

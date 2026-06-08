@@ -26,6 +26,27 @@ The agent OS can be Windows or macOS. The target OS can be Windows or macOS.
 The same Python orchestration APIs are used on both agent platforms; the shell
 wrapper `agent/edr-wd.sh` is just a POSIX convenience entrypoint.
 
+## Repository Layout
+
+Use these directories by responsibility:
+
+- `agent/`: agent-side orchestration only. It loads target config, handles
+  SSH/SFTP, selects lifecycle backends, and initializes MCP sessions.
+- `agent/lifecycle/`: target lifecycle adapters. These call target scripts
+  remotely; they should not contain GUI automation logic.
+- `target/`: files copied to or run on the target machine. `target/server.py`
+  is the FastMCP server.
+- `target/automation/`: GUI automation backend implementations. Target OS
+  decides which backend is active.
+- `target/scripts/`: target-local startup, stop, health, and installer scripts.
+- `test_case/`: profile-dispatched test entrypoints and pytest coverage.
+- `scripts/`: developer utilities that are not runtime entrypoints.
+- `docs/architecture/` and `references/`: architecture notes and operation
+  references.
+
+Generated files must stay out of Git: `.venv/`, `__pycache__/`, `.pytest_cache/`,
+`*.log`, `target/logs/`, `.DS_Store`, and local target configs.
+
 ## Architecture
 
 ```mermaid
@@ -49,6 +70,28 @@ flowchart LR
 
 Runtime targets live in `config/targets.local.json` and are loaded by
 `agent.target_config.TargetConfig`.
+
+For the current intranet SSH workflow, put the target username and password
+directly in the target's `ssh` block:
+
+```json
+"ssh": {
+  "host": "<TARGET_IP>",
+  "port": 22,
+  "user": "<TARGET_USER>",
+  "auth": {
+    "type": "password",
+    "password": "<TARGET_PASSWORD>"
+  }
+}
+```
+
+Password auth is the preferred path for both Windows and macOS targets.
+`password_env` and key auth remain compatibility options, but they are not
+required for the current workflow. TODO: revisit secret storage when this moves
+outside the trusted intranet setup. Never commit `config/targets.local.json` or
+paste real IPs, usernames, passwords, or target paths in logs, commits, PRs, or
+chat.
 
 Key fields:
 
@@ -138,7 +181,10 @@ The macOS backend is intentionally narrower than the Windows backend:
 - `dump_tree` / control_id workflows are Windows-first
 - macOS uses Accessibility/System Events plus app/window detection
 - `activate_edr` on macOS uses the native HiSecEndpoint binaries and window
-  detection flow
+  detection flow. It first tries
+  `/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh` via
+  non-interactive sudo; if sudo/script startup fails, it falls back to the Swift
+  Accessibility helper that clicks "前往安全防护中心".
 
 ## MCP Server
 
@@ -175,7 +221,7 @@ The smoke client is backend-aware:
 - `status` is backend-aware; macOS-only window diagnostics stay on the macOS backend
 - `status.backend_kind` is the stable backend selector (`windows_pywinauto` / `macos_accessibility`)
 - `status.host` / `status.port` report the actual runtime bind address, not a hard-coded 8765
-- Windows baseline coverage starts with `activate_edr` + a visible `HisecEndpointAgent.exe` window in `test_case/run_windows_hisec.py`
+- Windows baseline coverage starts with `activate_edr` + a visible `EDRClient.exe` window in `test_case/run_windows_hisec.py`
 
 Full profile-dispatched tests:
 
@@ -204,26 +250,50 @@ python -m agent.target_config --guide
 
 ## Useful Files
 
-- [agent/lifecycle/base.py](agent/lifecycle/base.py)
-- [agent/target_config.py](agent/target_config.py)
-- [agent/target_manager.py](agent/target_manager.py)
-- [agent/mcp_manager.py](agent/mcp_manager.py)
-- [agent/deploy.ps1](agent/deploy.ps1)
-- [agent/lifecycle/windows.py](agent/lifecycle/windows.py)
-- [agent/lifecycle/macos.py](agent/lifecycle/macos.py)
-- [agent/ssh_runner.py](agent/ssh_runner.py)
-- [agent/tunnel.sh](agent/tunnel.sh)
-- [agent/setup-mac.sh](agent/setup-mac.sh)
-- [target/automation/base.py](target/automation/base.py)
-- [target/automation/windows_pywinauto.py](target/automation/windows_pywinauto.py)
-- [target/automation/macos_accessibility.py](target/automation/macos_accessibility.py)
-- [target/deploy.ps1](target/deploy.ps1)
-- [target/pywinauto_client.py](target/pywinauto_client.py)
-- [target/server.py](target/server.py)
-- [target/tests/smoke_mcp_client.py](target/tests/smoke_mcp_client.py)
-- [test_case/run_tests.py](test_case/run_tests.py)
-- [test_case/run_windows_hisec.py](test_case/run_windows_hisec.py)
-- [test_case/conftest.py](test_case/conftest.py)
+Primary agent entrypoints:
+
+- [agent/deploy.ps1](agent/deploy.ps1): Windows-shell control plane.
+- [agent/edr-wd.sh](agent/edr-wd.sh): POSIX convenience wrapper.
+- [agent/target_config.py](agent/target_config.py): config validation,
+  initialization, and target lookup.
+- [agent/target_manager.py](agent/target_manager.py): deploy/install/start/stop
+  orchestration.
+- [agent/mcp_manager.py](agent/mcp_manager.py): MCP initialize and tool calls.
+
+Lifecycle and transport:
+
+- [agent/lifecycle/base.py](agent/lifecycle/base.py): lifecycle backend contract.
+- [agent/lifecycle/windows.py](agent/lifecycle/windows.py): Windows target lifecycle.
+- [agent/lifecycle/macos.py](agent/lifecycle/macos.py): macOS target lifecycle.
+- [agent/ssh_runner.py](agent/ssh_runner.py): SSH/SFTP execution abstraction.
+
+Target runtime:
+
+- [target/server.py](target/server.py): cross-platform FastMCP server.
+- [target/deploy.ps1](target/deploy.ps1): target-side Windows lifecycle wrapper.
+- [target/automation/base.py](target/automation/base.py): automation backend contract.
+- [target/automation/windows_pywinauto.py](target/automation/windows_pywinauto.py):
+  Windows UIA backend.
+- [target/automation/macos_accessibility.py](target/automation/macos_accessibility.py):
+  macOS Accessibility backend.
+- [target/scripts/](target/scripts): target-local start/stop/health/install scripts.
+
+Testing and diagnostics:
+
+- [target/tests/smoke_mcp_client.py](target/tests/smoke_mcp_client.py): live MCP smoke client.
+- [test_case/run_tests.py](test_case/run_tests.py): profile-dispatched test runner.
+- [test_case/run_windows_hisec.py](test_case/run_windows_hisec.py): Windows HiSec flow.
+- [test_case/run_macos_generic.py](test_case/run_macos_generic.py): macOS generic flow.
+- [scripts/redact_config.py](scripts/redact_config.py): safe local config inspection.
+
+Compatibility helpers:
+
+- [agent/tunnel.sh](agent/tunnel.sh): legacy/manual SSH tunnel helper.
+- [agent/setup-mac.sh](agent/setup-mac.sh): one-off macOS SSH config helper.
+
+Avoid treating generated files as project structure. If you see `.venv/`,
+`__pycache__/`, `.pytest_cache/`, `target/logs/`, root `*.log`, or `.DS_Store`,
+delete them locally; they are runtime artifacts.
 
 ## Troubleshooting
 

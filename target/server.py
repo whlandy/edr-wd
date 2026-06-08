@@ -46,7 +46,7 @@ logger = logging.getLogger("edr-wd")
 # ---------------------------------------------------------------------------
 # Global automation backend (singleton per server instance)
 # ---------------------------------------------------------------------------
-# Selection precedence: EDR_WD_AUTOMATION_BACKEND env var > "windows_pywinauto".
+# Selection precedence: EDR_WD_AUTOMATION_BACKEND env var > platform default.
 # The factory raises UnsupportedBackendError for unknown names — caught here
 # so the server still starts (with a clear log line) and operators can fix
 # the env var. This avoids breaking deployments over a typo.
@@ -97,9 +97,8 @@ mcp = FastMCP("edr-wd")
         "app name, or bundle id. The exact matchers supported depend on the "
         "active automation backend. Must be called before any other "
         "connect-required operation. "
-        "auto_activate: if True and first connect attempt fails AND the backend "
-        "exposes activate_edr() (Windows HiSec EDR only), try activate_edr() "
-        "once then retry."
+        "auto_activate: if True and first connect attempt fails, try the active "
+        "backend's activate_edr() once when available, then retry."
     ),
 )
 def connect(
@@ -343,12 +342,14 @@ def screenshot(path: str = None) -> str:
 @mcp.tool(
     name="activate_edr",
     description=(
-        "Windows HiSec EDR specific. Activate the EDR GUI by launching "
-        "HisecEndpointAgent with 'cmd ui'. By default waits up to 15 s for the "
-        "EDRClient window to appear. If the window is already open, returns "
-        "immediately with already_open=true. exe_path can override the default "
-        "EDR executable path. Requires EDR_WD_ENABLE_POWERSHELL=1 on the server. "
-        "On non-Windows backends, returns ok=false with an explanatory error."
+        "Activate the HiSec/EDR GUI using the active target backend. "
+        "Windows first runs EDRClient.exe 17 --show from the EDR core "
+        "directory, then falls back to HisecEndpointAgent.exe cmd ui plus "
+        "the EDR widget click. macOS uses HiSecEndpointAgent cmd ui, then "
+        "tries sudo -n root_start_client.sh before falling back to the Swift "
+        "Accessibility click helper. If the window is already open, returns "
+        "already_open=true. exe_path can override the default agent binary "
+        "path. Windows requires EDR_WD_ENABLE_POWERSHELL=1."
     ),
 )
 def activate_edr(exe_path: str = None, wait: bool = True, timeout: float = 15.0,

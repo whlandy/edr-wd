@@ -25,7 +25,7 @@ Minimum viable interface (M4/M5):
     connect(process_name=, title_re=, app_name=, bundle_id=,
             pid=, timeout=, auto_activate=False) -> dict
 
-Windows-specific (not on macOS in v1):
+Windows UIA-specific primitives:
     dump_tree(max_depth=10)
     click(automation_id, control_id, text, class_name, ...)
     click_target(...)
@@ -33,8 +33,10 @@ Windows-specific (not on macOS in v1):
     type_text(...)
     select(...)
     get_text(...)
-    activate_edr(...)   — HiSec EDR specific
     restore_edr()       — HiSec EDR specific
+
+Cross-backend HiSec-specific:
+    activate_edr(...)   — implemented separately by Windows and macOS
 
 These methods are still part of the abstract interface, but macOS
 implementations may return {"ok": False, "error": "not supported on
