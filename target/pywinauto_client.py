@@ -11,9 +11,10 @@ import base64
 import io
 import logging
 import os
+import ntpath
 import subprocess
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 import psutil
 from pywinauto import Application, timings
@@ -823,6 +824,46 @@ class WindowsGUI:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    # ------------------------------------------------------------------
+    # Screenshot path normalization
+    # ------------------------------------------------------------------
+
+    def _normalize_screenshot_path(self, path):
+        """
+        Validate and normalize a screenshot save path.
+
+        Returns (normalized_path, reason):
+          - (None, None)             → path was None
+          - (None, "empty")          → path was "" or whitespace
+          - (None, "placeholder")    → path contains < or >
+          - (None, "invalid_chars")  → path contains Windows illegal chars
+          - (None, "relative")       → path has no drive letter and is not UNC
+          - (str, None)             → valid absolute path
+        """
+        if path is None:
+            return None, None
+        raw = str(path).strip()
+        if not raw:
+            return None, "empty"
+        if "<" in raw or ">" in raw:
+            return None, "placeholder"
+        drive, tail = ntpath.splitdrive(raw)
+        # ':' only valid as drive separator (C:); reject elsewhere
+        if ":" in tail:
+            return None, "invalid_chars"
+        if any(ch in raw for ch in ['"', "|", "?", "*"]):
+            return None, "invalid_chars"
+        is_unc = raw.startswith("\\\\")
+        if not drive and not is_unc:
+            return None, "relative"
+        if not ntpath.isabs(raw):
+            return None, "relative"
+        return raw, None
+
+    # ------------------------------------------------------------------
+    # screenshot
+    # ------------------------------------------------------------------
+
     def screenshot(self, path: str = None) -> dict:
         """
         截图整个窗口。
@@ -838,15 +879,36 @@ class WindowsGUI:
             if img is None:
                 return {"ok": False, "error": "capture_as_image returned None"}
 
-            if path:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                img.save(path)
-                return {"ok": True, "saved_to": path}
+            normalized_path, ignore_reason = self._normalize_screenshot_path(path)
 
+            if normalized_path:
+                parent_dir = ntpath.dirname(normalized_path)
+                if parent_dir:
+                    os.makedirs(parent_dir, exist_ok=True)
+                img.save(normalized_path)
+                return {
+                    "ok": True,
+                    "saved_to": normalized_path,
+                    "image_b64": None,
+                    "image_base64": None,
+                    "path_ignored": False,
+                    "path_ignore_reason": None,
+                }
+
+            # Fallback: return base64
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             b64 = base64.b64encode(buf.getvalue()).decode()
-            return {"ok": True, "image_b64": b64, "width": img.width, "height": img.height}
+            return {
+                "ok": True,
+                "image_b64": b64,
+                "image_base64": b64,
+                "saved_to": None,
+                "width": img.width,
+                "height": img.height,
+                "path_ignored": ignore_reason is not None,
+                "path_ignore_reason": ignore_reason,
+            }
         except Exception as e:
             logger.exception("screenshot failed")
             return {"ok": False, "error": str(e)}
