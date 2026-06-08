@@ -31,6 +31,7 @@ from typing import Callable
 
 from .run_windows_hisec import run_windows_hisec_tests  # noqa: F401
 from .run_macos_generic import run_macos_generic_tests  # noqa: F401
+from .run_macos_hisec import run_macos_hisec_tests  # noqa: F401
 
 
 # Registry: profile name -> runner function.
@@ -38,6 +39,10 @@ from .run_macos_generic import run_macos_generic_tests  # noqa: F401
 PROFILE_RUNNERS: dict[str, Callable] = {
     "windows_hisec": run_windows_hisec_tests,
     "macos_generic": run_macos_generic_tests,
+    # macos_hisec is a real HiSecEndpoint.app workflow invoked explicitly via
+    # --profile macos_hisec.  It is NOT the default macOS profile because not
+    # all macOS targets have HiSecEndpoint installed.
+    "macos_hisec": run_macos_hisec_tests,
     # "macos_app_specific" is intentionally not registered yet — it will
     # be added when the first app-specific workflow lands.
 }
