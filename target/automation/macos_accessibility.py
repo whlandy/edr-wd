@@ -513,6 +513,35 @@ class MacOSAccessibilityBackend:
             )
             return rc == 0 and "华为智能终端安全系统" in out
 
+        def _bring_hisec_to_front() -> dict:
+            """
+            Bring the HiSec entry window to the foreground.
+            The click helper depends on the window actually being visible and
+            frontmost; a visible-but-not-active window can leave the target
+            button inaccessible.
+            """
+            attempts = [
+                ('tell application "HiSecEndpointAgent" to activate', "activate_app"),
+                (
+                    'tell application "System Events" to set frontmost of process "HiSecEndpointAgent" to true',
+                    "system_events_frontmost",
+                ),
+            ]
+            details = []
+            for script, method in attempts:
+                rc, out = _run_osascript(script, timeout=5)
+                details.append({
+                    "method": method,
+                    "ok": rc == 0,
+                    "rc": rc,
+                    "error": "" if rc == 0 else out.strip(),
+                })
+                if rc == 0:
+                    # Give the window manager a beat to update frontmost state.
+                    time.sleep(0.4)
+                    return {"ok": True, "method": method, "attempts": details}
+            return {"ok": False, "attempts": details}
+
         def _edr_client_window_visible_cg() -> tuple[bool, str, str]:
             """
             Check EDRClient window via CGWindowListCopyWindowInfo.
@@ -841,10 +870,13 @@ class MacOSAccessibilityBackend:
                     detected_by=detection_method if found else None,
                     error="HiSecEndpointAgent fallback window did not appear within timeout",
                 )
+        if main_window_found:
+            _bring_hisec_to_front()
 
         # Stage 5: fallback click from HiSecEndpointAgent to open EDRClient.
         if not client_window_found:
             for click_method_label in ["ax_press", "cgevent_center", "auto"]:
+                _bring_hisec_to_front()
                 clicked, actual_method, click_err, helper_client_found, helper_bounds = _click_security_center(method=click_method_label)
                 click_attempts.append({
                     "method": actual_method or click_method_label,
