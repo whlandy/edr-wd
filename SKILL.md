@@ -220,6 +220,9 @@ python target/tests/smoke_mcp_client.py --base-url http://127.0.0.1:8765/mcp --g
 The smoke client is backend-aware:
 - Windows backends exercise `run_powershell`, async jobs, `connect`, and `dump_tree`
 - macOS backends exercise `list_windows`, `activate_app`, and Finder-based GUI plumbing
+- macOS generic `click_at` is a plumbing check. Dry-run is pass; real-click
+  mode may skip when the optional local click helper or Accessibility
+  permission is unavailable.
 - `status` is backend-aware; macOS-only window diagnostics stay on the macOS backend
 - `status.backend_kind` is the stable backend selector (`windows_pywinauto` / `macos_accessibility`)
 - `status.host` / `status.port` report the actual runtime bind address, not a hard-coded 8765

@@ -203,11 +203,28 @@ def run_macos_generic_tests(client, verbose: bool = False) -> tuple[int, int, in
         print("    ", end="")
     method = r.get("method", "")
     has_method = method in ("cliclick", "osascript", "dry_run")
-    record(
-        "click_at plumbing",
-        has_method,
-        f"method={method or r.get('error', '')[:80]}",
+    error = r.get("error", "")
+    optional_click_helper_missing = (
+        not has_method
+        and (
+            "cliclick" in error
+            or "command not found" in error
+            or "accessibility permission" in error.lower()
+        )
     )
+    if optional_click_helper_missing:
+        record(
+            "click_at plumbing",
+            False,
+            error[:120],
+            "optional real-click helper unavailable",
+        )
+    else:
+        record(
+            "click_at plumbing",
+            has_method,
+            f"method={method or error[:80]}",
+        )
 
     ok = (failed == 0)
     return passed, failed, skipped, errors, ok

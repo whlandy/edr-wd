@@ -55,6 +55,26 @@ DEFAULT_PROFILE_BY_PLATFORM: dict[str, str] = {
     "macos":   "macos_generic",
 }
 
+DEFAULT_PROFILE_BY_BACKEND: dict[str, str] = {
+    "windows_pywinauto": "windows_hisec",
+    "uia": "windows_hisec",
+    "win32": "windows_hisec",
+    "macos_accessibility": "macos_generic",
+}
+
+PROFILE_BACKENDS: dict[str, set[str]] = {
+    "windows_hisec": {"windows_pywinauto", "uia", "win32"},
+    "macos_generic": {"macos_accessibility"},
+    "macos_hisec": {"macos_accessibility"},
+}
+
+
+def _profile_backend_conflict(profile: str, backend: str | None) -> bool:
+    if not backend:
+        return False
+    expected = PROFILE_BACKENDS.get(profile)
+    return expected is not None and backend not in expected
+
 
 def _resolve_profile(target_name: str, override: str | None) -> str:
     """
@@ -177,6 +197,39 @@ def run_tests(verbose: bool = False, target: str | None = None,
         print()
 
         client = McpClient(mcp_init_result=init_result)
+
+        status = client.call_tool("status", {})
+        backend_kind = (
+            status.get("backend_kind")
+            or status.get("backend")
+            if isinstance(status, dict)
+            else None
+        )
+        if _profile_backend_conflict(profile, backend_kind):
+            live_default = DEFAULT_PROFILE_BY_BACKEND.get(backend_kind)
+            explicit_profile = bool(profile_override) or app_profile != "(default by platform)"
+            if explicit_profile or live_default is None:
+                print(
+                    f"[FAIL] profile={profile!r} does not match live "
+                    f"backend={backend_kind!r}."
+                )
+                print(
+                    "       Fix target.platform/app_profile in config or pass the "
+                    "matching --profile explicitly."
+                )
+                return False
+            rerouted = resolve_runner(live_default)
+            if rerouted is None:
+                print(f"[FAIL] No test runner registered for live backend profile={live_default!r}.")
+                return False
+            print(
+                f"[WARN] Config selected profile={profile!r}, but live MCP "
+                f"backend is {backend_kind!r}; rerouting to profile={live_default!r}."
+            )
+            profile = live_default
+            runner = rerouted
+            print(f"  Runner:      {runner.__module__}.{runner.__name__}")
+            print()
 
     except Exception as e:
         print(f"[FAIL] initialize exception: {e}")

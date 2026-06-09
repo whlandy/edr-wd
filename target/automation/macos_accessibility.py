@@ -59,9 +59,9 @@ def _list_windows_cg() -> list[dict[str, Any]]:
     """
     Enumerate on-screen windows through CGWindowList.
 
-    System Events does not always expose Qt-created HiSec/EDRClient windows.
-    CGWindowList sees the compositor-level windows, which is the same fallback
-    activate_edr uses for the EDRClient window.
+    System Events can time out or miss Qt-created HiSec/EDRClient windows.
+    CGWindowList sees compositor-level windows and is safe as a read-only
+    fallback for list_windows/is_window_open.
     """
     script = (
         'use framework "CoreGraphics"\n'
@@ -182,6 +182,18 @@ class MacOSAccessibilityBackend:
         )
         rc, out = _run_osascript(script, timeout=15)
         if rc != 0:
+            cg_windows = _list_windows_cg()
+            if cg_windows:
+                return {
+                    "ok": True,
+                    "windows": cg_windows,
+                    "count": len(cg_windows),
+                    "fallback": "cgwindowlist",
+                    "warning": (
+                        f"System Events list_windows failed (rc={rc}): "
+                        f"{out.strip()}"
+                    ),
+                }
             return {
                 "ok": False,
                 "error": (
