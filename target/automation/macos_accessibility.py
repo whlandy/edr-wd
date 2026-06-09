@@ -69,6 +69,10 @@ class _MacOSConnectedApp:
 
     def _cg_windows_for_app(self) -> list[dict]:
         """Return CGWindowList entries for the connected app."""
+        snapshot = getattr(self._backend, "_connected_window_snapshot", None)
+        if isinstance(snapshot, dict):
+            return [snapshot]
+
         app_name = getattr(self._backend, "_connected_app", None) or ""
         opts = 17  # kCGWindowListOptionAll + excludeDesktopElements
         try:
@@ -293,11 +297,12 @@ class MacOSAccessibilityBackend:
                     for w in wins:
                         try:
                             rect = w.rectangle()
+                            win_info = getattr(w, "_win_info", {}) if isinstance(getattr(w, "_win_info", {}), dict) else {}
                             normalized.append({
                                 "app_name": getattr(self, "_connected_app", process_name) or process_name,
                                 "bundle_id": None,
-                                "window_title": getattr(getattr(w, "_win_info", {}), "get", lambda *_: "")("title", ""),
-                                "pid": getattr(w, "_win_info", {}).get("pid") if isinstance(getattr(w, "_win_info", {}), dict) else None,
+                                "window_title": win_info.get("title", ""),
+                                "pid": win_info.get("pid"),
                                 "rectangle": {
                                     "x": rect.left,
                                     "y": rect.top,
@@ -336,13 +341,11 @@ class MacOSAccessibilityBackend:
         # fall back to known HiSec heuristics so `connect()`/`wait_window()`
         # remain stable even when the accessibility title is polluted.
         if not matches and proc_lc:
-            title_lc = (title_re or "").lower()
             hisec_agent_name = "hisecendpointagent" in proc_lc
             edr_client_name = "edrclient" in proc_lc or "hisecendpoint" in proc_lc
             if hisec_agent_name or edr_client_name:
                 for w in listed["windows"]:
                     title = (w.get("window_title") or "").lower()
-                    app_name = (w.get("app_name") or "").lower()
                     if hisec_agent_name:
                         if "华为智能终端安全系统" in title or "hisecendpointagent" in title or "hisec" in title or "agent" in title:
                             matches.append(w)
@@ -612,14 +615,20 @@ class MacOSAccessibilityBackend:
             This keeps later backend state aligned with the app we actually
             activated; HiSecEndpointAgent is only a fallback entry window.
             """
-            r = self.is_window_open(process_name="EDRClient")
-            if r.get("found") and r.get("windows"):
-                w = r["windows"][0]
-                self._connected_pid = w.get("pid")
+            pid = self._pid_for_app("EDRClient") or getattr(self, "_connected_pid", None)
+            found, title, detected_by = _edr_client_window_visible()
+            if found:
+                self._connected_pid = pid
                 self._connected_app = "EDRClient"
+                self._connected_window_snapshot = {
+                    "pid": pid,
+                    "title": title or "华为HiSec Endpoint",
+                    "owner": "HiSecEndpoint",
+                    "rectangle": {"x": 0, "y": 0, "w": 800, "h": 600},
+                }
                 self._connected_app_instance = _MacOSConnectedApp(self)
-                return {"ok": True, "pid": self._connected_pid}
-            return {"ok": False, "error": "EDRClient window not visible via System Events"}
+                return {"ok": True, "pid": self._connected_pid, "title": self._connected_window_snapshot["title"], "detected_by": detected_by}
+            return {"ok": False, "error": "EDRClient window not visible"}
 
         def _result(
             *,
@@ -1003,6 +1012,12 @@ class MacOSAccessibilityBackend:
         if pid:
             self._connected_pid = pid
             self._connected_app = app_name or process_name
+            self._connected_window_snapshot = {
+                "pid": pid,
+                "title": title_re or app_name or process_name or "",
+                "owner": app_name or process_name or "",
+                "rectangle": {"x": 0, "y": 0, "w": 800, "h": 600},
+            }
             self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "pid", "pid": pid}
 
@@ -1013,6 +1028,12 @@ class MacOSAccessibilityBackend:
             # Resolve pid via osascript
             self._connected_pid = self._pid_for_bundle(bundle_id)
             self._connected_app = app_name or bundle_id
+            self._connected_window_snapshot = {
+                "pid": self._connected_pid,
+                "title": app_name or bundle_id or "",
+                "owner": app_name or bundle_id or "",
+                "rectangle": {"x": 0, "y": 0, "w": 800, "h": 600},
+            }
             self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "bundle_id", "pid": self._connected_pid}
 
@@ -1047,6 +1068,12 @@ class MacOSAccessibilityBackend:
                     return {"ok": False, "error": f"connect: no visible window for {process_name}"}
             self._connected_pid = r["windows"][0]["pid"]
             self._connected_app = process_name
+            self._connected_window_snapshot = {
+                "pid": self._connected_pid,
+                "title": r["windows"][0].get("window_title", ""),
+                "owner": r["windows"][0].get("app_name", process_name),
+                "rectangle": r["windows"][0].get("rectangle", {"x": 0, "y": 0, "w": 800, "h": 600}),
+            }
             self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "process_name", "pid": self._connected_pid}
 
@@ -1056,6 +1083,12 @@ class MacOSAccessibilityBackend:
                 return r
             self._connected_pid = self._pid_for_app(app_name)
             self._connected_app = app_name
+            self._connected_window_snapshot = {
+                "pid": self._connected_pid,
+                "title": app_name,
+                "owner": app_name,
+                "rectangle": {"x": 0, "y": 0, "w": 800, "h": 600},
+            }
             self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "app_name", "pid": self._connected_pid}
 
@@ -1066,7 +1099,12 @@ class MacOSAccessibilityBackend:
             w = r["windows"][0]
             self._connected_pid = w["pid"]
             self._connected_app = w["app_name"]
-            self._connected_app_instance = _MacOSConnectedApp(self)
+            self._connected_window_snapshot = {
+                "pid": w["pid"],
+                "title": w.get("window_title", title_re or ""),
+                "owner": w.get("app_name", ""),
+                "rectangle": w.get("rectangle", {"x": 0, "y": 0, "w": 800, "h": 600}),
+            }
             self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "title_re", "pid": self._connected_pid}
 
