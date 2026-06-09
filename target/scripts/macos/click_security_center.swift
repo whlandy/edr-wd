@@ -137,8 +137,8 @@ func rectFromElement(_ el: AXUIElement) -> (CGPoint, CGSize)? {
           CFGetTypeID(sizeRef) == AXValueGetTypeID() else { return nil }
     var pos = CGPoint.zero
     var size = CGSize.zero
-    guard AXValueGetValue(posRef!, .cgPoint, &pos),
-          AXValueGetValue(sizeRef!, .cgSize, &size) else { return nil }
+    guard AXValueGetValue(posRef! as! AXValue, .cgPoint, &pos),
+          AXValueGetValue(sizeRef! as! AXValue, .cgSize, &size) else { return nil }
     return (pos, size)
 }
 
