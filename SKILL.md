@@ -233,6 +233,10 @@ The smoke client is backend-aware:
   is the pytest E2E window-pair check. Both activate native
   `/Applications/HiSecEndpoint.app` through the macOS backend and verify the
   `HiSecEndpointAgent` main window plus the `EDRClient` window are visible.
+- Pytest E2E files are platform-guarded by backend. Running
+  `python -m pytest test_case/test_e2e -v` on a macOS target should execute
+  `test_macos_hisec_workflow.py` and skip the Windows-only
+  `test_edr_full_workflow.py`, not fail it.
 
 Full profile-dispatched tests:
 
@@ -240,7 +244,8 @@ Full profile-dispatched tests:
 python test_case/run_tests.py --target win-dev
 python test_case/run_tests.py --target mac-dev
 python test_case/run_tests.py --target mac-dev --profile macos_hisec
-python -m pytest test_case/test_e2e/test_macos_hisec_workflow.py
+EDR_WD_TARGET=mac-dev python -m pytest test_case/test_e2e -v
+EDR_WD_TARGET=mac-dev python -m pytest test_case/test_e2e/test_macos_hisec_workflow.py
 ```
 
 If you need low-level config validation:

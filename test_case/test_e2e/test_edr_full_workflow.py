@@ -1,5 +1,5 @@
 """
-test_edr_full_workflow.py — 端到端测试：EDR 窗口激活 → 连接 → 枚举控件 → 点击
+test_edr_full_workflow.py — Windows HiSec EDR 端到端测试。
 
 测试流程：
   1. is_window_open(process_name="EDRClient.exe")   # 检查是否已打开
@@ -17,6 +17,10 @@ test_edr_full_workflow.py — 端到端测试：EDR 窗口激活 → 连接 → 
 前置条件：
   - Windows 目标机已有已登录的本地/RDP 桌面会话
   - 已运行 bash agent/edr-wd.sh up（远程启动 Windows server + 建立 SSH 隧道）
+
+注意：
+  这个文件是 Windows-only。macOS HiSec E2E 在
+  test_case/test_e2e/test_macos_hisec_workflow.py。
 """
 
 import pytest
@@ -34,7 +38,7 @@ def client():
 @pytest.fixture(scope="module")
 def tools(client):
     """验证所需工具均已注册"""
-    result = client.call_tool("tools/list")
+    result = client.tools_list()
     assert "result" in result
     tool_names = [t["name"] for t in result["result"].get("tools", [])]
     required = [
@@ -48,11 +52,21 @@ def tools(client):
     return tool_names
 
 
+@pytest.fixture(scope="module")
+def windows_backend(client, tools):
+    """Skip unless the active MCP server is the Windows pywinauto backend."""
+    status = client.call_tool("status", {})
+    backend = status.get("backend_kind") or status.get("backend")
+    if backend != "windows_pywinauto":
+        pytest.skip(f"Windows HiSec E2E requires windows_pywinauto, got {backend!r}")
+    return status
+
+
 @pytest.mark.skipif(not is_server_online(), reason="MCP server not reachable")
 class TestEdrWorkflow:
     """完整 EDR GUI 自动化工作流"""
 
-    def test_0_check_edr_already_open(self, client, tools):
+    def test_0_check_edr_already_open(self, client, windows_backend):
         """Step 0: 检查 EDR 窗口是否已打开"""
         result = client.call_tool("is_window_open", {"process_name": "EDRClient.exe"})
         print(f"\n[Step0 is_window_open] found={result.get('found')}, count={result.get('count')}")
@@ -60,7 +74,7 @@ class TestEdrWorkflow:
         # 不强制要求已打开，只记录状态
         assert result.get("ok") is True
 
-    def test_1_open_hisec_agent_entry_window(self, client, tools):
+    def test_1_open_hisec_agent_entry_window(self, client, windows_backend):
         """Step 1: 通过 MCP PowerShell 打开 HisecEndpointAgent 入口窗口"""
         command = (
             "$p = 'C:\\Program Files\\HiSec-Endpoint\\core\\safra\\HisecEndpointAgent.exe'; "
@@ -72,7 +86,7 @@ class TestEdrWorkflow:
         print(f"\n[Step1 open HisecEndpointAgent] {result}")
         assert result.get("ok") is True, f"open HisecEndpointAgent failed: {result}"
 
-    def test_2_wait_hisec_agent_window(self, client, tools):
+    def test_2_wait_hisec_agent_window(self, client, windows_backend):
         """Step 2: 用窗口检测确认 HisecEndpointAgent 已打开在桌面上"""
         result = client.call_tool("wait_window", {
             "process_name": "HisecEndpointAgent.exe",
@@ -83,14 +97,14 @@ class TestEdrWorkflow:
         assert result.get("ok") is not False, f"wait_window failed: {result}"
         assert result.get("found") is True, "HisecEndpointAgent.exe desktop window not found"
 
-    def test_3_activate_edr(self, client, tools):
+    def test_3_activate_edr(self, client, windows_backend):
         """Step 1: 激活 EDR（启动或唤醒窗口）"""
         result = client.call_tool("activate_edr", {"wait": True, "timeout": 15.0})
         print(f"\n[Step3 activate_edr] {result}")
         assert result.get("ok") is True, f"activate_edr failed: {result}"
         # 具体窗口是否出现在桌面上由后续 wait_window/is_window_open 验证。
 
-    def test_4_wait_edr_client_window(self, client, tools):
+    def test_4_wait_edr_client_window(self, client, windows_backend):
         """Step 4: 等待 EDRClient 窗口出现"""
         result = client.call_tool("wait_window", {
             "process_name": "EDRClient.exe",
@@ -106,7 +120,7 @@ class TestEdrWorkflow:
               f"handle={wins[0].get('handle')}, "
               f"rect={wins[0].get('rectangle')}")
 
-    def test_5_verify_hisec_and_edr_windows_visible(self, client, tools):
+    def test_5_verify_hisec_and_edr_windows_visible(self, client, windows_backend):
         """Step 5: 用窗口检测确认入口窗口和目标窗口都在桌面上"""
         hisec = client.call_tool("is_window_open", {"process_name": "HisecEndpointAgent.exe"})
         edr = client.call_tool("is_window_open", {"process_name": "EDRClient.exe"})
@@ -119,13 +133,13 @@ class TestEdrWorkflow:
             f"EDRClient.exe desktop window not found: {edr}"
         )
 
-    def test_6_connect(self, client, tools):
+    def test_6_connect(self, client, windows_backend):
         """Step 3: 连接到 EDR 窗口"""
         result = client.call_tool("connect", {"process_name": "EDRClient.exe", "timeout": 10.0})
         print(f"\n[Step6 connect] {result}")
         assert result.get("ok") is True, f"connect failed: {result}"
 
-    def test_7_dump_tree(self, client, tools):
+    def test_7_dump_tree(self, client, windows_backend):
         """Step 4: 导出控件树"""
         result = client.call_tool("dump_tree", {"max_depth": 10})
         print(f"\n[Step7 dump_tree] ok={result.get('ok')}")
@@ -140,13 +154,13 @@ class TestEdrWorkflow:
         # 断言有控件（EDR 窗口不可能控件树为空）
         assert len(controls) > 0, "EDR window control tree is empty"
 
-    def test_8_screenshot(self, client, tools):
+    def test_8_screenshot(self, client, windows_backend):
         """Step 5: 截图"""
         result = client.call_tool("screenshot", {})
         print(f"\n[Step8 screenshot] ok={result.get('ok')}, has_data={'image' in result or 'path' in result}")
         assert result.get("ok") is True, f"screenshot failed: {result}"
 
-    def test_9_restore_edr(self, client, tools):
+    def test_9_restore_edr(self, client, windows_backend):
         """Step 6: 还原 EDR 窗口（如最小化）"""
         result = client.call_tool("restore_edr", {})
         print(f"\n[Step9 restore_edr] {result}")
@@ -154,7 +168,7 @@ class TestEdrWorkflow:
         # 只检查返回结构，不强制要求成功（connect 失败时这是预期行为）
         assert "ok" in result
 
-    def test_10_verify_still_open(self, client, tools):
+    def test_10_verify_still_open(self, client, windows_backend):
         """Step 7: 操作后再次验证窗口仍打开"""
         result = client.call_tool("is_window_open", {"process_name": "EDRClient.exe"})
         print(f"\n[Step10 is_window_open after ops] {result}")
