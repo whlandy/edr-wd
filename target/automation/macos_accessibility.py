@@ -55,7 +55,56 @@ def _run_osascript(script: str, timeout: float = 10.0) -> tuple[int, str]:
     return _run(["osascript", "-e", script], timeout=timeout)
 
 
-def _list_windows_cg() -> list[dict[str, Any]]:
+def _hisec_main_window_open() -> tuple[bool, str]:
+    """Check HiSecEndpointAgent main window via System Events. Returns (found, title)."""
+    rc, out = _run_osascript(
+        'tell application "System Events" to get name of every window of process "HiSecEndpointAgent"',
+        timeout=5,
+    )
+    if rc == 0:
+        for line in out.splitlines():
+            if "华为智能终端安全系统" in line:
+                return True, line.strip()
+    return False, ""
+
+
+def _hisec_client_window_open() -> tuple[bool, str]:
+    """Check EDRClient/HiSecEndpoint sub-window via System Events. Returns (found, title)."""
+    # Try EDRClient process first
+    for proc in ("EDRClient", "HiSecEndpoint"):
+        rc, out = _run_osascript(
+            f'tell application "System Events" to get name of every window of process "{proc}"',
+            timeout=5,
+        )
+        if rc == 0:
+            for line in out.splitlines():
+                if "华为HiSec Endpoint" in line or "HiSec" in line or "华为" in line:
+                    return True, line.strip()
+    return False, ""
+
+
+def _is_hisec_related(title_re: Optional[str], process_name: Optional[str]) -> bool:
+    """Return True if this query is for HiSecEndpoint/EDRClient windows."""
+    import re as _re
+    hisec_keywords = [
+        "华为智能终端安全系统",
+        "华为HiSec Endpoint",
+        "HiSecEndpointAgent",
+        "HiSecEndpoint",
+        "EDRClient",
+    ]
+    title_lower = (title_re or "").lower()
+    proc_lower = (process_name or "").lower()
+    if any(k.lower() in title_lower for k in hisec_keywords):
+        return True
+    if any(k.lower() in proc_lower for k in hisec_keywords):
+        return True
+    # Regex patterns that match HiSec windows
+    hisec_patterns = ["华为.*安全", "华为.*HiSec", "HiSec.*Endpoint", "EDRClient"]
+    for p in hisec_patterns:
+        if title_re and _re.search(p, title_re, _re.IGNORECASE):
+            return True
+    return False
     """
     Enumerate on-screen windows through CGWindowList.
 
@@ -244,6 +293,34 @@ class MacOSAccessibilityBackend:
         if not process_name and not title_re:
             return {"ok": False, "error": "process_name or title_re is required"}
 
+        # HiSec-related queries: use dedicated detection that works on this Mac.
+        # activate_edr proves these System Events queries succeed; reuse them.
+        if _is_hisec_related(title_re, process_name):
+            if title_re and re.search(r"华为智能终端安全系统", title_re):
+                found, win_title = _hisec_main_window_open()
+                return {"ok": True, "found": found,
+                        "windows": [{"app_name": "HiSecEndpointAgent",
+                                     "window_title": win_title}] if found else [],
+                        "count": 1 if found else 0}
+            if title_re and re.search(r"华为HiSec Endpoint", title_re):
+                found, win_title = _hisec_client_window_open()
+                return {"ok": True, "found": found,
+                        "windows": [{"app_name": "EDRClient",
+                                     "window_title": win_title}] if found else [],
+                        "count": 1 if found else 0}
+            if process_name and ("hisec" in process_name.lower() or
+                                  "edrclient" in process_name.lower()):
+                # Generic process query for HiSec apps — try both windows
+                main_found, main_title = _hisec_main_window_open()
+                client_found, client_title = _hisec_client_window_open()
+                wins = []
+                if main_found:
+                    wins.append({"app_name": "HiSecEndpointAgent", "window_title": main_title})
+                if client_found:
+                    wins.append({"app_name": "EDRClient", "window_title": client_title})
+                return {"ok": True, "found": main_found or client_found,
+                        "windows": wins, "count": len(wins)}
+
         listed = self.list_windows()
         if not listed.get("ok"):
             return listed
@@ -258,14 +335,6 @@ class MacOSAccessibilityBackend:
             if pat and not pat.search(w.get("window_title") or ""):
                 continue
             matches.append(w)
-
-        if not matches:
-            for w in _list_windows_cg():
-                if proc_lc and proc_lc not in w["app_name"].lower():
-                    continue
-                if pat and not pat.search(w.get("window_title") or ""):
-                    continue
-                matches.append(w)
 
         return {
             "ok": True,
