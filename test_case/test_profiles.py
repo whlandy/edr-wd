@@ -35,7 +35,8 @@ from .run_macos_hisec import run_macos_hisec_tests  # noqa: F401
 
 
 # Registry: profile name -> runner function.
-# Each runner signature: (client, verbose) -> (passed, failed, errors_list, ok_bool)
+# Each runner signature:
+#   (client, verbose) -> (passed, failed, skipped, errors_list, ok_bool)
 PROFILE_RUNNERS: dict[str, Callable] = {
     "windows_hisec": run_windows_hisec_tests,
     "macos_generic": run_macos_generic_tests,

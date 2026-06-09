@@ -55,148 +55,6 @@ def _run_osascript(script: str, timeout: float = 10.0) -> tuple[int, str]:
     return _run(["osascript", "-e", script], timeout=timeout)
 
 
-# ── _MacOSConnectedApp: pywinauto-like interface for restore_edr ─────────────
-
-class _MacOSConnectedApp:
-    """
-    Provides the minimal pywinauto-like interface that restore_edr (server.py)
-    expects: .windows(), .is_minimized(), .restore(), .wait_for_not_minimized().
-    Works via CGWindowList and pgrep — no pywinauto dependency.
-    """
-
-    def __init__(self, backend: "MacOSAccessibilityBackend"):
-        self._backend = backend
-
-    def _cg_windows_for_app(self) -> list[dict]:
-        """Return CGWindowList entries for the connected app with bounds."""
-        app_name = getattr(self._backend, "_connected_app", None) or ""
-        opts = 17  # kCGWindowListOptionAll + excludeDesktopElements
-        try:
-            import subprocess
-            script = (
-                'use framework "CoreGraphics"\n'
-                'set wList to CGWindowListCopyWindowInfo(' + str(opts) + ', 0)\n'
-                'set out to ""\n'
-                'repeat with w in wList\n'
-                '    try\n'
-                '        set owner to "" & (kCGWindowOwnerName of w as string)\n'
-                '        if owner contains "' + app_name + '" then\n'
-                '            try\n'
-                '                set wName to "" & (kCGWindowName of w as string)\n'
-                '            on error\n'
-                '                set wName to ""\n'
-                '            end try\n'
-                '            set wPID to kCGWindowOwnerPID of w as string\n'
-                '            try\n'
-                '                set boundsDict to kCGWindowBounds of w\n'
-                '                set bx to x of boundsDict\n'
-                '                set by to y of boundsDict\n'
-                '                set bw to width of boundsDict\n'
-                '                set bh to height of boundsDict\n'
-                '                set out to out & wPID & "|" & wName & "|" & bx & "|" & by & "|" & bw & "|" & bh & "\n"\n'
-                '            on error\n'
-                '                set out to out & wPID & "|" & wName & "|0|0|800|600\n'
-                '            end try\n'
-                '        end if\n'
-                '    end try\n'
-                'end repeat\n'
-                'return out\n'
-            )
-            rc, out = subprocess.run(
-                ["osascript", "-e", script], capture_output=True, text=True, timeout=5
-            )
-            wins = []
-            if rc == 0:
-                for line in out.strip().split("\n"):
-                    if "|" in line:
-                        parts = line.rstrip("\n").split("|")
-                        if len(parts) >= 6:
-                            wins.append({
-                                "pid": int(parts[0]),
-                                "title": parts[1],
-                                "bounds": {
-                                    "x": float(parts[2]),
-                                    "y": float(parts[3]),
-                                    "w": float(parts[4]),
-                                    "h": float(parts[5]),
-                                }
-                            })
-            return wins
-        except Exception:
-            return []
-
-    def windows(self) -> list:
-        """Return list of proxy window objects (minimal interface)."""
-        return [_MacOSWindowProxy(w, self._backend) for w in self._cg_windows_for_app()]
-
-    def is_minimized(self) -> bool:
-        """Best-effort: check if all app windows have y >= 1 (screen visible)."""
-        wins = self._cg_windows_for_app()
-        return len(wins) == 0  # If no windows visible, consider not minimized (stub)
-
-    def restore(self) -> dict:
-        """macOS CGWindowList cannot change window state — returns no-op."""
-        return {"ok": True, "restored": False, "method": "noop", "reason": "macOS CGWindowList has no restore API"}
-
-    def wait_for_not_minimized(self, timeout: float = 5.0) -> None:
-        """Stub: CGWindowList cannot change window state; always return immediately."""
-        pass
-
-    def wait_for_minimized(self, timeout: float = 0.5) -> None:
-        """Stub."""
-        pass
-
-
-class _MacOSWindowProxy:
-    """Minimal window proxy returned by _MacOSConnectedApp.windows()."""
-
-    def __init__(self, win_info: dict, backend: "MacOSAccessibilityBackend"):
-        self._win_info = win_info
-        self._backend = backend
-
-    @property
-    def rectangle(self):
-        """
-        Return a minimal rect-like object compatible with server.py expectations:
-          r.left(), r.top(), r.width(), r.height()
-
-        Bounds are read from CGWindowList kCGWindowBounds when available.
-        If no bounds are in _win_info, returns a stub with _is_stub=True so callers
-        can distinguish real from fake data.
-        """
-        bounds = self._win_info.get("bounds") if self._win_info else None
-
-        class _Rect:
-            _is_stub = bounds is None
-
-            @property
-            def left(self): return bounds.get("x", 0) if bounds else 0
-            @property
-            def top(self): return bounds.get("y", 0) if bounds else 0
-            def width(self): return bounds.get("w", 800) if bounds else 800
-            def height(self): return bounds.get("h", 600) if bounds else 600
-
-        return _Rect()
-
-    def is_minimized(self) -> bool:
-        return False
-
-    def restore(self) -> dict:
-        """CGWindowList cannot change window state — always returns no-op."""
-        return {
-            "ok": True,
-            "restored": False,
-            "method": "noop",
-            "reason": "macOS CGWindowList has no restore API",
-        }
-
-    def wait_for_not_minimized(self, timeout: float = 5.0) -> None:
-        pass
-
-    def wait_for_minimized(self, timeout: float = 0.5) -> None:
-        pass
-
-
 # ── Backend ───────────────────────────────────────────────────────────────────
 
 class MacOSAccessibilityBackend:
@@ -395,26 +253,25 @@ class MacOSAccessibilityBackend:
         edr_widget_auto_id: Optional[str] = None,
     ) -> dict:
         """
-        macOS-specific: ensure the EDRClient GUI is visible.
+        macOS-specific: ensure HiSecEndpoint GUI is visible via direct binary invocations.
 
         Core principle: process_found cannot represent window_found.
-        The only reliable success signal is the EDRClient application window,
-        not the HiSecEndpointAgent entry window or a process hit.
+        The only reliable way to ensure the main window exists is
+        HiSecEndpointAgent cmd ui.
 
-        The target application/window is EDRClient ("华为HiSec Endpoint").
-        HiSecEndpointAgent ("华为智能终端安全系统") is only an entry window used by
-        the fallback click path.
+        Two windows must both be visible for ok=true:
+          - HiSecEndpointAgent  main window "华为智能终端安全系统"
+            via: HiSecEndpointAgent cmd ui
+          - EDRClient           sub-window "华为HiSec Endpoint"
+            via: AX click on "前往安全防护中心" inside HiSecEndpointAgent window
 
-        EDRClient is first started through
-        /Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh.
-        That script requires root privileges, so we call it with `sudo -n`:
-        it succeeds only when the server account can sudo without an interactive
-        password prompt. If that fails or does not produce the EDRClient window,
-        we open HiSecEndpointAgent and click "前往安全防护中心" — the same action a
-        human user would take.
+        EDRClient cannot be launched via direct DYLD_LIBRARY_PATH exec because it
+        requires a console-user GUI session. Instead, we trigger it by clicking
+        the "前往安全防护中心" button inside the HiSecEndpoint window — the same
+        action a human user would take.
 
         exe_path: optional path to a custom HiSecEndpointAgent binary.
-        wait:    if True, poll for the EDRClient window to appear (up to timeout).
+        wait:    if True, poll for both windows to appear (up to timeout).
         timeout: seconds to wait for process/window appearance.
         edr_widget_auto_id: not used on macOS; accepted for API symmetry.
 
@@ -424,11 +281,9 @@ class MacOSAccessibilityBackend:
         Returns:
           {
             "ok": true/false,
-            "stage": "done" / "fallback_main_window_not_found" / "client_window_not_found",
+            "stage": "done" / "main_window_not_found" / "client_window_not_found",
             "backend": "macos_accessibility",
-            "target_application": "EDRClient",
-            "entry_application": "HiSecEndpointAgent",
-            "already_open": true,  -- when EDRClient window is already visible
+            "already_open": true,  -- only when main && client windows both found
             "main": {
               "process_found": bool,
               "window_found": bool,
@@ -438,7 +293,6 @@ class MacOSAccessibilityBackend:
             },
             "client": {
               "process_found": bool,
-              "root_start_client": {"attempted": bool, "ok": bool, "error": str},
               "clicked": bool,
               "click_method": "ax_press" / "cgevent_center" / null,
               "window_found": bool,
@@ -446,8 +300,7 @@ class MacOSAccessibilityBackend:
             }
           }
 
-        ok=true only when the EDRClient window is visible. main.window_found
-        describes the fallback entry window, not the target application.
+        ok=true only when main.window_found and client.window_found are both true.
         """
         import subprocess as _subprocess
         import os as _os
@@ -455,9 +308,6 @@ class MacOSAccessibilityBackend:
         HISEC_AGENT_BIN = (
             exe_path
             or "/Applications/HiSecEndpoint.app/Contents/MacOS/safra/HiSecEndpointAgent"
-        )
-        ROOT_START_CLIENT = (
-            "/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh"
         )
         CLICK_HELPER = (
             Path(__file__).resolve().parents[1]
@@ -478,40 +328,29 @@ class MacOSAccessibilityBackend:
 
         def _edr_client_window_visible_cg() -> tuple[bool, str, str]:
             """
-            Check EDRClient window via CGWindowListCopyWindowInfo.
+            Check EDRClient window via CGWindowListCopyWindowInfo + AppKit NSWorkspace.
             Returns (found, window_title, detected_by).
             This catches Qt windows that osascript/System Events may miss.
-            
-            Uses only CoreGraphics framework (no AppKit) for broad compatibility.
-            Filters by owner == "HiSecEndpoint" (Qt app bundle name) and window
-            bounds >= 800x500 to avoid stub/offscreen windows.
             """
             script = (
+                'use framework "AppKit"\n'
                 'use framework "CoreGraphics"\n'
+                'set info to CFArrayCreateMutable(0, 0, 0)\n'
                 'set wList to CGWindowListCopyWindowInfo(17, 0)\n'
-                'set matchedTitle to ""\n'
+                'set matched to ""\n'
                 'repeat with w in wList\n'
-                '    try\n'
-                '        set owner to "" & (kCGWindowOwnerName of w as string)\n'
-                '        if owner is "HiSecEndpoint" then\n'
-                '            try\n'
-                '                set wName to "" & (kCGWindowName of w as string)\n'
-                '            on error\n'
-                '                set wName to ""\n'
-                '            end try\n'
-                '            if wName contains "HiSec" or wName contains "华为" or wName contains "Endpoint" then\n'
-                '                set matchedTitle to wName\n'
-                '                exit repeat\n'
-                '            end if\n'
-                '        end if\n'
-                '    end try\n'
+                '    set owner to "" & (kCGWindowOwnerName of w as string)\n'
+                '    set wName to "" & (kCGWindowName of w as string)\n'
+                '    if (owner contains "EDRClient" or owner contains "HiSec" or owner contains "华为") and (wName contains "HiSec" or wName contains "华为" or wName contains "Endpoint") then\n'
+                '        set matched to wName\n'
+                '        exit repeat\n'
+                '    end if\n'
                 'end repeat\n'
-                'return matchedTitle\n'
+                'return matched\n'
             )
             rc, out = _run(["osascript", "-e", script], timeout=5)
             title = out.strip()
-            # title is "missing value" (None) when window has no name — still OK if owner matched
-            if title and title != "missing value":
+            if title != "" and title != "missing value":
                 return True, title, "cgwindowlist"
             return False, "", "cgwindowlist"
 
@@ -534,230 +373,64 @@ class MacOSAccessibilityBackend:
                 return True, title, "cgwindowlist"
             return False, "", "system_events"
 
-        def _click_security_center(method: str = "auto") -> tuple[bool, str, str, bool, dict]:
+        def _click_security_center(method: str = "auto") -> tuple[bool, str, str]:
             """
             Call the helper script with the specified click method.
             method: "auto" | "ax_press" | "cgevent_center"
-
-            Returns (clicked, click_method, error_message, client_window_found, window_bounds).
-            - clicked: True if the helper's click action succeeded
-            - click_method: the actual method used ("ax_press" or "cgevent_center")
-            - error_message: non-empty when clicked=False
-            - client_window_found: True when the EDRClient window was detected by the helper
-            - window_bounds: {"x", "y", "w", "h"} when client_window_found is True
+            Returns (clicked, click_method, error_message).
+            error_message is non-empty when clicked=False and tells WHY it failed.
             """
             rc, out = _run(["/usr/bin/swift", str(CLICK_HELPER), "--method", method], timeout=10)
-            import json as _json
-            try:
-                data = _json.loads(out.strip())
-                clicked = data.get("ok", False) and data.get("client_window_found", False)
-                click_method_out = data.get("click_method", method)
-                bounds = data.get("window_bounds", {})
-                return clicked, click_method_out, "", data.get("client_window_found", False), bounds
-            except _json.JSONDecodeError:
-                pass
-            # Fallback: old "OK <method>" plain text format
             if rc == 0 and out.startswith("OK "):
                 actual_method = out.strip().split(" ")[1]
-                return True, actual_method, "", False, {}
+                return True, actual_method, ""
+            # Failed — stderr tells us why
             err = out.strip()
             if not err:
+                # stdout may contain error text even without stderr separation
                 err = f"swift exited rc={rc}"
-            return False, "", err, False, {}
-
-        def _run_root_start_client() -> dict:
-            """
-            Try the official HiSec root launcher without prompting for a password.
-            Returns a structured result so callers can see why the fallback path
-            was used.
-            """
-            if not Path(ROOT_START_CLIENT).exists():
-                return {
-                    "attempted": False,
-                    "ok": False,
-                    "error": "root_start_client.sh not found",
-                    "path": ROOT_START_CLIENT,
-                }
-
-            rc, out = _run(["/usr/bin/sudo", "-n", ROOT_START_CLIENT], timeout=15)
-            return {
-                "attempted": True,
-                "ok": rc == 0,
-                "returncode": rc,
-                "error": "" if rc == 0 else out.strip(),
-                "path": ROOT_START_CLIENT,
-            }
-
-        def _mark_edr_client_connected() -> dict:
-            """
-            Best-effort record of the EDRClient window as the connected target.
-            This keeps later backend state aligned with the app we actually
-            activated; HiSecEndpointAgent is only a fallback entry window.
-            """
-            r = self.is_window_open(process_name="EDRClient")
-            if r.get("found") and r.get("windows"):
-                w = r["windows"][0]
-                self._connected_pid = w.get("pid")
-                self._connected_app = "EDRClient"
-                self._connected_app_instance = _MacOSConnectedApp(self)
-                return {"ok": True, "pid": self._connected_pid}
-            return {"ok": False, "error": "EDRClient window not visible via System Events"}
-
-        def _result(
-            *,
-            ok: bool,
-            stage: str,
-            already_open: bool,
-            main_window_found: bool,
-            hisec_process_found: bool,
-            cmd_ui_attempted: bool,
-            client_window_found: bool,
-            root_start_client: dict,
-            click_attempts: list,
-            successful_click_method: Optional[str],
-            click_error: str,
-            detected_window_title: str,
-            detected_by: Optional[str],
-            connected: Optional[dict] = None,
-            error: Optional[str] = None,
-        ) -> dict:
-            out = {
-                "ok": ok,
-                "stage": stage,
-                "backend": "macos_accessibility",
-                "target_application": "EDRClient",
-                "entry_application": "HiSecEndpointAgent",
-                "already_open": already_open,
-                "main": {
-                    "application": "HiSecEndpointAgent",
-                    "role": "fallback_entry_window",
-                    "process_found": hisec_process_found,
-                    "window_found": main_window_found,
-                    "window_title": "华为智能终端安全系统",
-                    "activated_by": "HiSecEndpointAgent cmd ui",
-                    "cmd_ui_attempted": cmd_ui_attempted,
-                },
-                "client": {
-                    "application": "EDRClient",
-                    "role": "target_window",
-                    "process_found": _proc_exists("EDRClient"),
-                    "root_start_client": root_start_client,
-                    "clicked": successful_click_method is not None,
-                    "click_attempts": click_attempts,
-                    "successful_click_method": successful_click_method,
-                    "click_error": click_error,
-                    "window_found": client_window_found,
-                    "window_title": detected_window_title or "华为HiSec Endpoint",
-                    "detected_by": detected_by,
-                    "connected": connected or {"ok": False},
-                },
-            }
-            if error:
-                out["error"] = error
-            return out
+            return False, "", err
 
         # Stage 1: check process existence (separate from window existence)
         hisec_process_found = _proc_exists("HiSecEndpointAgent")
+        edr_client_process_found = _proc_exists("EDRClient")
 
-        # Stage 2: check if the target EDRClient window already exists
+        # Stage 2: check if main window already exists
         main_window_found = _hisec_window_visible()
-        # Stage 1: check if EDRClient window is already visible.
-        client_window_found, detected_window_title, detected_by = _edr_client_window_visible()
+        client_window_found, _, _ = _edr_client_window_visible()
 
-        root_start_client = {
-            "attempted": False,
-            "ok": False,
-            "error": "not needed",
-            "path": ROOT_START_CLIENT,
-        }
-        click_attempts = []       # list of {method, error} per attempt
-        click_errors = []          # all errors seen (for structured return)
-        successful_click_method = None
+        # already_open means both windows are visible
+        already_open = main_window_found and client_window_found
+
+        # Stage 3: ensure main window exists (main path: HiSecEndpointAgent cmd ui)
         cmd_ui_attempted = False
-
-        # already_open means the target app window is visible.  CGWindowList
-        # can report a stale window (process killed but X window still in the
-        # list), so when the initial detection came from CGWindowList we use
-        # the helper's strict bounds check (width>=800 && height>=500) to
-        # confirm before accepting already_open=True.
-        if client_window_found and detected_by == "cgwindowlist":
-            _, _, _, helper_found, _ = _click_security_center(method="ax_press")
-            if not helper_found:
-                client_window_found = False
-                detected_window_title = ""
-                detected_by = None
-
-        already_open = client_window_found
-        if already_open:
-            connected = _mark_edr_client_connected()
-            return _result(
-                ok=True,
-                stage="done",
-                already_open=True,
-                main_window_found=main_window_found,
-                hisec_process_found=hisec_process_found,
-                cmd_ui_attempted=False,
-                client_window_found=True,
-                root_start_client=root_start_client,
-                click_attempts=click_attempts,
-                successful_click_method=None,
-                click_error="",
-                detected_window_title=detected_window_title,
-                detected_by=detected_by,
-                connected=connected,
-            )
-
-        # Stage 3: primary EDRClient path. This does not require the
-        # HiSecEndpointAgent entry window.
-        root_start_client = _run_root_start_client()
-        if root_start_client.get("ok"):
-            deadline = time.time() + min(timeout, 5.0)
-            while time.time() < deadline:
-                found, title, detection_method = _edr_client_window_visible()
-                if found:
-                    connected = _mark_edr_client_connected()
-                    return _result(
-                        ok=True,
-                        stage="done",
-                        already_open=False,
-                        main_window_found=_hisec_window_visible(),
-                        hisec_process_found=_proc_exists("HiSecEndpointAgent"),
-                        cmd_ui_attempted=False,
-                        client_window_found=True,
-                        root_start_client=root_start_client,
-                        click_attempts=click_attempts,
-                        successful_click_method=None,
-                        click_error="",
-                        detected_window_title=title,
-                        detected_by=detection_method,
-                        connected=connected,
-                    )
-                time.sleep(0.5)
-            root_start_client["error"] = (
-                "root_start_client.sh returned success, but EDRClient window "
-                "did not appear within 5s"
-            )
-
-        # Stage 4: fallback: ensure the HiSecEndpointAgent entry window exists.
         if not main_window_found:
             cmd_ui_attempted = True
             if not Path(HISEC_AGENT_BIN).exists():
-                return _result(
-                    ok=False,
-                    stage="fallback_main_window_not_found",
-                    already_open=False,
-                    main_window_found=False,
-                    hisec_process_found=hisec_process_found,
-                    cmd_ui_attempted=False,
-                    client_window_found=False,
-                    root_start_client=root_start_client,
-                    click_attempts=click_attempts,
-                    successful_click_method=None,
-                    click_error="HiSecEndpointAgent binary not found",
-                    detected_window_title="",
-                    detected_by=None,
-                    error="HiSecEndpointAgent binary not found",
-                )
+                return {
+                    "ok": False,
+                    "stage": "main_window_not_found",
+                    "backend": "macos_accessibility",
+                    "already_open": False,
+                    "error": "HiSecEndpointAgent binary not found",
+                    "main": {
+                        "process_found": hisec_process_found,
+                        "window_found": False,
+                        "window_title": "华为智能终端安全系统",
+                        "activated_by": "HiSecEndpointAgent cmd ui",
+                        "cmd_ui_attempted": False,
+                    },
+                    "client": {
+                        "process_found": edr_client_process_found,
+                        "clicked": False,
+                        "click_attempts": [],
+                        "successful_click_method": None,
+                        "click_error": "HiSecEndpointAgent binary not found",
+                        "window_found": False,
+                        "window_title": "华为HiSec Endpoint",
+                        "detected_by": None,
+                    },
+                }
 
             # Main path: HiSecEndpointAgent cmd ui (not activate_app)
             _subprocess.Popen(
@@ -778,122 +451,94 @@ class MacOSAccessibilityBackend:
                 time.sleep(0.5)
             else:
                 # Timeout: main window never appeared
-                found, title, detection_method = _edr_client_window_visible()
-                return _result(
-                    ok=False,
-                    stage="fallback_main_window_not_found",
-                    already_open=False,
-                    main_window_found=False,
-                    hisec_process_found=hisec_process_found,
-                    cmd_ui_attempted=True,
-                    client_window_found=found,
-                    root_start_client=root_start_client,
-                    click_attempts=click_attempts,
-                    successful_click_method=None,
-                    click_error="main window did not appear within timeout",
-                    detected_window_title=title,
-                    detected_by=detection_method if found else None,
-                    error="HiSecEndpointAgent fallback window did not appear within timeout",
-                )
+                return {
+                    "ok": False,
+                    "stage": "main_window_not_found",
+                    "backend": "macos_accessibility",
+                    "already_open": False,
+                    "main": {
+                        "process_found": hisec_process_found,
+                        "window_found": False,
+                        "window_title": "华为智能终端安全系统",
+                        "activated_by": "HiSecEndpointAgent cmd ui",
+                        "cmd_ui_attempted": True,
+                    },
+                    "client": {
+                        "process_found": edr_client_process_found,
+                        "clicked": False,
+                        "click_attempts": [],
+                        "successful_click_method": None,
+                        "click_error": "main window did not appear within timeout",
+                        "window_found": _edr_client_window_visible()[0],
+                        "window_title": "华为HiSec Endpoint",
+                        "detected_by": None,
+                    },
+                }
 
-        # Stage 5: fallback click from HiSecEndpointAgent to open EDRClient.
-        if not client_window_found:
-            for click_method_label in ["ax_press", "cgevent_center"]:
-                clicked, actual_method, click_err, helper_client_found, helper_bounds = _click_security_center(method=click_method_label)
-                click_attempts.append({
-                    "method": actual_method or click_method_label,
-                    "clicked": clicked,
-                    "helper_window_found": helper_client_found,
-                    "error": click_err if not clicked else "",
-                })
-                if not clicked:
-                    click_errors.append(click_err)
+        # Stage 4: main window confirmed, click security center
+        # Try ax_press first; if client window doesn't appear, fallback to cgevent_center.
+        click_attempts = []       # list of {method, error} per attempt
+        click_errors = []          # all errors seen (for structured return)
+        client_window_found = False
+        successful_click_method = None
+        detected_by = None
+        detected_window_title = ""
 
-                if helper_client_found:
-                    # The helper confirmed the EDRClient window appeared.
-                    # Record PID from pgrep — osascript cannot see Qt windows.
-                    edr_pid = None
-                    ps_rc, ps_out = _run(["pgrep", "-a", "HiSecEndpoint"], timeout=5)
-                    if ps_rc == 0:
-                        import re
-                        m = re.search(r"^\s*(\d+)", ps_out.strip())
-                        if m:
-                            edr_pid = int(m.group(1))
-                    if edr_pid:
-                        self._connected_pid = edr_pid
-                        self._connected_app = "EDRClient"
-                    self._connected_app_instance = _MacOSConnectedApp(self)
-                    client_window_found = True
-                    successful_click_method = actual_method
-                    detected_by = "swift_helper"
-                    detected_window_title = "华为HiSec Endpoint"
-                    break
-                elif clicked:
-                    # Click succeeded but window detection missed it — poll briefly
-                    deadline = time.time() + 2.0
-                    while time.time() < deadline:
-                        found, title, detection_method = _edr_client_window_visible()
-                        if found:
-                            client_window_found = True
-                            successful_click_method = actual_method
-                            detected_by = detection_method
-                            detected_window_title = title
-                            break
-                        time.sleep(0.3)
+        for click_method_label in ["ax_press", "cgevent_center"]:
+            clicked, actual_method, click_err = _click_security_center(method=click_method_label)
+            click_attempts.append({
+                "method": actual_method or click_method_label,
+                "clicked": clicked,
+                "error": click_err if not clicked else "",
+            })
+            if not clicked:
+                click_errors.append(click_err)
 
-                if client_window_found:
-                    break  # Success — don't try second click method
+            if clicked:
+                # Poll for EDRClient window to appear (up to 5s per attempt)
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    found, title, detection_method = _edr_client_window_visible()
+                    if found:
+                        client_window_found = True
+                        successful_click_method = actual_method
+                        detected_by = detection_method
+                        detected_window_title = title
+                        break
+                    time.sleep(0.5)
 
-        ok = client_window_found
+            if client_window_found:
+                break  # Success — don't try second click method
+
+        ok = main_window_found and client_window_found
         stage = "done" if ok else "client_window_not_found"
 
-        # Final activation error: prefer click helper errors, otherwise report
-        # why the root_start_client path did not produce a visible window.
-        final_click_error = click_errors[-1] if click_errors else root_start_client.get("error", "")
+        # Final click error: the most recent failure reason, for diagnostics
+        final_click_error = click_errors[-1] if click_errors else ""
 
-        connected = _mark_edr_client_connected() if client_window_found else {"ok": False}
-
-        # ── P0 enhanced diagnostics: snapshot state at failure time ──
-        # These fields are only populated when the E2E fails so the caller
-        # can see exactly why client_window_not_found was reached.
-        diagnostics: dict[str, Any] = {}
-        if not ok:
-            # 1. EDRClient process state
-            edr_proc_rc, edr_proc_out = _run(["pgrep", "-a", "EDRClient"], timeout=5)
-            diagnostics["edrclient_process"] = {
-                "running": edr_proc_rc == 0,
-                "ps_line": edr_proc_out.strip() or None,
-            }
-            # 2. Full window list at failure time (cross-check what was visible)
-            lw = self.list_windows()
-            diagnostics["windows_at_failure"] = lw.get("windows", []) if lw.get("ok") else lw
-            # 3. CGWindowList EDRClient check (may catch windows osascript misses)
-            cg_found, cg_title, _ = _edr_client_window_visible_cg()
-            diagnostics["cgwindowlist_edrclient"] = {
-                "found": cg_found,
-                "title": cg_title or None,
-            }
-
-        ret = _result(
-            ok=ok,
-            stage=stage,
-            already_open=False,
-            main_window_found=main_window_found,
-            hisec_process_found=hisec_process_found,
-            cmd_ui_attempted=cmd_ui_attempted,
-            client_window_found=client_window_found,
-            root_start_client=root_start_client,
-            click_attempts=click_attempts,
-            successful_click_method=successful_click_method,
-            click_error=final_click_error,
-            detected_window_title=detected_window_title,
-            detected_by=detected_by,
-            connected=connected,
-            error=None if ok else final_click_error,
-        )
-        if diagnostics:
-            ret["diagnostics"] = diagnostics
-        return ret
+        return {
+            "ok": ok,
+            "stage": stage,
+            "backend": "macos_accessibility",
+            "already_open": already_open,
+            "main": {
+                "process_found": hisec_process_found,
+                "window_found": main_window_found,
+                "window_title": "华为智能终端安全系统",
+                "activated_by": "HiSecEndpointAgent cmd ui",
+                "cmd_ui_attempted": cmd_ui_attempted,
+            },
+            "client": {
+                "process_found": edr_client_process_found,
+                "clicked": successful_click_method is not None,
+                "click_attempts": click_attempts,
+                "successful_click_method": successful_click_method,
+                "click_error": final_click_error,
+                "window_found": client_window_found,
+                "window_title": detected_window_title or "华为HiSec Endpoint",
+                "detected_by": detected_by,
+            },
+        }
 
     def click_at(self, x: int, y: int) -> dict:
         """
@@ -985,7 +630,6 @@ class MacOSAccessibilityBackend:
         if pid:
             self._connected_pid = pid
             self._connected_app = app_name or process_name
-            self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "pid", "pid": pid}
 
         if bundle_id:
@@ -995,7 +639,6 @@ class MacOSAccessibilityBackend:
             # Resolve pid via osascript
             self._connected_pid = self._pid_for_bundle(bundle_id)
             self._connected_app = app_name or bundle_id
-            self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "bundle_id", "pid": self._connected_pid}
 
         if process_name:
@@ -1008,18 +651,11 @@ class MacOSAccessibilityBackend:
                     # Re-check after activate
                     r = self.is_window_open(process_name=process_name)
                     if not r.get("found"):
-                        # Fallback: use _connected_pid if we already connected to this process via activate_edr
-                        if hasattr(self, "_connected_pid") and self._connected_pid and                            self._connected_app and process_name.lower() in self._connected_app.lower():
-                            return {"ok": True, "matched": "process_name", "pid": self._connected_pid}
                         return {"ok": False, "error": f"connect: no visible window for {process_name} after activate"}
                 else:
-                    # Fallback: use _connected_pid if we already connected to this process via activate_edr
-                    if hasattr(self, "_connected_pid") and self._connected_pid and                        self._connected_app and process_name.lower() in self._connected_app.lower():
-                        return {"ok": True, "matched": "process_name", "pid": self._connected_pid}
                     return {"ok": False, "error": f"connect: no visible window for {process_name}"}
             self._connected_pid = r["windows"][0]["pid"]
             self._connected_app = process_name
-            self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "process_name", "pid": self._connected_pid}
 
         if app_name:
@@ -1028,7 +664,6 @@ class MacOSAccessibilityBackend:
                 return r
             self._connected_pid = self._pid_for_app(app_name)
             self._connected_app = app_name
-            self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "app_name", "pid": self._connected_pid}
 
         if title_re:
@@ -1038,7 +673,6 @@ class MacOSAccessibilityBackend:
             w = r["windows"][0]
             self._connected_pid = w["pid"]
             self._connected_app = w["app_name"]
-            self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "title_re", "pid": self._connected_pid}
 
         return {"ok": False, "error": "connect: must specify pid, bundle_id, process_name, app_name, or title_re"}
@@ -1139,8 +773,6 @@ class MacOSAccessibilityBackend:
 
     @property
     def connected_app(self):
-        if hasattr(self, "_connected_app_instance"):
-            return self._connected_app_instance
         return getattr(self, "_connected_app", None)
 
     @property

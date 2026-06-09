@@ -22,6 +22,7 @@
 #   EDR_WD_PYTHON              — Python interpreter (default: /opt/homebrew/bin/python3)
 #   EDR_WD_MCP_PORT           — MCP HTTP port (default: 8765)
 #   EDR_WD_MCP_HOST           — MCP HTTP bind host (default: 0.0.0.0)
+#   EDR_WD_AUTOMATION_BACKEND — automation backend (default: macos_accessibility)
 #   EDR_WD_TARGET_DIR         — Override target root
 #   EDR_WD_PIDFILE            — Override PID file path
 #
@@ -40,6 +41,7 @@ TARGET_DIR="${EDR_WD_TARGET_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 PYTHON="${EDR_WD_PYTHON:-/opt/homebrew/bin/python3}"
 PORT="${EDR_WD_MCP_PORT:-8765}"
 HOST="${EDR_WD_MCP_HOST:-0.0.0.0}"
+AUTOMATION_BACKEND="${EDR_WD_AUTOMATION_BACKEND:-macos_accessibility}"
 PIDFILE="${EDR_WD_PIDFILE:-${TARGET_DIR}/logs/server.pid}"
 
 LOG_DIR="${TARGET_DIR}/logs"
@@ -126,6 +128,6 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start_server.sh: launching ${PYTHON} server
 # exec so launchd sees python as the child. launchd tracks the
 # immediate child's lifetime for KeepAlive purposes.
 exec env \
-  EDR_WD_ENABLE_POWERSHELL=1 \
+  EDR_WD_ENABLE_POWERSHELL=1 EDR_WD_AUTOMATION_BACKEND="${AUTOMATION_BACKEND}" \
   "${PYTHON}" server.py --http --host "${HOST}" --port "${PORT}" \
   >> "${LOG_DIR}/server.log" 2>&1

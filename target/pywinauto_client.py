@@ -11,10 +11,9 @@ import base64
 import io
 import logging
 import os
-import ntpath
 import subprocess
 import time
-from typing import Optional, Tuple
+from typing import Optional
 
 import psutil
 from pywinauto import Application, timings
@@ -24,7 +23,6 @@ logger = logging.getLogger("edr_wd.pywinauto_client")
 
 # Default EDR executable path (can be overridden via EDR_WD_EDR_EXE env var)
 DEFAULT_EDR_EXE = r"C:\Program Files\HiSec-Endpoint\core\safra\HisecEndpointAgent.exe"
-DEFAULT_EDR_CLIENT_EXE = r"C:\Program Files\HiSec-Endpoint\core\EDRClient.exe"
 
 
 class WindowsGUI:
@@ -283,19 +281,16 @@ class WindowsGUI:
                      timeout: float = 15.0,
                      edr_widget_auto_id: str = None) -> dict:
         """
-        Activate EDR GUI: launch EDRClient directly from the EDR core
-        directory, then optionally wait for and connect EDRClient. If direct
-        startup fails, fall back to connecting HisecEndpointAgent and clicking
-        edrWidget.
+        Activate EDR GUI: connect HisecEndpointAgent main window, click edrWidget
+        to trigger EDRClient popup, then optionally wait for and connect EDRClient.
 
         Flow:
           1. If EDRClient already open → return immediately (already_open=True).
-          2. Primary path: cd EDR core dir; EDRClient.exe 17 --show.
-          3. Wait for EDRClient window; connect it when wait=True.
-          4. Fallback path: launch/connect HisecEndpointAgent cmd ui.
-          5. Click edrWidget (parent of "前往安全防护中心" link).
-          6. Wait for EDRClient window to appear.
-          7. Connect EDRClient (if wait=True).
+          2. If HisecEndpointAgent not open → launch via exe_path + "cmd ui".
+          3. Connect HisecEndpointAgent main window.
+          4. Click edrWidget (parent of "前往安全防护中心" link).
+          5. Wait for EDRClient window to appear.
+          6. Connect EDRClient (if wait=True).
 
         Args:
             exe_path: path to HisecEndpointAgent.exe.
@@ -305,8 +300,6 @@ class WindowsGUI:
                 Defaults to the known EDR path.
         """
         exe = exe_path or os.environ.get("EDR_WD_EDR_EXE", DEFAULT_EDR_EXE)
-        edr_client_exe = os.environ.get("EDR_WD_EDR_CLIENT_EXE", DEFAULT_EDR_CLIENT_EXE)
-        edr_core_dir = os.path.dirname(edr_client_exe) or os.path.dirname(os.path.dirname(exe))
 
         # Default automation_id for the edrWidget GroupBox (card-button parent
         # of the "前往安全防护中心" Static label). This path is stable for
@@ -320,80 +313,18 @@ class WindowsGUI:
         # ── Step 1: EDRClient already open? ─────────────────────────────
         edr_client = self.is_window_open(process_name="EDRClient.exe")
         if edr_client.get("found"):
-            conn_edr = self.connect_by_process("EDRClient.exe", timeout=10) if wait else {"ok": False}
+            # NOTE: do NOT auto-connect to EDRClient here — callers expect to
+            # stay on HisecEndpointAgent until they explicitly connect it.
             return {
                 "ok": True,
                 "already_open": True,
-                "successful_method": "already_open",
                 "target": "EDRClient.exe",
-                "target_application": "EDRClient.exe",
-                "entry_application": "HisecEndpointAgent.exe",
-                "note": "EDRClient already running",
-                "edr_client_connected": conn_edr.get("ok", False),
+                "note": "EDRClient already running; connect to HisecEndpointAgent first, "
+                        "then click edrWidget to trigger popup, then connect EDRClient",
                 "windows": edr_client["windows"],
             }
 
-        # ── Step 2: primary path: cd core; EDRClient.exe 17 --show ───────
-        direct_start = {
-            "attempted": True,
-            "ok": False,
-            "path": edr_client_exe,
-            "cwd": edr_core_dir,
-            "args": ["17", "--show"],
-            "error": "",
-        }
-        try:
-            if not os.path.exists(edr_client_exe):
-                direct_start["error"] = "EDRClient.exe not found"
-            else:
-                subprocess.Popen(
-                    [edr_client_exe, "17", "--show"],
-                    cwd=edr_core_dir,
-                )
-                direct_start["ok"] = True
-        except Exception as e:
-            logger.exception("activate_edr: failed to launch EDRClient directly")
-            direct_start["error"] = str(e)
-
-        if direct_start["ok"]:
-            if not wait:
-                # wait=False: fire-and-forget. Popen succeeded but we have no
-                # idea if the window is up. Tell the caller we didn't verify.
-                return {
-                    "ok": True,
-                    "already_open": False,
-                    "successful_method": "edrclient_show",
-                    "activated_by": "EDRClient.exe 17 --show",
-                    "target_application": "EDRClient.exe",
-                    "entry_application": "HisecEndpointAgent.exe",
-                    "direct_start": direct_start,
-                    "window_verified": False,
-                }
-
-            edr_client = self.wait_window(
-                process_name="EDRClient.exe", timeout=timeout, interval=0.5
-            )
-            if edr_client.get("found"):
-                conn_edr = self.connect_by_process("EDRClient.exe", timeout=10)
-                return {
-                    "ok": True,
-                    "already_open": False,
-                    "successful_method": "edrclient_show",
-                    "activated_by": "EDRClient.exe 17 --show",
-                    "target_application": "EDRClient.exe",
-                    "entry_application": "HisecEndpointAgent.exe",
-                    "direct_start": direct_start,
-                    "edr_client_connected": conn_edr.get("ok", False),
-                    "edr_client": edr_client,
-                    "edr_client_exe": edr_client_exe,
-                    "edr_core_dir": edr_core_dir,
-                }
-            direct_start["error"] = (
-                "EDRClient.exe 17 --show returned no immediate error, "
-                "but EDRClient.exe window did not appear"
-            )
-
-        # ── Step 3: fallback: HisecEndpointAgent already open? ───────────
+        # ── Step 2: HisecEndpointAgent already open? ────────────────────
         hisec_win = self.is_window_open(process_name="HisecEndpointAgent.exe")
         if not hisec_win.get("found"):
             # Not open → launch it
@@ -404,15 +335,7 @@ class WindowsGUI:
                 return {"ok": False, "error": f"Failed to launch: {e}"}
 
             if not wait:
-                return {
-                    "ok": True,
-                    "already_open": False,
-                    "activated_by": "HisecEndpointAgent.exe cmd ui",
-                    "target_application": "EDRClient.exe",
-                    "entry_application": "HisecEndpointAgent.exe",
-                    "direct_start": direct_start,
-                    "exe_path": exe,
-                }
+                return {"ok": True, "already_open": False, "exe_path": exe}
 
             # Wait for HisecEndpointAgent window to appear
             hisec_win = self.wait_window(
@@ -422,20 +345,15 @@ class WindowsGUI:
                 return {
                     "ok": False,
                     "error": "HisecEndpointAgent.exe window did not appear",
-                    "direct_start": direct_start,
                     "exe_path": exe,
                 }
 
-        # ── Step 4: Connect HisecEndpointAgent ───────────────────────────
+        # ── Step 3: Connect HisecEndpointAgent ───────────────────────────
         conn = self.connect_by_process("HisecEndpointAgent.exe", timeout=10)
         if not conn.get("ok"):
-            return {
-                "ok": False,
-                "error": f"Cannot connect to HisecEndpointAgent: {conn.get('error')}",
-                "direct_start": direct_start,
-            }
+            return {"ok": False, "error": f"Cannot connect to HisecEndpointAgent: {conn.get('error')}"}
 
-        # ── Step 5: Click edrWidget GroupBox to trigger EDRClient ───────
+        # ── Step 4: Click edrWidget GroupBox to trigger EDRClient ───────
         click_result = self.click(automation_id=edr_widget_auto_id)
         if not click_result.get("ok"):
             logger.warning("activate_edr: click edrWidget failed: %s", click_result.get("error"))
@@ -449,12 +367,9 @@ class WindowsGUI:
                 "ok": False,
                 "error": "EDRClient.exe window did not appear after clicking edrWidget",
                 "stage": "post_click_wait",
-                "target_application": "EDRClient.exe",
-                "entry_application": "HisecEndpointAgent.exe",
                 "click_ok": click_result.get("ok", False),
                 "edr_client_found": False,
                 "hisec_connected": True,
-                "direct_start": direct_start,
                 "exe_path": exe,
             }
 
@@ -462,12 +377,7 @@ class WindowsGUI:
             return {
                 "ok": True,
                 "already_open": False,
-                "successful_method": "hisec_agent_entry_click",
                 "edr_client_found": True,
-                "activated_by": "HisecEndpointAgent edrWidget fallback",
-                "target_application": "EDRClient.exe",
-                "entry_application": "HisecEndpointAgent.exe",
-                "direct_start": direct_start,
                 "exe_path": exe,
             }
 
@@ -476,11 +386,6 @@ class WindowsGUI:
         return {
             "ok": True,
             "already_open": False,
-            "successful_method": "hisec_agent_entry_click",
-            "activated_by": "HisecEndpointAgent edrWidget fallback",
-            "target_application": "EDRClient.exe",
-            "entry_application": "HisecEndpointAgent.exe",
-            "direct_start": direct_start,
             "hisec_connected": True,
             "edr_client_connected": conn_edr.get("ok", False),
             "edr_client": edr_client,
@@ -832,46 +737,6 @@ class WindowsGUI:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    # ------------------------------------------------------------------
-    # Screenshot path normalization
-    # ------------------------------------------------------------------
-
-    def _normalize_screenshot_path(self, path):
-        """
-        Validate and normalize a screenshot save path.
-
-        Returns (normalized_path, reason):
-          - (None, None)             → path was None
-          - (None, "empty")          → path was "" or whitespace
-          - (None, "placeholder")    → path contains < or >
-          - (None, "invalid_chars")  → path contains Windows illegal chars
-          - (None, "relative")       → path has no drive letter and is not UNC
-          - (str, None)             → valid absolute path
-        """
-        if path is None:
-            return None, None
-        raw = str(path).strip()
-        if not raw:
-            return None, "empty"
-        if "<" in raw or ">" in raw:
-            return None, "placeholder"
-        drive, tail = ntpath.splitdrive(raw)
-        # ':' only valid as drive separator (C:); reject elsewhere
-        if ":" in tail:
-            return None, "invalid_chars"
-        if any(ch in raw for ch in ['"', "|", "?", "*"]):
-            return None, "invalid_chars"
-        is_unc = raw.startswith("\\\\")
-        if not drive and not is_unc:
-            return None, "relative"
-        if not ntpath.isabs(raw):
-            return None, "relative"
-        return raw, None
-
-    # ------------------------------------------------------------------
-    # screenshot
-    # ------------------------------------------------------------------
-
     def screenshot(self, path: str = None) -> dict:
         """
         截图整个窗口。
@@ -887,36 +752,15 @@ class WindowsGUI:
             if img is None:
                 return {"ok": False, "error": "capture_as_image returned None"}
 
-            normalized_path, ignore_reason = self._normalize_screenshot_path(path)
+            if path:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                img.save(path)
+                return {"ok": True, "saved_to": path}
 
-            if normalized_path:
-                parent_dir = ntpath.dirname(normalized_path)
-                if parent_dir:
-                    os.makedirs(parent_dir, exist_ok=True)
-                img.save(normalized_path)
-                return {
-                    "ok": True,
-                    "saved_to": normalized_path,
-                    "image_b64": None,
-                    "image_base64": None,
-                    "path_ignored": False,
-                    "path_ignore_reason": None,
-                }
-
-            # Fallback: return base64
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             b64 = base64.b64encode(buf.getvalue()).decode()
-            return {
-                "ok": True,
-                "image_b64": b64,
-                "image_base64": b64,
-                "saved_to": None,
-                "width": img.width,
-                "height": img.height,
-                "path_ignored": ignore_reason is not None,
-                "path_ignore_reason": ignore_reason,
-            }
+            return {"ok": True, "image_b64": b64, "width": img.width, "height": img.height}
         except Exception as e:
             logger.exception("screenshot failed")
             return {"ok": False, "error": str(e)}
