@@ -1,5 +1,5 @@
 """
-test_macos_hisec_workflow.py — macOS HiSecEndpoint E2E window-pair test.
+test_macos_hisec_e2e.py — macOS HiSecEndpoint E2E window-pair test.
 
 This is the pytest E2E counterpart to the macos_hisec profile runner
 (`test_case/run_macos_hisec.py`). It keeps the scope narrow and stable:
@@ -8,6 +8,8 @@ This is the pytest E2E counterpart to the macos_hisec profile runner
   2. verify required tools through MCP tools/list
   3. require backend_kind/backend == macos_accessibility
   4. activate_edr(wait=True, timeout=20)
+     - main path: HiSecEndpointAgent cmd ui
+     - fallback path: Swift helper clicks "前往安全防护中心"
   5. assert HiSecEndpointAgent and EDRClient windows are visible
   6. re-check both windows through is_window_open
 
@@ -65,7 +67,7 @@ def macos_backend(client, tools):
 
 
 @pytest.mark.skipif(not is_server_online(), reason="MCP server not reachable")
-class TestMacosHisecWorkflow:
+class TestMacosHisecE2E:
     """macOS HiSecEndpoint E2E: 弹出 EDRClient + HisecEndpointAgent 窗口"""
 
     def test_0_initialize(self, client):
@@ -81,7 +83,7 @@ class TestMacosHisecWorkflow:
         assert backend == MACOS_BACKEND
 
     def test_2_activate_edr(self, client, macos_backend):
-        """Step 1: 激活 HiSecEndpoint（弹出主窗口 + EDRClient 子窗口）"""
+        """Step 2: 激活 HiSecEndpoint（弹出主窗口 + EDRClient 子窗口）"""
         result = client.call_tool("activate_edr", {"wait": True, "timeout": 20.0})
         print(f"\n[Step2 activate_edr] ok={result.get('ok')}")
         print(f"  main window_found={result.get('main', {}).get('window_found')}")
@@ -99,8 +101,9 @@ class TestMacosHisecWorkflow:
             f"EDRClient sub-window not found: {result}"
 
     def test_3_verify_hisec_agent_window(self, client, macos_backend):
-        """Step 2: 确认 HisecEndpointAgent 主窗口在桌面上"""
+        """Step 3: 确认 HisecEndpointAgent 主窗口在桌面上"""
         result = client.call_tool("is_window_open", {
+            "process_name": "HiSecEndpointAgent",
             "title_re": HISEC_MAIN_TITLE_RE,
         })
         print(f"\n[Step3 HisecEndpointAgent window] found={result.get('found')}")
@@ -110,8 +113,9 @@ class TestMacosHisecWorkflow:
             f"HisecEndpointAgent main window not on desktop: {result}"
 
     def test_4_verify_edr_client_window(self, client, macos_backend):
-        """Step 3: 确认 EDRClient 子窗口在桌面上"""
+        """Step 4: 确认 EDRClient 子窗口在桌面上"""
         result = client.call_tool("is_window_open", {
+            "process_name": "EDRClient",
             "title_re": EDR_CLIENT_TITLE_RE,
         })
         print(f"\n[Step4 EDRClient window] found={result.get('found')}")

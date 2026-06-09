@@ -1,5 +1,5 @@
 """
-test_edr_full_workflow.py — Windows HiSec EDR 端到端测试。
+test_windows_hisec_e2e.py — Windows HiSec EDR 端到端测试。
 
 测试流程：
   1. is_window_open(process_name="EDRClient.exe")   # 检查是否已打开
@@ -20,7 +20,7 @@ test_edr_full_workflow.py — Windows HiSec EDR 端到端测试。
 
 注意：
   这个文件是 Windows-only。macOS HiSec E2E 在
-  test_case/test_e2e/test_macos_hisec_workflow.py。
+  test_case/test_e2e/test_macos_hisec_e2e.py。
 """
 
 import pytest
@@ -63,7 +63,7 @@ def windows_backend(client, tools):
 
 
 @pytest.mark.skipif(not is_server_online(), reason="MCP server not reachable")
-class TestEdrWorkflow:
+class TestWindowsHisecE2E:
     """完整 EDR GUI 自动化工作流"""
 
     def test_0_check_edr_already_open(self, client, windows_backend):

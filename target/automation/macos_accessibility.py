@@ -55,6 +55,62 @@ def _run_osascript(script: str, timeout: float = 10.0) -> tuple[int, str]:
     return _run(["osascript", "-e", script], timeout=timeout)
 
 
+def _list_windows_cg() -> list[dict[str, Any]]:
+    """
+    Enumerate on-screen windows through CGWindowList.
+
+    System Events does not always expose Qt-created HiSec/EDRClient windows.
+    CGWindowList sees the compositor-level windows, which is the same fallback
+    activate_edr uses for the EDRClient window.
+    """
+    script = (
+        'use framework "CoreGraphics"\n'
+        'set wList to CGWindowListCopyWindowInfo(17, 0)\n'
+        'set out to ""\n'
+        'repeat with w in wList\n'
+        '    set owner to ""\n'
+        '    set pidText to ""\n'
+        '    set wName to ""\n'
+        '    try\n'
+        '        set owner to "" & (kCGWindowOwnerName of w as string)\n'
+        '    end try\n'
+        '    try\n'
+        '        set pidText to "" & (kCGWindowOwnerPID of w as string)\n'
+        '    end try\n'
+        '    try\n'
+        '        set wName to "" & (kCGWindowName of w as string)\n'
+        '    end try\n'
+        '    if owner is not "" then\n'
+        '        set out to out & owner & "\\t" & pidText & "\\t" & wName & "\\n"\n'
+        '    end if\n'
+        'end repeat\n'
+        'return out\n'
+    )
+    rc, out = _run(["osascript", "-e", script], timeout=5)
+    if rc != 0:
+        return []
+
+    windows: list[dict[str, Any]] = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        parts = line.rstrip("\r").split("\t")
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[1])
+        except ValueError:
+            pid = None
+        windows.append({
+            "app_name": parts[0],
+            "bundle_id": None,
+            "window_title": parts[2] if len(parts) >= 3 else "",
+            "pid": pid,
+            "detected_by": "cgwindowlist",
+        })
+    return windows
+
+
 # ── Backend ───────────────────────────────────────────────────────────────────
 
 class MacOSAccessibilityBackend:
@@ -191,6 +247,14 @@ class MacOSAccessibilityBackend:
                 continue
             matches.append(w)
 
+        if not matches:
+            for w in _list_windows_cg():
+                if proc_lc and proc_lc not in w["app_name"].lower():
+                    continue
+                if pat and not pat.search(w.get("window_title") or ""):
+                    continue
+                matches.append(w)
+
         return {
             "ok": True,
             "found": len(matches) > 0,
@@ -302,13 +366,12 @@ class MacOSAccessibilityBackend:
 
         ok=true only when main.window_found and client.window_found are both true.
         """
-        import subprocess as _subprocess
-        import os as _os
-
         HISEC_AGENT_BIN = (
             exe_path
+            or os.environ.get("HISEC_AGENT_BIN")
             or "/Applications/HiSecEndpoint.app/Contents/MacOS/safra/HiSecEndpointAgent"
         )
+        HISEC_AGENT_CWD = str(Path(HISEC_AGENT_BIN).resolve().parent)
         CLICK_HELPER = (
             Path(__file__).resolve().parents[1]
             / "scripts" / "macos" / "click_security_center.swift"
@@ -433,12 +496,12 @@ class MacOSAccessibilityBackend:
                 }
 
             # Main path: HiSecEndpointAgent cmd ui (not activate_app)
-            _subprocess.Popen(
+            subprocess.Popen(
                 [HISEC_AGENT_BIN, "cmd", "ui"],
-                cwd="/Applications/HiSecEndpoint.app/Contents/MacOS/safra",
-                stdout=_subprocess.PIPE,
-                stderr=_subprocess.PIPE,
-                env=_os.environ.copy(),
+                cwd=HISEC_AGENT_CWD,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=os.environ.copy(),
             )
             hisec_process_found = True
 
