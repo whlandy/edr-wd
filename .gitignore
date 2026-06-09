@@ -33,3 +33,6 @@ Thumbs.db
 
 # Test
 .pytest_cache/
+
+# Local macOS helper build artifacts
+target/scripts/macos/click_security_center

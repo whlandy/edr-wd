@@ -89,9 +89,9 @@ func parentOf(_ el: AXUIElement) -> AXUIElement? {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 // Parse --method argument
-for i in 1..<CommandLine.argc {
+for i in 1..<Int(CommandLine.argc) {
     let arg = CommandLine.arguments[i]
-    if arg == "--method", i + 1 < CommandLine.argc {
+    if arg == "--method", i + 1 < Int(CommandLine.argc) {
         let val = CommandLine.arguments[i + 1]
         if let m = ClickMethod(rawValue: val) {
             preferredMethod = m
