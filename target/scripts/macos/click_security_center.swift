@@ -4,7 +4,7 @@
 // clicks it using the specified method, then exits.
 // Usage: click_security_center.swift [--method ax_press|cgevent_center]
 // Exits 0 on click success, 1 on not found / click failed.
-// Prints "OK <method>" to stdout on success.
+// Prints structured JSON to stdout on success/failure.
 
 import Cocoa
 import ApplicationServices
@@ -27,14 +27,38 @@ func findHiSecAgent() -> NSRunningApplication? {
     NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "HiSecEndpointAgent" })
 }
 
+func axStringAttribute(_ el: AXUIElement, _ attr: CFString) -> String? {
+    var valueRef: CFTypeRef?
+    let r = AXUIElementCopyAttributeValue(el, attr, &valueRef)
+    guard r == .success, let value = valueRef as? String else { return nil }
+    return value
+}
+
+func matchesTargetText(_ el: AXUIElement, target: String) -> Bool {
+    let attrs: [CFString] = [
+        kAXValueAttribute as CFString,
+        kAXTitleAttribute as CFString,
+        kAXDescriptionAttribute as CFString,
+        kAXHelpAttribute as CFString,
+        kAXRoleDescriptionAttribute as CFString,
+    ]
+    for attr in attrs {
+        if let value = axStringAttribute(el, attr), value.contains(target) {
+            return true
+        }
+    }
+    return false
+}
+
 func findTextInChildren(_ el: AXUIElement, target: String) -> AXUIElement? {
+    if matchesTargetText(el, target: target) {
+        return el
+    }
     var childrenRef: CFTypeRef?
     let r = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef)
     guard r == .success, let children = childrenRef as? [AXUIElement] else { return nil }
     for child in children {
-        var valueRef: CFTypeRef?
-        let vr = AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &valueRef)
-        if vr == .success, let value = valueRef as? String, value.contains(target) {
+        if matchesTargetText(child, target: target) {
             return child
         }
         if let found = findTextInChildren(child, target: target) {
@@ -87,6 +111,92 @@ func parentOf(_ el: AXUIElement) -> AXUIElement? {
     return parentRef as! AXUIElement
 }
 
+func pressableAncestor(_ el: AXUIElement) -> AXUIElement? {
+    var current: AXUIElement? = el
+    for _ in 0..<6 {
+        guard let node = current else { break }
+        var actionsRef: CFTypeRef?
+        let actionResult = AXUIElementCopyActionNames(node, &actionsRef)
+        if actionResult == .success,
+           let actions = actionsRef as? [CFString],
+           actions.contains(where: { $0 as String == kAXPressAction as String }) {
+            return node
+        }
+        current = parentOf(node)
+    }
+    return nil
+}
+
+func rectFromElement(_ el: AXUIElement) -> (CGPoint, CGSize)? {
+    var posRef: CFTypeRef?
+    var sizeRef: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
+          AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
+          let posValue = posRef as? AXValue,
+          let sizeValue = sizeRef as? AXValue else { return nil }
+    var pos = CGPoint.zero
+    var size = CGSize.zero
+    guard AXValueGetValue(posValue, .cgPoint, &pos),
+          AXValueGetValue(sizeValue, .cgSize, &size) else { return nil }
+    return (pos, size)
+}
+
+func clickElement(_ el: AXUIElement, method: ClickMethod) -> Bool {
+    switch method {
+    case .ax_press:
+        if let pressable = pressableAncestor(el) {
+            return AXUIElementPerformAction(pressable, kAXPressAction as CFString) == .success
+        }
+        return false
+    case .cgevent_center:
+        if let (pos, size) = rectFromElement(el) {
+            let cx = pos.x + size.width / 2
+            let cy = pos.y + size.height / 2
+            let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
+                               mouseCursorPosition: CGPoint(x: cx, y: cy), mouseButton: .left)
+            let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
+                             mouseCursorPosition: CGPoint(x: cx, y: cy), mouseButton: .left)
+            down?.post(tap: .cghidEventTap)
+            up?.post(tap: .cghidEventTap)
+            return true
+        }
+        return false
+    case .auto:
+        if clickElement(el, method: .ax_press) {
+            return true
+        }
+        return clickElement(el, method: .cgevent_center)
+    case .ax_query:
+        return false
+    }
+}
+
+func jsonEscape(_ s: String) -> String {
+    if let data = try? JSONSerialization.data(withJSONObject: [s], options: []),
+       let json = String(data: data, encoding: .utf8) {
+        return String(json.dropFirst().dropLast())
+    }
+    return s.replacingOccurrences(of: "\"", with: "\\\"")
+}
+
+func printJSON(_ fields: [String: Any]) {
+    if let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),
+       let text = String(data: data, encoding: .utf8) {
+        print(text)
+    } else {
+        let items = fields.map { key, value in
+            let valueText: String
+            if let str = value as? String {
+                valueText = "\"\(jsonEscape(str))\""
+            } else {
+                valueText = "\(value)"
+            }
+            return "\"\(jsonEscape(key))\":\(valueText)"
+        }.joined(separator: ",")
+        print("{\(items)}")
+    }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 // Parse --method argument
@@ -130,34 +240,32 @@ guard let el = targetElement else {
 
 var clicked = false
 var clickMethod = "unknown"
+var helperFound = false
+var windowBounds: [String: Any] = [:]
 
 switch preferredMethod {
 case .ax_press:
     // Explicit: AXPress on parent ONLY — no CGEvent fallback
-    if let parentEl = parentOf(el) {
-        if tryAXPress(parentEl) {
-            clicked = true
-            clickMethod = "ax_press"
-        }
+    if clickElement(el, method: .ax_press) {
+        clicked = true
+        clickMethod = "ax_press"
     }
 
 case .cgevent_center:
     // Explicit: CGEvent center click on the element ONLY — no AXPress
-    if clickCenter(el) {
+    if clickElement(el, method: .cgevent_center) {
         clicked = true
         clickMethod = "cgevent_center"
     }
 
 case .auto:
     // Auto: try AXPress on parent first; on failure, CGEvent on element
-    if let parentEl = parentOf(el) {
-        if tryAXPress(parentEl) {
-            clicked = true
-            clickMethod = "ax_press"
-        }
+    if clickElement(el, method: .ax_press) {
+        clicked = true
+        clickMethod = "ax_press"
     }
     if !clicked {
-        if clickCenter(el) {
+        if clickElement(el, method: .cgevent_center) {
             clicked = true
             clickMethod = "cgevent_center"
         }
@@ -205,9 +313,43 @@ case .ax_query:
 }
 
 if clicked {
-    print("OK \(clickMethod)")
+    // Best-effort detect the client window after the click.  This is useful for
+    // the Python caller, but the click itself is the primary success criterion.
+    for runningApp in NSWorkspace.shared.runningApplications {
+        let name = runningApp.localizedName ?? ""
+        if name.contains("EDRClient") || name.contains("HiSecEndpoint") {
+            let axApp = AXUIElementCreateApplication(runningApp.processIdentifier)
+            var windowsRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+               let windows = windowsRef as? [AXUIElement], !windows.isEmpty {
+                helperFound = true
+                if let win = windows.first, let rect = rectFromElement(win) {
+                    windowBounds = [
+                        "x": rect.0.x,
+                        "y": rect.0.y,
+                        "w": rect.1.width,
+                        "h": rect.1.height,
+                    ]
+                }
+                break
+            }
+        }
+    }
+    printJSON([
+        "ok": true,
+        "click_method": clickMethod,
+        "client_window_found": helperFound,
+        "window_bounds": windowBounds,
+        "error": "",
+    ])
     exit(0)
 } else {
-    fputs("ERROR: click failed\n", stderr)
+    printJSON([
+        "ok": false,
+        "click_method": clickMethod,
+        "client_window_found": false,
+        "window_bounds": windowBounds,
+        "error": "click failed",
+    ])
     exit(1)
 }

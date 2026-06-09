@@ -586,10 +586,14 @@ class MacOSAccessibilityBackend:
             import json as _json
             try:
                 data = _json.loads(out.strip())
-                clicked = data.get("ok", False) and data.get("client_window_found", False)
+                ok = bool(data.get("ok", False))
+                clicked = ok
                 click_method_out = data.get("click_method", method)
                 bounds = data.get("window_bounds", {})
-                return clicked, click_method_out, "", data.get("client_window_found", False), bounds
+                error = ""
+                if not ok:
+                    error = str(data.get("error", "")).strip()
+                return clicked, click_method_out, error, data.get("client_window_found", False), bounds
             except _json.JSONDecodeError:
                 pass
             # Fallback: old "OK <method>" plain text format
@@ -840,7 +844,7 @@ class MacOSAccessibilityBackend:
 
         # Stage 5: fallback click from HiSecEndpointAgent to open EDRClient.
         if not client_window_found:
-            for click_method_label in ["ax_press", "cgevent_center"]:
+            for click_method_label in ["ax_press", "cgevent_center", "auto"]:
                 clicked, actual_method, click_err, helper_client_found, helper_bounds = _click_security_center(method=click_method_label)
                 click_attempts.append({
                     "method": actual_method or click_method_label,
