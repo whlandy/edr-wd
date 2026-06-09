@@ -343,17 +343,29 @@ class MacOSAccessibilityBackend:
         # generic AX wrapper names/titles. If the normal match path fails,
         # fall back to known HiSec heuristics so `connect()`/`wait_window()`
         # remain stable even when the accessibility title is polluted.
+        # Fallback for HiSec windows whose window title is generic/polluted.
+        # Only apply keyword fallback to windows whose app_name is also HiSec-related
+        # to avoid false positives from generic English words like "agent"/"endpoint"
+        # matching unrelated windows (e.g. "hermes-agent", "some-endpoint").
         if not matches and proc_lc:
             hisec_agent_name = "hisecendpointagent" in proc_lc
             edr_client_name = "edrclient" in proc_lc or "hisecendpoint" in proc_lc
             if hisec_agent_name or edr_client_name:
                 for w in listed["windows"]:
+                    app_name = (w.get("app_name") or "").lower()
+                    # Only consider this window if its app_name is also HiSec-related
+                    app_relevant = (
+                        "hisec" in app_name or "safra" in app_name or
+                        "edr" in app_name or "endpoint" in app_name
+                    )
+                    if not app_relevant:
+                        continue
                     title = (w.get("window_title") or "").lower()
                     if hisec_agent_name:
-                        if "华为智能终端安全系统" in title or "hisecendpointagent" in title or "hisec" in title or "agent" in title:
+                        if "华为智能终端安全系统" in title or "hisecendpointagent" in title or "hisec" in title:
                             matches.append(w)
                     elif edr_client_name:
-                        if "华为hisec endpoint" in title or "hisec endpoint" in title or "endpoint" in title or "edrclient" in title or "bagenericobject" in title or "hisec" in title:
+                        if "华为hisec endpoint" in title or "hisec endpoint" in title or "hisec" in title or "edrclient" in title or "bagenericobject" in title:
                             matches.append(w)
                     if matches:
                         break
