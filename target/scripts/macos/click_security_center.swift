@@ -15,6 +15,7 @@ enum ClickMethod: String {
     case ax_press = "ax_press"
     case cgevent_center = "cgevent_center"
     case auto = "auto"        // try both, succeed on first that works
+    case ax_query = "ax_query" // just check if EDRClient window exists
 }
 
 let TARGET = "前往安全防护中心"
@@ -161,6 +162,46 @@ case .auto:
             clickMethod = "cgevent_center"
         }
     }
+
+case .ax_query:
+    // Check if EDRClient window exists and has a relevant title.
+    // 1. Iterate AX windows of EDRClient/HiSecEndpoint processes.
+    // 2. Read kAXTitleAttribute; if it contains "华为HiSec Endpoint", "HiSec", or
+    //    "Endpoint" → strong success → EDRCLIENT_FOUND.
+    // 3. If windows exist but no title matched → EDRCLIENT_FOUND_WITHOUT_TITLE.
+    // 4. If no windows at all → error.
+    let targetAppNames = ["EDRClient", "HiSecEndpoint"]
+    let titleKeywords = ["华为HiSec Endpoint", "HiSec", "Endpoint"]
+
+    for runningApp in NSWorkspace.shared.runningApplications {
+        let name = runningApp.localizedName ?? ""
+        if targetAppNames.contains(where: { name.contains($0) }) {
+            let axApp = AXUIElementCreateApplication(runningApp.processIdentifier)
+            var windowsRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+               let windows = windowsRef as? [AXUIElement] {
+                if windows.isEmpty {
+                    continue
+                }
+                // Check each window for a matching title
+                for win in windows {
+                    var titleRef: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &titleRef) == .success,
+                       let title = titleRef as? String {
+                        if titleKeywords.contains(where: { title.contains($0) }) {
+                            print("EDRCLIENT_FOUND")
+                            exit(0)
+                        }
+                    }
+                }
+                // Windows exist but none had a matching title — weak success
+                print("EDRCLIENT_FOUND_WITHOUT_TITLE")
+                exit(0)
+            }
+        }
+    }
+    fputs("ERROR: EDRClient window not found\n", stderr)
+    exit(1)
 }
 
 if clicked {

@@ -69,8 +69,16 @@ def _hisec_main_window_open() -> tuple[bool, str]:
 
 
 def _hisec_client_window_open() -> tuple[bool, str]:
-    """Check EDRClient/HiSecEndpoint sub-window via System Events. Returns (found, title)."""
-    # Try EDRClient process first
+    """
+    Check EDRClient/HiSecEndpoint sub-window.
+    Tries in order:
+      1. osascript System Events (for windows that System Events can see)
+      2. Swift AX helper — asks Accessibility API whether EDRClient window exists
+         (the Swift helper's AX press proves the window was there; reuse the same
+          AX query to confirm presence without clicking)
+    Returns (found, window_title).
+    """
+    # Method 1: osascript System Events
     for proc in ("EDRClient", "HiSecEndpoint"):
         rc, out = _run_osascript(
             f'tell application "System Events" to get name of every window of process "{proc}"',
@@ -80,6 +88,24 @@ def _hisec_client_window_open() -> tuple[bool, str]:
             for line in out.splitlines():
                 if "华为HiSec Endpoint" in line or "HiSec" in line or "华为" in line:
                     return True, line.strip()
+
+    # Method 2: Swift AX helper asking whether EDRClient/HiSec window is present
+    swift_helper = Path(__file__).resolve().parents[1] / "scripts" / "macos" / "click_security_center.swift"
+    if swift_helper.exists():
+        rc, out = _run(
+            ["/usr/bin/swift", str(swift_helper), "--method", "ax_query"],
+            timeout=10,
+        )
+        # Exact line match — "EDRCLIENT_FOUND_WITHOUT_TITLE" must NOT be treated as strong success
+        out_lines = {line.strip() for line in out.splitlines()}
+        if rc == 0 and "EDRCLIENT_FOUND" in out_lines:
+            return True, "华为HiSec Endpoint"
+        # Weak success: windows exist but Qt title is not readable via AX.
+        # EDRClient/HiSecEndpoint AX window confirmed non-empty — treat as found=True
+        # since this is the HiSec client dedicated fallback (not a generic is_window_open).
+        if rc == 0 and "EDRCLIENT_FOUND_WITHOUT_TITLE" in out_lines:
+            return True, ""
+
     return False, ""
 
 
