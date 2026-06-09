@@ -9,8 +9,10 @@ Target chain:
       → EDRClient / HiSecEndpoint  (client window: 华为HiSec Endpoint)
 
 Single activate_edr call: the E2E invokes activate_edr exactly once at
-Step0 and reuses the result for all subsequent assertions.  The Baseline
-section only verifies that the MCP tools and backend are healthy.
+Step0 and reuses the result for all subsequent assertions. The macOS
+activation path must first bring the HiSec entry window to the foreground
+before attempting the "前往安全防护中心" click. The Baseline section only
+verifies that the MCP tools and backend are healthy.
 
 Strong assertions:
   - activate_edr.ok == True
