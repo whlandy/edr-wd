@@ -115,7 +115,7 @@ func pressableAncestor(_ el: AXUIElement) -> AXUIElement? {
     var current: AXUIElement? = el
     for _ in 0..<6 {
         guard let node = current else { break }
-        var actionsRef: CFTypeRef?
+        var actionsRef: CFArray?
         let actionResult = AXUIElementCopyActionNames(node, &actionsRef)
         if actionResult == .success,
            let actions = actionsRef as? [CFString],

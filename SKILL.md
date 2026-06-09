@@ -180,6 +180,9 @@ The macOS backend is intentionally narrower than the Windows backend:
 
 - `dump_tree` / control_id workflows are Windows-first
 - macOS uses Accessibility/System Events plus app/window detection
+- macOS `click_at` is dry-run by default; set
+  `EDR_WD_ALLOW_REAL_CLICKS=1` on the target server before relying on it for
+  real UI interaction.
 - `activate_edr` on macOS targets the `EDRClient` application window. It first
   tries `/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh`
   via non-interactive sudo and only accepts success when an `EDRClient` window
