@@ -282,6 +282,40 @@ class MacOSAccessibilityBackend:
         if not process_name and not title_re:
             return {"ok": False, "error": "process_name or title_re is required"}
 
+        proc_lc = process_name.lower() if process_name else None
+        connected_name = (getattr(self, "_connected_app", None) or "").lower()
+        connected_instance = getattr(self, "_connected_app_instance", None)
+        if proc_lc and connected_instance is not None and proc_lc in connected_name:
+            try:
+                wins = connected_instance.windows()
+                if wins:
+                    normalized = []
+                    for w in wins:
+                        try:
+                            rect = w.rectangle()
+                            normalized.append({
+                                "app_name": getattr(self, "_connected_app", process_name) or process_name,
+                                "bundle_id": None,
+                                "window_title": getattr(getattr(w, "_win_info", {}), "get", lambda *_: "")("title", ""),
+                                "pid": getattr(w, "_win_info", {}).get("pid") if isinstance(getattr(w, "_win_info", {}), dict) else None,
+                                "rectangle": {
+                                    "x": rect.left,
+                                    "y": rect.top,
+                                    "w": rect.width(),
+                                    "h": rect.height(),
+                                },
+                            })
+                        except Exception:
+                            normalized.append({
+                                "app_name": getattr(self, "_connected_app", process_name) or process_name,
+                                "bundle_id": None,
+                                "window_title": "",
+                                "pid": None,
+                            })
+                    return {"ok": True, "found": True, "windows": normalized, "count": len(normalized)}
+            except Exception:
+                pass
+
         listed = self.list_windows()
         if not listed.get("ok"):
             return listed
@@ -296,6 +330,27 @@ class MacOSAccessibilityBackend:
             if pat and not pat.search(w.get("window_title") or ""):
                 continue
             matches.append(w)
+
+        # macOS HiSec windows are sometimes surfaced by System Events with
+        # generic AX wrapper names/titles. If the normal match path fails,
+        # fall back to known HiSec heuristics so `connect()`/`wait_window()`
+        # remain stable even when the accessibility title is polluted.
+        if not matches and proc_lc:
+            title_lc = (title_re or "").lower()
+            hisec_agent_name = "hisecendpointagent" in proc_lc
+            edr_client_name = "edrclient" in proc_lc or "hisecendpoint" in proc_lc
+            if hisec_agent_name or edr_client_name:
+                for w in listed["windows"]:
+                    title = (w.get("window_title") or "").lower()
+                    app_name = (w.get("app_name") or "").lower()
+                    if hisec_agent_name:
+                        if "华为智能终端安全系统" in title or "hisecendpointagent" in title or "hisec" in title or "agent" in title:
+                            matches.append(w)
+                    elif edr_client_name:
+                        if "华为hisec endpoint" in title or "hisec endpoint" in title or "endpoint" in title or "edrclient" in title or "bagenericobject" in title or "hisec" in title:
+                            matches.append(w)
+                    if matches:
+                        break
 
         return {
             "ok": True,
@@ -964,6 +1019,16 @@ class MacOSAccessibilityBackend:
         if process_name:
             r = self.is_window_open(process_name=process_name)
             if not r.get("found"):
+                norm_proc = process_name.lower()
+                if any(tag in norm_proc for tag in ("edrclient", "hisecendpoint", "hisecendpointagent")):
+                    act = self.activate_edr(wait=True, timeout=timeout)
+                    if act.get("ok"):
+                        connected = getattr(self, "_connected_pid", None)
+                        if connected:
+                            self._connected_app = "EDRClient"
+                            self._connected_app_instance = _MacOSConnectedApp(self)
+                            return {"ok": True, "matched": "process_name", "pid": connected}
+                    # Fall through to the generic auto-activate path below if activate_edr didn't help.
                 if auto_activate:
                     act = self.activate_app(app_name=process_name)
                     if not act["ok"]:
