@@ -186,11 +186,14 @@ The macOS backend is intentionally narrower than the Windows backend:
 - `activate_edr` on macOS targets the `EDRClient` application window. It first
   tries `/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh`
   via non-interactive sudo and only accepts success when an `EDRClient` window
-  is detected. If sudo/script startup fails, it opens `HiSecEndpointAgent` as
-  the fallback entry window, explicitly brings that window to the foreground,
-  and then uses the Swift Accessibility helper to click "前往安全防护中心".
-  The click helper is only meaningful after the HiSec entry window is active;
-  do not assume a visible-but-background window is clickable.
+  is detected. If sudo/script startup fails, it first tries `open
+  /Applications/HiSecEndpoint.app` to bring the app bundle into the GUI
+  session, then falls back to `HiSecEndpointAgent cmd ui` without redirecting
+  stdout/stderr. In both fallback paths it explicitly brings the HiSec entry
+  window to the foreground before using the Swift Accessibility helper to click
+  "前往安全防护中心". The click helper is only meaningful after the HiSec
+  entry window is active; do not assume a visible-but-background window is
+  clickable.
 
 ## MCP Server
 

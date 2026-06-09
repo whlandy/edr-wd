@@ -8,8 +8,9 @@ This is the pytest E2E counterpart to the macos_hisec profile runner
   2. verify required tools through MCP tools/list
   3. require backend_kind/backend == macos_accessibility
   4. activate_edr(wait=True, timeout=20)
-     - main path: HiSecEndpointAgent cmd ui
-     - fallback path: foreground HiSecEndpointAgent, then Swift helper clicks
+     - main path: launch HiSecEndpoint.app with `open`
+     - fallback path: HiSecEndpointAgent cmd ui (no stdout/stderr redirection)
+     - both paths foreground HiSecEndpointAgent before the Swift helper clicks
        "前往安全防护中心"
   5. assert HiSecEndpointAgent and EDRClient windows are visible
   6. re-check both windows through is_window_open
