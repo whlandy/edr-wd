@@ -322,15 +322,54 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
         failed += 1
         errors.append("Step10 restore_edr")
 
-    # Step11: final verify — activate_edr result still valid
-    print(f"\n  Step11: final verify — main/client windows still present... ", end="", flush=True)
-    main_still_found = activate_result.get("main", {}).get("window_found") is True
-    client_still_found = activate_result.get("client", {}).get("window_found") is True
-    if main_still_found or client_still_found:
-        print(f"PASS  main={main_still_found} client={client_still_found}")
+    # Step11: final verify — REAL-TIME check that windows still exist
+    # Not a cached result; actually probe is_window_open for both windows.
+    # client must be present (EDR security center is the core target).
+    # main may be hidden after client opens — WARN but still pass if client found.
+    print(f"\n  Step11: final verify — real-time is_window_open check... ", end="", flush=True)
+    main_realtime_found = False
+    client_realtime_found = False
+    try:
+        # Real-time check: main window (HiSecEndpointAgent)
+        main_result = call_tool("is_window_open", {"process_name": "HiSecEndpointAgent"})
+        main_realtime_found = main_result.get("ok") is True and main_result.get("found") is True
+        if not main_realtime_found:
+            # Try by title as fallback
+            main_title_result = call_tool("is_window_open", {
+                "window_title": "华为智能终端安全系统"
+            })
+            main_realtime_found = (
+                main_title_result.get("ok") is True
+                and main_title_result.get("found") is True
+            )
+    except Exception:
+        pass  # keep main_realtime_found = False
+
+    try:
+        # Real-time check: client window (EDRClient or HiSecEndpoint)
+        client_result = call_tool("is_window_open", {"process_name": "EDRClient"})
+        client_realtime_found = client_result.get("ok") is True and client_result.get("found") is True
+        if not client_realtime_found:
+            # Try HiSecEndpoint as fallback
+            client_title_result = call_tool("is_window_open", {
+                "window_title": "华为HiSec Endpoint"
+            })
+            client_realtime_found = (
+                client_title_result.get("ok") is True
+                and client_title_result.get("found") is True
+            )
+    except Exception:
+        pass  # keep client_realtime_found = False
+
+    # client is the core EDR window — must be present
+    if client_realtime_found:
+        if main_realtime_found:
+            print(f"PASS  main=found client=found (real-time)")
+        else:
+            print(f"PASS  main=not found client=found (main may be hidden, client is core)")
         passed += 1
     else:
-        print("FAIL  no windows remain visible after restore")
+        print(f"FAIL  client window no longer present (real-time check)")
         failed += 1
         errors.append("Step11 final verify")
 

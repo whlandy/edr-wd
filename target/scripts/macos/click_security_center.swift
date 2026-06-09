@@ -40,7 +40,21 @@ var preferredMethod: ClickMethod = .auto
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+let AX_MAX_DEPTH = 4
+let AX_MAX_NODES = 200
+let AX_MAX_TEXT_LEN = 120
+
 func dumpAXElement(_ el: AXUIElement, depth: Int, into results: inout [[String: String]], targetText: String) {
+    // Hard caps: stop recursion at max depth or node count
+    if depth > AX_MAX_DEPTH || results.count >= AX_MAX_NODES {
+        results.append([
+            "depth": String(depth),
+            "role": "TRUNCATED",
+            "reason": "max depth or node limit reached"
+        ])
+        return
+    }
+
     var roleRef: CFTypeRef?
     var valueRef: CFTypeType?
     var titleRef: CFTypeRef?
@@ -52,9 +66,14 @@ func dumpAXElement(_ el: AXUIElement, depth: Int, into results: inout [[String: 
     AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descRef)
 
     let role = (roleRef as? String) ?? ""
-    let value = (valueRef as? String) ?? ""
+    var value = (valueRef as? String) ?? ""
     let title = (titleRef as? String) ?? ""
     let desc = (descRef as? String) ?? ""
+
+    // Truncate long text to avoid log explosion
+    if value.count > AX_MAX_TEXT_LEN {
+        value = String(value.prefix(AX_MAX_TEXT_LEN)) + "…[truncated]"
+    }
 
     let prefix = String(repeating: "  ", count: depth)
     if !role.isEmpty {
@@ -73,6 +92,8 @@ func dumpAXElement(_ el: AXUIElement, depth: Int, into results: inout [[String: 
        let children = childrenRef as? [AXUIElement] {
         for child in children {
             dumpAXElement(child, depth: depth + 1, into: &results, targetText: targetText)
+            // Check again after each child in case we hit the limit mid-traversal
+            if results.count >= AX_MAX_NODES { break }
         }
     }
 }

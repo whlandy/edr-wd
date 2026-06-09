@@ -444,24 +444,36 @@ class TargetConfig:
         auth = dict(ssh.get("auth", {}))
 
         if auth.get("type") == "password":
-            password = auth.get("password")
-            penv = auth.get("password_env")
-            if password:
-                auth.pop("password_env", None)
-            elif penv:
-                password = os.environ.get(penv)
-                if not password:
-                    raise EnvironmentError(
-                        f"Target '{target_name}': auth.password_env='{penv}' is set "
-                        f"but environment variable '{penv}' is not defined"
+            has_inline = bool(auth.get("password"))
+            has_env = bool(auth.get("password_env"))
+
+            if has_inline and has_env:
+                raise ConfigError(
+                    f"Target '{target_name}': auth.password and auth.password_env "
+                    "are mutually exclusive; choose one"
+                )
+
+            if has_inline:
+                auth = {
+                    "type": "password",
+                    "password": auth["password"],
+                }
+            elif has_env:
+                penv_name = auth["password_env"]
+                value = os.getenv(penv_name)
+                if not value:
+                    raise ConfigError(
+                        f"Target '{target_name}': auth.password_env='{penv_name}' "
+                        f"is set but environment variable '{penv_name}' is not defined"
                     )
-                auth["password"] = password
-                # remove the env reference — caller gets the actual password
-                auth.pop("password_env", None)
+                auth = {
+                    "type": "password",
+                    "password": value,
+                }
             else:
-                raise EnvironmentError(
+                raise ConfigError(
                     f"Target '{target_name}': auth.type='password' but "
-                    "auth.password is empty and auth.password_env is not set"
+                    "neither auth.password nor auth.password_env is set"
                 )
 
         ssh["auth"] = auth

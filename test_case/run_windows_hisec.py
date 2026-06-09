@@ -197,7 +197,7 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, in
         ("Step6: verify EDRClient window",                  "is_window_open", {"process_name": "EDRClient.exe"}, True),
         ("Step7: connect(EDRClient.exe, auto_activate fallback)", "connect", {"process_name": "EDRClient.exe", "timeout": 10.0, "auto_activate": True}, True),
         ("Step8: dump_tree (max_depth=10)",                 "dump_tree",      {"max_depth": 10}, True),
-        ("Step9: screenshot",                               "screenshot",     {"path": "C:\\Users\\<TARGET_USER>\\Desktop\\maa-fw运行记录\\e2e_edr_full_workflow.png"}, True),
+        ("Step9: screenshot",                               "screenshot",     {}, True),
         ("Step10: restore_edr",                             "restore_edr",    {}, False),
         ("Step11: is_window_open verify",                   "is_window_open", {"process_name": "EDRClient.exe"}, False),
     ]

@@ -446,20 +446,28 @@ def restore_edr() -> str:
             return json.dumps({"ok": False, "error": "No windows found"})
 
         win = wins[0]
-        # Force-refresh window state
+        restore_result = None
         try:
             win.wait_for_minimized(timeout=0.5)
-            win.restore()
+            restore_result = win.restore()
             win.wait_for_not_minimized(timeout=5)
         except Exception:
-            pass  # Not minimized, continue
+            pass  # Not minimized or no-op, continue
 
         r = win.rectangle()
-        return json.dumps({
+        response = {
             "ok": True,
             "rectangle": {"x": r.left, "y": r.top, "w": r.width(), "h": r.height()},
-            "is_minimized": win.is_minimized()
-        })
+            "is_minimized": win.is_minimized(),
+        }
+        # Only propagate restore metadata when the backend returns a dict
+        # (macOS accessibility backend does; pywinauto returns None)
+        if isinstance(restore_result, dict):
+            response["restored"] = restore_result.get("restored")
+            response["method"] = restore_result.get("method")
+            response["reason"] = restore_result.get("reason")
+
+        return json.dumps(response)
     except Exception as e:
         logger.exception("restore_edr failed")
         return json.dumps({"ok": False, "error": str(e)})

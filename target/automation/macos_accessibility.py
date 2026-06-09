@@ -68,7 +68,7 @@ class _MacOSConnectedApp:
         self._backend = backend
 
     def _cg_windows_for_app(self) -> list[dict]:
-        """Return CGWindowList entries for the connected app."""
+        """Return CGWindowList entries for the connected app with bounds."""
         app_name = getattr(self._backend, "_connected_app", None) or ""
         opts = 17  # kCGWindowListOptionAll + excludeDesktopElements
         try:
@@ -87,7 +87,16 @@ class _MacOSConnectedApp:
                 '                set wName to ""\n'
                 '            end try\n'
                 '            set wPID to kCGWindowOwnerPID of w as string\n'
-                '            set out to out & wPID & "|" & wName & "\n"\n'
+                '            try\n'
+                '                set boundsDict to kCGWindowBounds of w\n'
+                '                set bx to x of boundsDict\n'
+                '                set by to y of boundsDict\n'
+                '                set bw to width of boundsDict\n'
+                '                set bh to height of boundsDict\n'
+                '                set out to out & wPID & "|" & wName & "|" & bx & "|" & by & "|" & bw & "|" & bh & "\n"\n'
+                '            on error\n'
+                '                set out to out & wPID & "|" & wName & "|0|0|800|600\n'
+                '            end try\n'
                 '        end if\n'
                 '    end try\n'
                 'end repeat\n'
@@ -100,8 +109,18 @@ class _MacOSConnectedApp:
             if rc == 0:
                 for line in out.strip().split("\n"):
                     if "|" in line:
-                        parts = line.split("|", 1)
-                        wins.append({"pid": int(parts[0]), "title": parts[1]})
+                        parts = line.rstrip("\n").split("|")
+                        if len(parts) >= 6:
+                            wins.append({
+                                "pid": int(parts[0]),
+                                "title": parts[1],
+                                "bounds": {
+                                    "x": float(parts[2]),
+                                    "y": float(parts[3]),
+                                    "w": float(parts[4]),
+                                    "h": float(parts[5]),
+                                }
+                            })
             return wins
         except Exception:
             return []
@@ -137,22 +156,39 @@ class _MacOSWindowProxy:
 
     @property
     def rectangle(self):
+        """
+        Return a minimal rect-like object compatible with server.py expectations:
+          r.left(), r.top(), r.width(), r.height()
+
+        Bounds are read from CGWindowList kCGWindowBounds when available.
+        If no bounds are in _win_info, returns a stub with _is_stub=True so callers
+        can distinguish real from fake data.
+        """
+        bounds = self._win_info.get("bounds") if self._win_info else None
+
         class _Rect:
-            def left(self): return getattr(self, "_x", 0)
-            def top(self): return getattr(self, "_y", 0)
-            def width(self): return getattr(self, "_w", 800)
-            def height(self): return getattr(self, "_h", 600)
-            def set(self, x, y, w, h):
-                self._x, self._y, self._w, self._h = x, y, w, h
-        r = _Rect()
-        r.set(0, 0, 800, 600)
-        return r
+            _is_stub = bounds is None
+
+            @property
+            def left(self): return bounds.get("x", 0) if bounds else 0
+            @property
+            def top(self): return bounds.get("y", 0) if bounds else 0
+            def width(self): return bounds.get("w", 800) if bounds else 800
+            def height(self): return bounds.get("h", 600) if bounds else 600
+
+        return _Rect()
 
     def is_minimized(self) -> bool:
         return False
 
-    def restore(self) -> None:
-        pass
+    def restore(self) -> dict:
+        """CGWindowList cannot change window state — always returns no-op."""
+        return {
+            "ok": True,
+            "restored": False,
+            "method": "noop",
+            "reason": "macOS CGWindowList has no restore API",
+        }
 
     def wait_for_not_minimized(self, timeout: float = 5.0) -> None:
         pass

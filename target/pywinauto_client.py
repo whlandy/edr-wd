@@ -324,6 +324,7 @@ class WindowsGUI:
             return {
                 "ok": True,
                 "already_open": True,
+                "successful_method": "already_open",
                 "target": "EDRClient.exe",
                 "target_application": "EDRClient.exe",
                 "entry_application": "HisecEndpointAgent.exe",
@@ -356,13 +357,17 @@ class WindowsGUI:
 
         if direct_start["ok"]:
             if not wait:
+                # wait=False: fire-and-forget. Popen succeeded but we have no
+                # idea if the window is up. Tell the caller we didn't verify.
                 return {
                     "ok": True,
                     "already_open": False,
+                    "successful_method": "edrclient_show",
                     "activated_by": "EDRClient.exe 17 --show",
                     "target_application": "EDRClient.exe",
                     "entry_application": "HisecEndpointAgent.exe",
                     "direct_start": direct_start,
+                    "window_verified": False,
                 }
 
             edr_client = self.wait_window(
@@ -373,6 +378,7 @@ class WindowsGUI:
                 return {
                     "ok": True,
                     "already_open": False,
+                    "successful_method": "edrclient_show",
                     "activated_by": "EDRClient.exe 17 --show",
                     "target_application": "EDRClient.exe",
                     "entry_application": "HisecEndpointAgent.exe",
@@ -456,6 +462,7 @@ class WindowsGUI:
             return {
                 "ok": True,
                 "already_open": False,
+                "successful_method": "hisec_agent_entry_click",
                 "edr_client_found": True,
                 "activated_by": "HisecEndpointAgent edrWidget fallback",
                 "target_application": "EDRClient.exe",
@@ -469,6 +476,7 @@ class WindowsGUI:
         return {
             "ok": True,
             "already_open": False,
+            "successful_method": "hisec_agent_entry_click",
             "activated_by": "HisecEndpointAgent edrWidget fallback",
             "target_application": "EDRClient.exe",
             "entry_application": "HisecEndpointAgent.exe",
