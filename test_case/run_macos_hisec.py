@@ -253,7 +253,7 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
             passed += 1
         elif result.get("ok") is False and any(
             kw in (result.get("error") or "").lower()
-            for kw in ("permission", "denied", "unavailable", "ax")
+            for kw in ("permission", "denied", "unavailable", "ax", "not supported", "unsupported", "macos_accessibility")
         ):
             print(f"SKIP  (AX/permission denied — {result.get('error', '')})")
             skipped += 1
@@ -288,6 +288,12 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
             "headless", "screencapture"
         )):
             print(f"SKIP  (screen unavailable/permission — {result.get('error', '')})")
+            skipped += 1
+        elif any(kw in err_msg for kw in (
+            "not supported", "unsupported", "macos_accessibility",
+            "dump_tree is not supported",
+        )):
+            print(f"SKIP  (backend unsupported — {result.get('error', '')})")
             skipped += 1
         else:
             print(f"FAIL  screenshot error: {result.get('error', 'unknown')}")

@@ -444,6 +444,8 @@ def restore_edr() -> str:
             return json.dumps({"ok": False, "error": "No windows found"})
 
         win = wins[0]
+        rect_attr = getattr(win, "rectangle", None)
+        rect = rect_attr() if callable(rect_attr) else rect_attr
         # Force-refresh window state
         try:
             win.wait_for_minimized(timeout=0.5)
@@ -452,10 +454,13 @@ def restore_edr() -> str:
         except Exception:
             pass  # Not minimized, continue
 
-        r = win.rectangle()
+        if rect is None:
+            return json.dumps({"ok": False, "error": "Window rectangle unavailable"})
+        width = rect.width() if callable(getattr(rect, "width", None)) else getattr(rect, "width", 0)
+        height = rect.height() if callable(getattr(rect, "height", None)) else getattr(rect, "height", 0)
         return json.dumps({
             "ok": True,
-            "rectangle": {"x": r.left, "y": r.top, "w": r.width(), "h": r.height()},
+            "rectangle": {"x": rect.left, "y": rect.top, "w": width, "h": height},
             "is_minimized": win.is_minimized()
         })
     except Exception as e:
