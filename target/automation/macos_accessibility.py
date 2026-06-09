@@ -142,12 +142,15 @@ class _MacOSWindowProxy:
     @property
     def rectangle(self):
         class _Rect:
-            def left(self): return getattr(self, "_x", 0)
-            def top(self): return getattr(self, "_y", 0)
+            def __init__(self):
+                self.left = 0
+                self.top = 0
+                self._w = 800
+                self._h = 600
             def width(self): return getattr(self, "_w", 800)
             def height(self): return getattr(self, "_h", 600)
             def set(self, x, y, w, h):
-                self._x, self._y, self._w, self._h = x, y, w, h
+                self.left, self.top, self._w, self._h = x, y, w, h
         r = _Rect()
         r.set(0, 0, 800, 600)
         return r

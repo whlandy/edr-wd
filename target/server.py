@@ -435,6 +435,9 @@ def restore_edr() -> str:
     if _backend is None:
         return _backend_unavailable("restore_edr")
     try:
+        def _value(v):
+            return v() if callable(v) else v
+
         connected_app = getattr(_backend, "connected_app_instance", None) or getattr(_backend, "connected_app", None)
         if connected_app is None:
             return json.dumps({"ok": False, "error": "Not connected"})
@@ -456,11 +459,11 @@ def restore_edr() -> str:
 
         if rect is None:
             return json.dumps({"ok": False, "error": "Window rectangle unavailable"})
-        width = rect.width() if callable(getattr(rect, "width", None)) else getattr(rect, "width", 0)
-        height = rect.height() if callable(getattr(rect, "height", None)) else getattr(rect, "height", 0)
+        width = _value(getattr(rect, "width", 0))
+        height = _value(getattr(rect, "height", 0))
         return json.dumps({
             "ok": True,
-            "rectangle": {"x": rect.left, "y": rect.top, "w": width, "h": height},
+            "rectangle": {"x": _value(getattr(rect, "left", 0)), "y": _value(getattr(rect, "top", 0)), "w": width, "h": height},
             "is_minimized": win.is_minimized()
         })
     except Exception as e:
