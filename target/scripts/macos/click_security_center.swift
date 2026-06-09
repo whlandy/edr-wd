@@ -107,8 +107,9 @@ func tryAXPress(_ el: AXUIElement) -> Bool {
 func parentOf(_ el: AXUIElement) -> AXUIElement? {
     var parentRef: CFTypeRef?
     let r = AXUIElementCopyAttributeValue(el, kAXParentAttribute as CFString, &parentRef)
-    guard r == .success else { return nil }
-    return parentRef as! AXUIElement
+    guard r == .success, let p = parentRef else { return nil }
+    // parentRef is always an AXUIElement when the call succeeds
+    return p as! AXUIElement
 }
 
 func pressableAncestor(_ el: AXUIElement) -> AXUIElement? {
@@ -132,12 +133,12 @@ func rectFromElement(_ el: AXUIElement) -> (CGPoint, CGSize)? {
     var sizeRef: CFTypeRef?
     guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
           AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
-          let posValue = posRef as? AXValue,
-          let sizeValue = sizeRef as? AXValue else { return nil }
+          CFGetTypeID(posRef) == AXValueGetTypeID(),
+          CFGetTypeID(sizeRef) == AXValueGetTypeID() else { return nil }
     var pos = CGPoint.zero
     var size = CGSize.zero
-    guard AXValueGetValue(posValue, .cgPoint, &pos),
-          AXValueGetValue(sizeValue, .cgSize, &size) else { return nil }
+    guard AXValueGetValue(posRef!, .cgPoint, &pos),
+          AXValueGetValue(sizeRef!, .cgSize, &size) else { return nil }
     return (pos, size)
 }
 
