@@ -435,10 +435,11 @@ def restore_edr() -> str:
     if _backend is None:
         return _backend_unavailable("restore_edr")
     try:
-        if _backend.connected_app is None:
+        connected_app = getattr(_backend, "connected_app_instance", None) or getattr(_backend, "connected_app", None)
+        if connected_app is None:
             return json.dumps({"ok": False, "error": "Not connected"})
 
-        wins = _backend.connected_app.windows()
+        wins = connected_app.windows()
         if not wins:
             return json.dumps({"ok": False, "error": "No windows found"})
 

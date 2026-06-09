@@ -218,6 +218,13 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, in
             if must_pass and "found" in result:
                 ok = ok and result.get("found") is True
             if ok:
+                if tool == "restore_edr":
+                    rect = result.get("rectangle")
+                    if not isinstance(rect, dict) or not all(k in rect for k in ("x", "y", "w", "h")):
+                        print(f"FAIL: restore_edr missing rectangle: {result}")
+                        failed += 1
+                        errors.append(name)
+                        continue
                 extra = ""
                 if "windows" in result:
                     extra = f" ({len(result.get('windows', []))} windows)"

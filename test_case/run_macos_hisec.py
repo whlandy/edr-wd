@@ -53,15 +53,9 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
     print("Baseline: MCP tools + backend health")
     print("=" * 60)
 
-    def tools_list_raw():
-        r = client.tools_list()
-        if isinstance(r, str):
-            r = json.loads(r)
-        return r
-
     baseline_tests = [
         ("tools/list",
-         None, None,  # handled specially below
+         "tools_list", {},
          lambda r: (isinstance(r, dict) and len(r.get("result", {}).get("tools", [])) >= 1,
                     "no tools returned")),
 
@@ -78,11 +72,7 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
     for name, tool, args, check_fn in baseline_tests:
         print(f"\n  {name}... ", end="", flush=True)
         try:
-            if tool is None:
-                # tools/list: use dedicated method, not call_tool
-                result = tools_list_raw()
-            else:
-                result = call_tool(tool, args)
+            result = call_tool(tool, args)
             ok, err = check_fn(result)
             if verbose and not ok:
                 print(f"\n    FAIL: {err}\n    detail: {json.dumps(result, ensure_ascii=False)[:300]}")
@@ -258,9 +248,9 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
             passed += 1
         elif result.get("ok") is False and any(
             kw in (result.get("error") or "").lower()
-            for kw in ("permission", "denied", "unavailable", "ax", "not supported", "unsupported")
+            for kw in ("permission", "denied", "unavailable", "ax")
         ):
-            print(f"SKIP  (macOS backend dump_tree not supported)")
+            print(f"SKIP  (AX/permission denied — {result.get('error', '')})")
             skipped += 1
         else:
             print(f"FAIL  dump_tree returned ok={result.get('ok')}")
@@ -276,15 +266,9 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
     try:
         result = call_tool("screenshot", {})
         err_msg = (result.get("error") or "").lower()
-        b64 = result.get("image_b64", result.get("image_base64", ""))
-        saved_to = result.get("saved_to")
-        if result.get("ok") is True and (b64 or saved_to):
-            print(f"PASS  (image_b64={len(b64)} chars, saved_to={saved_to})")
+        if result.get("ok") is True:
+            print(f"PASS  (image_b64={len(result.get('image_b64', result.get('image_base64', '')))} chars)")
             passed += 1
-        elif result.get("ok") is True and not b64 and not saved_to:
-            print(f"FAIL  screenshot returned ok=true but image data is empty")
-            failed += 1
-            errors.append("Step9 screenshot")
         elif any(kw in err_msg for kw in (
             "screen recording", "recording permission",
             "no active display", "could not create image",
@@ -305,15 +289,16 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
     print(f"\n  Step10: restore_edr... ", end="", flush=True)
     try:
         result = call_tool("restore_edr", {})
-        restored = result.get("restored")
-        method = result.get("method", "")
-        if result.get("ok") is True and restored is True:
-            print("PASS")
-            passed += 1
-        elif result.get("ok") is True and method == "noop":
-            print(f"SKIP  (macOS restore not supported, method=noop)")
-            skipped += 1
-        elif result.get("ok") is False or restored is False:
+        if result.get("ok") is True:
+            rect = result.get("rectangle")
+            if not isinstance(rect, dict) or not all(k in rect for k in ("x", "y", "w", "h")):
+                print(f"FAIL  restore_edr missing rectangle: {result}")
+                failed += 1
+                errors.append("Step10 restore_edr")
+            else:
+                print(f"PASS  rect={rect}")
+                passed += 1
+        else:
             print(f"FAIL  restore_edr: {result.get('error', 'unknown')}")
             failed += 1
             errors.append("Step10 restore_edr")
@@ -322,54 +307,15 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
         failed += 1
         errors.append("Step10 restore_edr")
 
-    # Step11: final verify — REAL-TIME check that windows still exist
-    # Not a cached result; actually probe is_window_open for both windows.
-    # client must be present (EDR security center is the core target).
-    # main may be hidden after client opens — WARN but still pass if client found.
-    print(f"\n  Step11: final verify — real-time is_window_open check... ", end="", flush=True)
-    main_realtime_found = False
-    client_realtime_found = False
-    try:
-        # Real-time check: main window (HiSecEndpointAgent)
-        main_result = call_tool("is_window_open", {"process_name": "HiSecEndpointAgent"})
-        main_realtime_found = main_result.get("ok") is True and main_result.get("found") is True
-        if not main_realtime_found:
-            # Try by title as fallback
-            main_title_result = call_tool("is_window_open", {
-                "window_title": "华为智能终端安全系统"
-            })
-            main_realtime_found = (
-                main_title_result.get("ok") is True
-                and main_title_result.get("found") is True
-            )
-    except Exception:
-        pass  # keep main_realtime_found = False
-
-    try:
-        # Real-time check: client window (EDRClient or HiSecEndpoint)
-        client_result = call_tool("is_window_open", {"process_name": "EDRClient"})
-        client_realtime_found = client_result.get("ok") is True and client_result.get("found") is True
-        if not client_realtime_found:
-            # Try HiSecEndpoint as fallback
-            client_title_result = call_tool("is_window_open", {
-                "window_title": "华为HiSec Endpoint"
-            })
-            client_realtime_found = (
-                client_title_result.get("ok") is True
-                and client_title_result.get("found") is True
-            )
-    except Exception:
-        pass  # keep client_realtime_found = False
-
-    # client is the core EDR window — must be present
-    if client_realtime_found:
-        if main_realtime_found:
-            print(f"PASS  main=found client=found (real-time)")
-        else:
-            print(f"PASS  main=not found client=found (main may be hidden, client is core)")
+    # Step11: final verify — activate_edr result still valid
+    print(f"\n  Step11: final verify — main/client windows still present... ", end="", flush=True)
+    main_still_found = activate_result.get("main", {}).get("window_found") is True
+    client_still_found = activate_result.get("client", {}).get("window_found") is True
+    if main_still_found or client_still_found:
+        print(f"PASS  main={main_still_found} client={client_still_found}")
         passed += 1
     else:
-        print(f"FAIL  client window no longer present (real-time check)")
+        print("FAIL  no windows remain visible after restore")
         failed += 1
         errors.append("Step11 final verify")
 

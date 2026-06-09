@@ -165,8 +165,12 @@ class TestWindowsHisecE2E:
         result = client.call_tool("restore_edr", {})
         print(f"\n[Step9 restore_edr] {result}")
         # restore_edr 需要先 connect，所以可能失败
-        # 只检查返回结构，不强制要求成功（connect 失败时这是预期行为）
+        # 这里只要连接成功，就要求返回结构完整
         assert "ok" in result
+        if result.get("ok") is True:
+            rect = result.get("rectangle")
+            assert isinstance(rect, dict), f"restore_edr missing rectangle: {result}"
+            assert all(k in rect for k in ("x", "y", "w", "h")), f"restore_edr rectangle incomplete: {result}"
 
     def test_10_verify_still_open(self, client, windows_backend):
         """Step 7: 操作后再次验证窗口仍打开"""

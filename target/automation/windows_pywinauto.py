@@ -47,6 +47,11 @@ class WindowsPywinautoBackend:
         return self._gui.app
 
     @property
+    def connected_app_instance(self):
+        """Expose the connected app object for restore_edr and similar helpers."""
+        return self._gui.app
+
+    @property
     def main_window(self):
         """Expose the connected main window (used by status tool)."""
         return self._gui.main_window

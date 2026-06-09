@@ -220,39 +220,22 @@ python target/tests/smoke_mcp_client.py --base-url http://127.0.0.1:8765/mcp --g
 The smoke client is backend-aware:
 - Windows backends exercise `run_powershell`, async jobs, `connect`, and `dump_tree`
 - macOS backends exercise `list_windows`, `activate_app`, and Finder-based GUI plumbing
-- macOS generic `click_at` is a plumbing check. Dry-run is pass; real-click
-  mode may skip when the optional local click helper or Accessibility
-  permission is unavailable.
 - `status` is backend-aware; macOS-only window diagnostics stay on the macOS backend
 - `status.backend_kind` is the stable backend selector (`windows_pywinauto` / `macos_accessibility`)
 - `status.host` / `status.port` report the actual runtime bind address, not a hard-coded 8765
-- Basic pytest integration includes the cross-platform HiSec window-pair E2E in
-  `test_case/test_integration/test_edr_window_pair_e2e.py`. That test dispatches
-  by backend: Windows opens `HisecEndpointAgent.exe` then `EDRClient.exe`, while
-  macOS uses `activate_edr` to open `HiSecEndpointAgent` and `EDRClient`; both
-  branches verify the two desktop windows with `wait_window` / `is_window_open`.
-- macOS HiSec coverage has two entrypoints:
-  `test_case/run_macos_hisec.py` is the profile runner for
-  `--profile macos_hisec`; `test_case/test_e2e/test_macos_hisec_e2e.py`
-  is the pytest E2E window-pair check. Both activate native
-  `/Applications/HiSecEndpoint.app` through the macOS backend and verify the
-  `HiSecEndpointAgent` main window plus the `EDRClient` window are visible.
-- Pytest HiSec E2E naming is symmetric by target platform:
-  `test_case/test_e2e/test_windows_hisec_e2e.py` and
-  `test_case/test_e2e/test_macos_hisec_e2e.py`.
-- Pytest E2E files are platform-guarded by backend. Running
-  `python -m pytest test_case/test_e2e -v` on a macOS target should execute
-  `test_macos_hisec_e2e.py` and skip the Windows-only
-  `test_windows_hisec_e2e.py`, not fail it.
+- `restore_edr` is connect-required and returns a structured window payload when the
+  backend exposes a connected app instance; the regression tests now verify the
+  returned `rectangle` fields as part of the workflow
+- Windows GUI smoke/E2E coverage opens `HisecEndpointAgent.exe` first, then
+  `EDRClient.exe`, and verifies both desktop windows with `wait_window` /
+  `is_window_open`. The same window-pair E2E is part of the basic pytest
+  integration suite in `test_case/test_integration/test_edr_window_pair_e2e.py`.
 
 Full profile-dispatched tests:
 
 ```bash
 python test_case/run_tests.py --target win-dev
 python test_case/run_tests.py --target mac-dev
-python test_case/run_tests.py --target mac-dev --profile macos_hisec
-EDR_WD_TARGET=mac-dev python -m pytest test_case/test_e2e -v
-EDR_WD_TARGET=mac-dev python -m pytest test_case/test_e2e/test_macos_hisec_e2e.py
 ```
 
 If you need low-level config validation:
