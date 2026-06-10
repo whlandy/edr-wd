@@ -23,8 +23,7 @@ import httpx
 # ── Target resolution (Phase 4) ───────────────────────────────────────────────
 
 from agent.target_config import TargetConfig
-from agent import target_manager
-from agent import mcp_manager
+from agent.subagent import TargetSubAgentPool
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +31,14 @@ from agent import mcp_manager
 # ---------------------------------------------------------------------------
 
 _TC: Optional[TargetConfig] = None
-_MCP_INIT_BY_TARGET: dict[str, dict] = {}  # target_name → initialize result
+_SUBAGENT_POOL: Optional[TargetSubAgentPool] = None
+
+
+def _subagent_pool() -> TargetSubAgentPool:
+    global _SUBAGENT_POOL
+    if _SUBAGENT_POOL is None:
+        _SUBAGENT_POOL = TargetSubAgentPool.from_config()
+    return _SUBAGENT_POOL
 
 
 def get_target_name() -> str:
@@ -57,7 +63,7 @@ def ensure_server_running(target: Optional[str] = None) -> tuple[bool, str]:
     Returns (ok, message).
     """
     name = target or get_target_name()
-    result = target_manager.ensure_server_running(name)
+    result = _subagent_pool().get(name).ensure_running()
     if result["ok"]:
         return True, f"{name}: {result['data'].get('status', 'running')}"
     return False, f"{name}: {result.get('error', 'unknown error')}"
@@ -72,12 +78,8 @@ def mcp_initialize(target: Optional[str] = None) -> dict:
 
     Returns mcp_manager.initialize() result dict.
     """
-    global _MCP_INIT_BY_TARGET
     name = target or get_target_name()
-    if name in _MCP_INIT_BY_TARGET:
-        return _MCP_INIT_BY_TARGET[name]
-    _MCP_INIT_BY_TARGET[name] = mcp_manager.initialize(name)
-    return _MCP_INIT_BY_TARGET[name]
+    return _subagent_pool().get(name).initialize_mcp()
 
 
 # ---------------------------------------------------------------------------
@@ -243,13 +245,31 @@ class McpClient:
 def check_mcp_server() -> tuple[bool, str]:
     """
     Check if MCP server is responding on the configured MCP URL.
-    DEPRECATED: Use target_manager.check_server_health() for target-aware checks.
+    Lightweight check for pytest collection-time skip markers.
+
+    Do not call TargetSubAgent.ensure_running() here: pytest evaluates
+    skipif conditions during collection, and collection must not start or
+    repair target servers.
     """
     try:
         target = get_target_name()
-        result = target_manager.check_server_health(target)
-        port_open = result["data"]["port_open"]
-        mcp_url = result["data"]["mcp_url"]
+        tc = TargetConfig()
+        cfg = tc.get_target(target)
+        mcp = cfg.get("mcp", {})
+        ssh = cfg.get("ssh", {})
+        path = mcp.get("path", "/mcp")
+        if mcp.get("connect_mode", "direct") == "tunnel":
+            host = "127.0.0.1"
+            port = mcp.get("tunnel", {}).get("local_port", 18765)
+        else:
+            host = ssh.get("host", "")
+            port = mcp.get("port", 8765)
+        mcp_url = f"http://{host}:{port}{path}"
+        port_open = False
+        if host:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.5)
+                port_open = sock.connect_ex((host, int(port))) == 0
         if not port_open:
             return False, f"MCP port not open on {mcp_url}"
         return True, f"MCP server responding at {mcp_url}"

@@ -5,6 +5,8 @@
 *.log.*
 logs/
 target/logs/
+target/server.log
+target/server.pid
 
 # Local config (contains real passwords / credentials)
 config/targets.local.json
@@ -33,6 +35,9 @@ Thumbs.db
 
 # Test
 .pytest_cache/
+
+# Local scratch copies; runtime target scripts belong under target/scripts/
+scripts/macos/
 
 # Local macOS helper build artifacts
 target/scripts/macos/click_security_center

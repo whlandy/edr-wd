@@ -170,8 +170,15 @@ def _normalize_target(raw: dict) -> dict:
     has_server = "server" in raw
     has_connection = "connection" in raw
     if not has_server and not has_connection:
-        # Already new schema — return as-is
-        return raw
+        # Already new schema. Fill omitted platform for older local configs:
+        # a target with a macos block and no windows block is a macOS target.
+        out = dict(raw)
+        if "platform" not in out:
+            if "macos" in out and "windows" not in out:
+                out["platform"] = "macos"
+            else:
+                out["platform"] = "windows"
+        return out
 
     out = dict(raw)  # shallow copy — don't mutate caller's dict
 

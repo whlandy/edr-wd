@@ -26,15 +26,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from test_case.conftest import (
     McpClient,
-    ensure_server_running,
     get_target_name,
-    mcp_initialize,
 )
 from test_case.test_profiles import resolve_runner, PROFILE_RUNNERS
 
 # Target manager for health checks
 from agent import target_manager
 from agent.target_config import TargetConfig
+from agent.subagent import TargetSubAgent
 
 
 # Per-platform default profile. The legacy win-dev has no app_profile
@@ -55,27 +54,6 @@ DEFAULT_PROFILE_BY_PLATFORM: dict[str, str] = {
     "macos":   "macos_generic",
 }
 
-DEFAULT_PROFILE_BY_BACKEND: dict[str, str] = {
-    "windows_pywinauto": "windows_hisec",
-    "uia": "windows_hisec",
-    "win32": "windows_hisec",
-    "macos_accessibility": "macos_generic",
-}
-
-PROFILE_BACKENDS: dict[str, set[str]] = {
-    "windows_hisec": {"windows_pywinauto", "uia", "win32"},
-    "macos_generic": {"macos_accessibility"},
-    "macos_hisec": {"macos_accessibility"},
-}
-
-
-def _profile_backend_conflict(profile: str, backend: str | None) -> bool:
-    if not backend:
-        return False
-    expected = PROFILE_BACKENDS.get(profile)
-    return expected is not None and backend not in expected
-
-
 def _resolve_profile(target_name: str, override: str | None) -> str:
     """
     Decide which test profile to run.
@@ -92,14 +70,10 @@ def _resolve_profile(target_name: str, override: str | None) -> str:
     if override:
         return override
     tc = TargetConfig()
-    # Pull platform + app_profile directly from the in-memory data so we
-    # never depend on get_target_platform() (which raises KeyError when
-    # the target name is not in the active config — e.g. when the only
-    # declared target is win-dev but the operator passes --target mac-dev).
-    tc = TargetConfig()
-    targets = tc.list_targets()
-    raw = targets.get(target_name, {}) if isinstance(targets, dict) else {}
-    if not raw:
+    try:
+        target_cfg = tc.get_target(target_name)
+    except KeyError:
+        targets = tc.list_targets()
         # Target not declared in the active config. Only allow windows_hisec
         # fallback when explicitly requested via --legacy. Otherwise this is
         # a fatal error to prevent a mac target being silently routed to the
@@ -110,8 +84,8 @@ def _resolve_profile(target_name: str, override: str | None) -> str:
             f"       Add it to config/targets.local.json, or use --legacy to "
             f"force windows_hisec for local debugging only."
         )
-    platform = raw.get("platform", "windows")
-    explicit = raw.get("app_profile") if isinstance(raw, dict) else None
+    platform = target_cfg.get("platform", "windows")
+    explicit = target_cfg.get("app_profile")
     if explicit:
         return explicit
     default = DEFAULT_PROFILE_BY_PLATFORM.get(platform)
@@ -163,11 +137,20 @@ def run_tests(verbose: bool = False, target: str | None = None,
     print(f"  Runner:      {runner.__module__}.{runner.__name__}")
     print()
 
+    subagent = TargetSubAgent.from_name(target_name, config=tc)
+
     # ── Ensure MCP server is running on target ─────────────────────
     print("=" * 60)
     print("Starting MCP Server")
     print("=" * 60)
-    server_ok, srv_msg = ensure_server_running(target_name)
+    ensure_result = subagent.ensure_running()
+    server_ok = bool(ensure_result.get("ok"))
+    status_text = ensure_result.get("data", {}).get("status", "running")
+    srv_msg = (
+        f"{target_name}: {status_text}"
+        if server_ok
+        else f"{target_name}: {ensure_result.get('error', 'unknown error')}"
+    )
     print(f"  MCP Server: {'[OK]' if server_ok else '[FAIL]'} {srv_msg}")
     if not server_ok:
         print("[FAIL] Could not start MCP server on target.")
@@ -187,7 +170,7 @@ def run_tests(verbose: bool = False, target: str | None = None,
     print()
 
     try:
-        init_result = mcp_initialize(target_name)
+        init_result = subagent.initialize_mcp()
         if not init_result["ok"]:
             print(f"[FAIL] MCP initialize failed: {init_result.get('error')}")
             return False
@@ -198,35 +181,29 @@ def run_tests(verbose: bool = False, target: str | None = None,
 
         client = McpClient(mcp_init_result=init_result)
 
-        status = client.call_tool("status", {})
-        backend_kind = (
-            status.get("backend_kind")
-            or status.get("backend")
-            if isinstance(status, dict)
-            else None
+        explicit_profile = bool(profile_override) or app_profile != "(default by platform)"
+        ok_profile, profile_to_run, profile_error = subagent.resolve_profile_for_live_backend(
+            profile,
+            explicit_profile=explicit_profile,
         )
-        if _profile_backend_conflict(profile, backend_kind):
-            live_default = DEFAULT_PROFILE_BY_BACKEND.get(backend_kind)
-            explicit_profile = bool(profile_override) or app_profile != "(default by platform)"
-            if explicit_profile or live_default is None:
-                print(
-                    f"[FAIL] profile={profile!r} does not match live "
-                    f"backend={backend_kind!r}."
-                )
-                print(
-                    "       Fix target.platform/app_profile in config or pass the "
-                    "matching --profile explicitly."
-                )
-                return False
-            rerouted = resolve_runner(live_default)
+        if not ok_profile:
+            print(f"[FAIL] {profile_error}.")
+            print(
+                "       Fix target.platform/app_profile in config or pass the "
+                "matching --profile explicitly."
+            )
+            return False
+        if profile_to_run != profile:
+            rerouted = resolve_runner(profile_to_run)
             if rerouted is None:
-                print(f"[FAIL] No test runner registered for live backend profile={live_default!r}.")
+                print(f"[FAIL] No test runner registered for live backend profile={profile_to_run!r}.")
                 return False
             print(
                 f"[WARN] Config selected profile={profile!r}, but live MCP "
-                f"backend is {backend_kind!r}; rerouting to profile={live_default!r}."
+                f"backend is {subagent.state.backend_kind!r}; "
+                f"rerouting to profile={profile_to_run!r}."
             )
-            profile = live_default
+            profile = profile_to_run
             runner = rerouted
             print(f"  Runner:      {runner.__module__}.{runner.__name__}")
             print()

@@ -82,6 +82,14 @@ def rpc(base_url: str, session_id: str, method: str, params: dict, request_id: i
     try:
         return json.loads(body)
     except json.JSONDecodeError as exc:
+        for line in body.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            try:
+                return json.loads(line[5:].strip())
+            except json.JSONDecodeError:
+                continue
         raise RuntimeError(f"RPC {method} returned non-JSON body: {body[:500]}") from exc
 
 

@@ -32,6 +32,9 @@ Use these directories by responsibility:
 
 - `agent/`: agent-side orchestration only. It loads target config, handles
   SSH/SFTP, selects lifecycle backends, and initializes MCP sessions.
+- `agent/subagent/`: one target-scoped control object per target. Each
+  `TargetSubAgent` owns that target's lifecycle calls, MCP URL/session,
+  backend status, and profile/backend validation.
 - `agent/lifecycle/`: target lifecycle adapters. These call target scripts
   remotely; they should not contain GUI automation logic.
 - `target/`: files copied to or run on the target machine. `target/server.py`
@@ -40,12 +43,16 @@ Use these directories by responsibility:
   decides which backend is active.
 - `target/scripts/`: target-local startup, stop, health, and installer scripts.
 - `test_case/`: profile-dispatched test entrypoints and pytest coverage.
-- `scripts/`: developer utilities that are not runtime entrypoints.
+- `scripts/`: developer utilities that are not runtime entrypoints. Do not
+  place target runtime scripts here; macOS/Windows target scripts belong under
+  `target/scripts/`.
 - `docs/architecture/` and `references/`: architecture notes and operation
   references.
 
-Generated files must stay out of Git: `.venv/`, `__pycache__/`, `.pytest_cache/`,
-`*.log`, `target/logs/`, `.DS_Store`, and local target configs.
+Generated files and scratch copies must stay out of Git: `.venv/`,
+`__pycache__/`, `.pytest_cache/`, `*.log`, `target/logs/`, `target/server.log`,
+`.DS_Store`, local target configs, and copied runtime scripts under
+`scripts/macos/`.
 
 ## Architecture
 
@@ -114,23 +121,27 @@ python -m agent.target_config --guide
 
 The agent-side control flow is always the same, regardless of the agent OS:
 
-1. `target_manager.ensure_server_running(name)` checks TCP reachability and
+1. `TargetSubAgent.from_name(name)` creates the per-target controller.
+2. `TargetSubAgent.ensure_running()` checks TCP reachability and
    starts the target server through the platform lifecycle backend if needed.
-2. `mcp_manager.initialize(name)` performs MCP initialize and returns a
+3. `TargetSubAgent.initialize_mcp()` performs MCP initialize and stores a
    session id plus the MCP URL.
-3. `mcp_manager.call_mcp_tool(...)` sends tool calls over the active session.
+4. `TargetSubAgent.call_tool(...)` sends tool calls over that target's owned
+   session and can reinitialize once when the session is stale.
+
+The lower-level `target_manager` and `mcp_manager` modules remain available,
+but new orchestration should prefer `agent.subagent.TargetSubAgent` or
+`TargetSubAgentPool` so sessions and health state are isolated per target.
 
 Example:
 
 ```python
-from agent.target_manager import ensure_server_running
-from agent.mcp_manager import initialize, call_mcp_tool
+from agent.subagent import TargetSubAgent
 
-ensure_server_running("win-dev")
-init = initialize("win-dev")
-mcp_url = init["data"]["mcp_url"]
-session_id = init["data"]["session_id"]
-print(call_mcp_tool(session_id, mcp_url, "status"))
+agent = TargetSubAgent.from_name("win-dev")
+agent.ensure_running()
+agent.initialize_mcp()
+print(agent.call_tool("status"))
 ```
 
 ### Convenience wrapper
