@@ -187,13 +187,26 @@ macOS lifecycle is handled by `agent/lifecycle/macos.py` and the scripts under
 - `stop_server.sh` stops the server by port/pidfile
 - `com.edr-wd.target.plist.template` is rendered during install
 
-The macOS backend is intentionally narrower than the Windows backend:
+The macOS backend is still narrower than the Windows backend, but it now has a
+basic Accessibility component discovery path:
 
-- `dump_tree` / control_id workflows are Windows-first
+- `dump_tree` on Windows uses pywinauto/UIA; `dump_tree` on macOS uses System
+  Events Accessibility and returns normalized controls with `role`, `title`,
+  `description`, `value`, `identifier`, `rectangle`, and `control_id`
+- `find_control` works on both platforms. Windows filters the UIA dump; macOS
+  filters the Accessibility tree.
+- `click` / `click_target` work on macOS for common selectors by resolving a
+  matched AX node and falling back to its rectangle center.
 - macOS uses Accessibility/System Events plus app/window detection
 - macOS `click_at` is dry-run by default; set
   `EDR_WD_ALLOW_REAL_CLICKS=1` on the target server before relying on it for
   real UI interaction.
+- The shared action space now includes `double_click_at`, `right_click_at`,
+  `middle_click_at`, `hover_at`, `drag`, and `scroll` for drag-and-drop,
+  context menus, sliders, and hover-triggered flows.
+- `status.action_space` reports which action primitives are actually supported
+  by the loaded backend. Use it in tests before assuming a selector or gesture
+  exists on a platform.
 - `activate_edr` on macOS targets the `EDRClient` application window. It first
   tries `/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh`
   via non-interactive sudo and only accepts success when an `EDRClient` window
@@ -217,8 +230,9 @@ by `EDR_WD_AUTOMATION_BACKEND`:
 Primary tools:
 
 - GUI: `connect`, `dump_tree`, `click`, `click_target`, `click_at`,
-  `click_window_at`, `type_text`, `select`, `get_text`, `screenshot`,
-  `restore_edr`
+  `click_window_at`, `double_click_at`, `right_click_at`, `middle_click_at`,
+  `hover_at`, `drag`, `scroll`, `type_text`, `select`, `get_text`,
+  `screenshot`, `restore_edr`
 - Window/app: `activate_app`, `list_windows`, `is_window_open`, `wait_window`,
   `activate_edr`, `status`
 - PowerShell: `run_powershell`, `start_powershell`, `get_job`, `cancel_job`

@@ -25,7 +25,7 @@ Minimum viable interface (M4/M5):
     connect(process_name=, title_re=, app_name=, bundle_id=,
             pid=, timeout=, auto_activate=False) -> dict
 
-Windows-specific (not on macOS in v1):
+Discovery and connected-window interaction APIs:
     dump_tree(max_depth=10)
     click(automation_id, control_id, text, class_name, ...)
     click_target(...)
@@ -36,10 +36,11 @@ Windows-specific (not on macOS in v1):
     activate_edr(...)   — HiSec EDR specific
     restore_edr()       — HiSec EDR specific
 
-These methods are still part of the abstract interface, but macOS
-implementations may return {"ok": False, "error": "not supported on
-this platform"} for them. The MCP tool wrappers handle the
-"unsupported on this backend" case uniformly.
+Windows backends usually implement the full selector-driven surface.
+macOS backends may implement only a subset and return
+{"ok": False, "error": "not supported on this backend"} for the rest.
+The MCP tool wrappers handle the "unsupported on this backend" case
+uniformly.
 """
 
 from __future__ import annotations
@@ -80,6 +81,24 @@ class AutomationBackend(Protocol):
     ) -> dict: ...
     def screenshot(self, path: Optional[str] = None) -> dict: ...
     def click_at(self, x: int, y: int) -> dict: ...
+    def double_click_at(self, x: int, y: int) -> dict: ...
+    def right_click_at(self, x: int, y: int) -> dict: ...
+    def middle_click_at(self, x: int, y: int) -> dict: ...
+    def hover_at(self, x: int, y: int) -> dict: ...
+    def drag(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        duration: float = 0.25,
+    ) -> dict: ...
+    def scroll(
+        self,
+        clicks: int,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+    ) -> dict: ...
 
     # ── Connect-required ─────────────────────────────────────────────────────
 
@@ -95,6 +114,14 @@ class AutomationBackend(Protocol):
     ) -> dict: ...
     def dump_tree(
         self, window_title_re: Optional[str] = None, max_depth: int = 10
+    ) -> dict: ...
+    def find_control(
+        self,
+        text: Optional[str] = None,
+        role: Optional[str] = None,
+        identifier: Optional[str] = None,
+        title_re: Optional[str] = None,
+        max_depth: int = 10,
     ) -> dict: ...
     def click(
         self,
@@ -117,6 +144,13 @@ class AutomationBackend(Protocol):
         class_name: Optional[str] = None,
         parent_text: Optional[str] = None,
         automation_id: Optional[str] = None,
+        auto_id_contains: Optional[str] = None,
+        auto_id_suffix: Optional[str] = None,
+        parent_of: Optional[str] = None,
+        control_type: Optional[str] = None,
+        x_offset: int = 0,
+        y_offset: int = 0,
+        parent_fallback: bool = True,
         timeout: float = 5.0,
     ) -> dict: ...
     def click_window_at(self, x: int, y: int, window_title_re: Optional[str] = None) -> dict: ...

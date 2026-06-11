@@ -17,7 +17,10 @@ cases by returning a structured error.
 
 from __future__ import annotations
 
+import re
 from typing import Optional, Any
+
+import pyautogui
 
 # pywinauto_client is Windows-only and depends on pywinauto + psutil, which
 # are NOT installed on macOS targets. We import it lazily inside __init__
@@ -110,6 +113,60 @@ class WindowsPywinautoBackend:
     def click_at(self, x: int, y: int) -> dict:
         return self._gui.click_at(x, y)
 
+    def double_click_at(self, x: int, y: int) -> dict:
+        try:
+            pyautogui.doubleClick(x=int(x), y=int(y), button="left")
+            return {"ok": True, "method": "pyautogui.doubleClick", "x": int(x), "y": int(y)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def right_click_at(self, x: int, y: int) -> dict:
+        try:
+            pyautogui.rightClick(x=int(x), y=int(y))
+            return {"ok": True, "method": "pyautogui.rightClick", "x": int(x), "y": int(y)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def middle_click_at(self, x: int, y: int) -> dict:
+        try:
+            pyautogui.middleClick(x=int(x), y=int(y))
+            return {"ok": True, "method": "pyautogui.middleClick", "x": int(x), "y": int(y)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def hover_at(self, x: int, y: int) -> dict:
+        try:
+            pyautogui.moveTo(int(x), int(y))
+            return {"ok": True, "method": "pyautogui.moveTo", "x": int(x), "y": int(y)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def drag(self, x1: int, y1: int, x2: int, y2: int, duration: float = 0.25) -> dict:
+        try:
+            pyautogui.moveTo(int(x1), int(y1))
+            pyautogui.dragTo(int(x2), int(y2), duration=float(duration), button="left")
+            return {
+                "ok": True,
+                "method": "pyautogui.dragTo",
+                "start": {"x": int(x1), "y": int(y1)},
+                "end": {"x": int(x2), "y": int(y2)},
+                "duration": float(duration),
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def scroll(self, clicks: int, x: Optional[int] = None, y: Optional[int] = None) -> dict:
+        try:
+            if x is not None and y is not None:
+                pyautogui.moveTo(int(x), int(y))
+            pyautogui.scroll(int(clicks))
+            payload = {"ok": True, "method": "pyautogui.scroll", "clicks": int(clicks)}
+            if x is not None and y is not None:
+                payload["point"] = {"x": int(x), "y": int(y)}
+            return payload
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     # ── Connect-required ──────────────────────────────────────────────────────
 
     def connect(
@@ -134,6 +191,50 @@ class WindowsPywinautoBackend:
 
     def dump_tree(self, window_title_re: Optional[str] = None, max_depth: int = 10) -> dict:
         return self._gui.dump_tree(window_title_re, max_depth=max_depth)  # type: ignore[arg-type]
+
+    def find_control(
+        self,
+        text: Optional[str] = None,
+        role: Optional[str] = None,
+        identifier: Optional[str] = None,
+        title_re: Optional[str] = None,
+        max_depth: int = 10,
+    ) -> dict:
+        tree = self.dump_tree(max_depth=max_depth)
+        if not tree.get("ok"):
+            return tree
+        controls = tree.get("controls", [])
+        if not isinstance(controls, list):
+            return {"ok": False, "error": "dump_tree returned no controls array"}
+        title_rx = None
+        if title_re:
+            try:
+                title_rx = re.compile(title_re)
+            except re.error as e:
+                return {"ok": False, "error": f"invalid title_re: {e}"}
+        matches = []
+        for control in controls:
+            if not isinstance(control, dict):
+                continue
+            haystack = " ".join(
+                str(control.get(k) or "")
+                for k in ("text", "title", "name", "class_name", "automation_id")
+            )
+            if text and text not in haystack:
+                continue
+            if role and role.lower() not in str(control.get("control_type") or control.get("class_name") or "").lower():
+                continue
+            if identifier and identifier != str(control.get("automation_id") or ""):
+                continue
+            if title_rx and not title_rx.search(haystack):
+                continue
+            matches.append(control)
+        return {
+            "ok": bool(matches),
+            "matches": matches,
+            "count": len(matches),
+            "error": None if matches else "No Windows control matched selector",
+        }
 
     def click(
         self,
@@ -166,11 +267,20 @@ class WindowsPywinautoBackend:
         class_name: Optional[str] = None,
         parent_text: Optional[str] = None,
         automation_id: Optional[str] = None,
+        auto_id_contains: Optional[str] = None,
+        auto_id_suffix: Optional[str] = None,
+        parent_of: Optional[str] = None,
+        control_type: Optional[str] = None,
+        x_offset: int = 0,
+        y_offset: int = 0,
+        parent_fallback: bool = True,
         timeout: float = 5.0,
     ) -> dict:
         # Same — drop timeout; click_target does not take it.
         return self._gui.click_target(  # type: ignore[call-overload]
             control_id, text, class_name, parent_text, automation_id,
+            auto_id_contains, auto_id_suffix, parent_of, control_type,
+            x_offset, y_offset, parent_fallback,
         )
 
     def click_window_at(self, x: int, y: int, window_title_re: Optional[str] = None) -> dict:

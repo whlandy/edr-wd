@@ -175,6 +175,37 @@ def dump_tree(window_title_re: str = None, max_depth: int = 10) -> str:
 
 
 @mcp.tool(
+    name="find_control",
+    description=(
+        "Find controls/components in the connected window by text, role, identifier, or title regex. "
+        "Windows resolves this through dump_tree/UIA; macOS resolves it through System Events Accessibility."
+    ),
+)
+def find_control(
+    text: str = None,
+    role: str = None,
+    identifier: str = None,
+    title_re: str = None,
+    max_depth: int = 10,
+) -> str:
+    if _backend is None:
+        return _backend_unavailable("find_control")
+    if not hasattr(_backend, "find_control"):
+        return json.dumps({
+            "ok": False,
+            "error": f"find_control is not supported by the {type(_backend).__name__} backend",
+        })
+    result = _backend.find_control(
+        text=text,
+        role=role,
+        identifier=identifier,
+        title_re=title_re,
+        max_depth=max_depth,
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
     name="click",
     description=(
         "Click a control by control_id, text, class_name, automation_id, or derived filters. "
@@ -257,6 +288,90 @@ def click_at(x: int, y: int) -> str:
     if _backend is None:
         return _backend_unavailable("click_at")
     result = _backend.click_at(x, y)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="double_click_at",
+    description=(
+        "Double click absolute screen coordinates (x, y). "
+        "Useful as an action-space primitive when a semantic selector is unavailable."
+    ),
+)
+def double_click_at(x: int, y: int) -> str:
+    if _backend is None:
+        return _backend_unavailable("double_click_at")
+    result = _backend.double_click_at(x, y)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="right_click_at",
+    description=(
+        "Right click absolute screen coordinates (x, y). "
+        "Useful for context menus and fallback action-space automation."
+    ),
+)
+def right_click_at(x: int, y: int) -> str:
+    if _backend is None:
+        return _backend_unavailable("right_click_at")
+    result = _backend.right_click_at(x, y)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="middle_click_at",
+    description=(
+        "Middle click absolute screen coordinates (x, y). "
+        "Useful as an action-space primitive for tabs and custom widgets."
+    ),
+)
+def middle_click_at(x: int, y: int) -> str:
+    if _backend is None:
+        return _backend_unavailable("middle_click_at")
+    result = _backend.middle_click_at(x, y)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="hover_at",
+    description=(
+        "Move the mouse to absolute coordinates (x, y) without clicking. "
+        "Useful for tooltips, hover reveals, and drag pre-positioning."
+    ),
+)
+def hover_at(x: int, y: int) -> str:
+    if _backend is None:
+        return _backend_unavailable("hover_at")
+    result = _backend.hover_at(x, y)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="drag",
+    description=(
+        "Drag the mouse from (x1, y1) to (x2, y2). "
+        "Use for sliders, list reordering, selection rectangles, and drag-and-drop."
+    ),
+)
+def drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.25) -> str:
+    if _backend is None:
+        return _backend_unavailable("drag")
+    result = _backend.drag(x1, y1, x2, y2, duration=duration)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="scroll",
+    description=(
+        "Scroll the mouse wheel by a signed number of clicks. "
+        "Optional x/y can reposition the pointer before scrolling."
+    ),
+)
+def scroll(clicks: int, x: int = None, y: int = None) -> str:
+    if _backend is None:
+        return _backend_unavailable("scroll")
+    result = _backend.scroll(clicks, x=x, y=y)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -550,6 +665,61 @@ def status() -> str:
         "edr_client_window_found": False,
         "interactive_session": os.environ.get("SESSIONNAME", ""),
     }
+
+    if _backend is not None:
+        if backend_name == "macos_accessibility":
+            action_space = {
+                "click_at": True,
+                "click_window_at": True,
+                "double_click_at": True,
+                "right_click_at": True,
+                "middle_click_at": True,
+                "hover_at": True,
+                "drag": True,
+                "scroll": True,
+                "activate_app": True,
+                "list_windows": True,
+                "is_window_open": True,
+                "wait_window": True,
+                "connect": True,
+                "screenshot": True,
+                "click": True,
+                "click_target": True,
+                "find_control": True,
+                "dump_tree": True,
+                "type_text": False,
+                "select": False,
+                "get_text": False,
+                "activate_edr": True,
+                "restore_edr": True,
+            }
+        else:
+            action_space = {
+                "click_at": True,
+                "click_window_at": True,
+                "double_click_at": True,
+                "right_click_at": True,
+                "middle_click_at": True,
+                "hover_at": True,
+                "drag": True,
+                "scroll": True,
+                "activate_app": True,
+                "list_windows": True,
+                "is_window_open": True,
+                "wait_window": True,
+                "connect": True,
+                "screenshot": True,
+                "click": True,
+                "click_target": True,
+                "find_control": True,
+                "dump_tree": True,
+                "type_text": True,
+                "select": True,
+                "get_text": True,
+                "activate_edr": hasattr(_backend, "activate_edr"),
+                "restore_edr": True,
+            }
+        result["action_space"] = action_space
 
     # Probe HiSecEndpoint process and window presence only on macOS.
     # Windows backends already have their own activation/status flow and

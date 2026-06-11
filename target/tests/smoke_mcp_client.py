@@ -162,18 +162,49 @@ def main():
     backend_name = status_json.get("backend", "unknown")
     backend_kind = status_json.get("backend_kind", backend_name)
     print(f"[ok] status backend={backend_name!r} kind={backend_kind!r}")
+    action_space = status_json.get("action_space", {})
+    if not isinstance(action_space, dict):
+        raise RuntimeError(f"status.action_space malformed: {action_space!r}")
+    if backend_kind == "windows_pywinauto":
+        for key in ("click", "dump_tree", "find_control", "type_text", "select", "click_at", "drag", "scroll", "restore_edr"):
+            if action_space.get(key) is not True:
+                raise RuntimeError(f"status.action_space missing supported windows action {key!r}: {action_space}")
+    elif backend_kind == "macos_accessibility":
+        for key in ("click", "click_target", "dump_tree", "find_control", "click_at", "click_window_at", "double_click_at", "right_click_at", "middle_click_at", "hover_at", "drag", "scroll", "restore_edr"):
+            if action_space.get(key) is not True:
+                raise RuntimeError(f"status.action_space missing supported macOS action {key!r}: {action_space}")
+        for key in ("type_text", "select", "get_text"):
+            if action_space.get(key) is not False:
+                raise RuntimeError(f"status.action_space should mark macOS action {key!r} unsupported: {action_space}")
 
     tool_list = rpc(args.base_url, session_id, "tools/list", {}, 3)
     tool_names = [tool["name"] for tool in tool_list.get("result", {}).get("tools", [])]
-    expected = {"connect", "status", "activate_app", "list_windows", "is_window_open", "wait_window", "screenshot"}
+    expected = {
+        "connect",
+        "status",
+        "activate_app",
+        "list_windows",
+        "is_window_open",
+        "wait_window",
+        "screenshot",
+        "find_control",
+        "click_at",
+        "click_window_at",
+        "double_click_at",
+        "right_click_at",
+        "middle_click_at",
+        "hover_at",
+        "drag",
+        "scroll",
+        "type_text",
+        "select",
+        "get_text",
+        "restore_edr",
+    }
     if backend_kind == "windows_pywinauto":
-        expected.update({"run_powershell", "start_powershell", "get_job", "cancel_job", "activate_edr"})
-        if args.gui:
-            expected.add("dump_tree")
+        expected.update({"run_powershell", "start_powershell", "get_job", "cancel_job", "activate_edr", "dump_tree"})
     elif backend_kind == "macos_accessibility":
-        # PowerShell helpers are registered but may be disabled; we do not
-        # require them for the macOS smoke path.
-        pass
+        expected.update({"dump_tree", "click", "click_target"})
     missing = sorted(expected - set(tool_names))
     if missing:
         raise RuntimeError(f"Missing tools: {', '.join(missing)}")
@@ -279,6 +310,31 @@ def main():
             if not activate_json.get("ok"):
                 raise RuntimeError(f"activate_app failed: {activate_json}")
             print("[ok] activate_app Finder")
+
+            dump_result = call_tool(
+                args.base_url,
+                session_id,
+                "dump_tree",
+                {"max_depth": 2},
+                10,
+            )
+            dump_json = parse_tool_json(dump_result)
+            controls = dump_json.get("controls", [])
+            if not dump_json.get("ok") or not isinstance(controls, list):
+                raise RuntimeError(f"macOS dump_tree returned unexpected payload: {dump_json}")
+            print(f"[ok] dump_tree controls={len(controls)}")
+
+            find_result = call_tool(
+                args.base_url,
+                session_id,
+                "find_control",
+                {"role": "window", "max_depth": 1},
+                11,
+            )
+            find_json = parse_tool_json(find_result)
+            if not isinstance(find_json.get("matches"), list):
+                raise RuntimeError(f"macOS find_control returned unexpected payload: {find_json}")
+            print(f"[ok] find_control matches={find_json.get('count', 0)}")
         else:
             print(f"[warn] GUI smoke skipped for unsupported backend {backend_kind!r}")
 

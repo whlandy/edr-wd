@@ -9,6 +9,9 @@ etc.) is explicitly out of scope for this profile.
 Tests:
   - tools/list                  (verifies MCP handshake is healthy)
   - status                      (verifies backend is reporting "macos_accessibility")
+  - status.action_space         (verifies action-space plumbing is exposed)
+  - dump_tree                   (verifies AX component discovery plumbing)
+  - find_control                (verifies selector matching plumbing)
   - screenshot                  (verifies screencapture works)
   - list_windows                (verifies System Events enumeration)
   - is_window_open Finder       (verifies process_name filter)
@@ -17,6 +20,7 @@ Tests:
   - activate_app Finder         (verifies osascript activate path)
   - connect by process_name     (verifies connect/bundle_id path)
   - click_at basic              (verifies coordinate click — best-effort)
+  - action primitives           (verifies double/right/middle click, drag, scroll, hover)
 
 These are "the server is alive and the basic platform plumbing works"
 tests. App-specific workflows (e.g. "drive Safari to navigate to ...")
@@ -93,6 +97,57 @@ def run_macos_generic_tests(client, verbose: bool = False) -> tuple[int, int, in
         r.get("ok") is True and isinstance(backend_name, str) and len(backend_name) > 0,
         f"backend={backend_name}",
     )
+
+    # ── 2b. status.action_space ──────────────────────────────────
+    print("\n  status.action_space... ", end="", flush=True)
+    action_space = r.get("action_space") if isinstance(r, dict) else None
+    expected_true = {
+        "click_at",
+        "click_window_at",
+        "double_click_at",
+        "right_click_at",
+        "middle_click_at",
+        "hover_at",
+        "drag",
+        "scroll",
+        "activate_app",
+        "list_windows",
+        "is_window_open",
+        "wait_window",
+        "connect",
+        "screenshot",
+    }
+    expected_true.update({"click", "click_target", "dump_tree", "find_control"})
+    expected_false = {"type_text", "select", "get_text"}
+    action_ok = isinstance(action_space, dict)
+    if action_ok:
+        missing_true = sorted(k for k in expected_true if action_space.get(k) is not True)
+        unexpected_true = sorted(k for k in expected_false if action_space.get(k) is True)
+        action_ok = not missing_true and not unexpected_true
+        detail = f"true={sorted(expected_true)} false={sorted(expected_false)}"
+        if missing_true:
+            detail += f" missing_true={missing_true}"
+        if unexpected_true:
+            detail += f" unexpected_true={unexpected_true}"
+    else:
+        detail = f"action_space={action_space}"
+    record("status action_space", action_ok, detail)
+
+    # ── 2c. dump_tree / find_control after Finder connect ─────────
+    print("\n  component discovery... ", end="", flush=True)
+    connect_for_tree = call_tool("connect", {"process_name": "Finder", "timeout": 5, "auto_activate": True})
+    if connect_for_tree.get("ok") is not True:
+        record("component discovery", False, f"connect failed: {connect_for_tree.get('error', connect_for_tree)}")
+    else:
+        tree = call_tool("dump_tree", {"max_depth": 2})
+        found = call_tool("find_control", {"role": "window", "max_depth": 1})
+        tree_ok = tree.get("ok") is True and isinstance(tree.get("controls"), list)
+        find_ok = isinstance(found.get("matches"), list)
+        record(
+            "component discovery",
+            tree_ok and find_ok,
+            f"controls={len(tree.get('controls', [])) if isinstance(tree.get('controls'), list) else 'n/a'} matches={found.get('count')}",
+        )
 
     # ── 3. screenshot ────────────────────────────────────────────
     print("\n  screenshot... ", end="", flush=True)
@@ -225,6 +280,29 @@ def run_macos_generic_tests(client, verbose: bool = False) -> tuple[int, int, in
             has_method,
             f"method={method or error[:80]}",
         )
+
+    # ── 11. action primitives ───────────────────────────────────
+    print("\n  action primitives... ", end="", flush=True)
+    primitive_calls = [
+        ("double_click_at", {"x": 100, "y": 100}),
+        ("right_click_at", {"x": 100, "y": 100}),
+        ("middle_click_at", {"x": 100, "y": 100}),
+        ("hover_at", {"x": 100, "y": 100}),
+        ("scroll", {"clicks": 1, "x": 100, "y": 100}),
+        ("drag", {"x1": 100, "y1": 100, "x2": 120, "y2": 120, "duration": 0.1}),
+    ]
+    primitive_ok = True
+    primitive_details = []
+    for tool_name, args in primitive_calls:
+        result = call_tool(tool_name, args)
+        ok = result.get("ok") is True
+        primitive_ok = primitive_ok and ok
+        primitive_details.append(f"{tool_name}={'OK' if ok else 'FAIL'}")
+    record(
+        "action primitives",
+        primitive_ok,
+        ", ".join(primitive_details),
+    )
 
     ok = (failed == 0)
     return passed, failed, skipped, errors, ok

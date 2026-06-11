@@ -9,9 +9,15 @@ Drives the macOS GUI via shell tools that ship with macOS:
   - cliclick       — optional, for click_at() if available
   - python ctypes  — Quartz.CGEvent for click_at() when cliclick is not present
 
-This is a v1 backend: it intentionally does NOT expose dump_tree(),
-control_id-based click(), or other Windows-specific primitives. Those
-return {"ok": False, "error": "not supported on this backend"}.
+This backend exposes a conservative macOS Accessibility tree through System
+Events. It is not as rich as Windows UIA, but it supports `dump_tree()` and
+selector-based `click()` for common controls by role/name/description/value
+plus coordinate fallback.
+
+It does expose a cross-platform action-space subset (`click_at`,
+`double_click_at`, `right_click_at`, `middle_click_at`, `hover_at`, `drag`,
+`scroll`) so the agent can still perform component-scoped fallback gestures on
+macOS when semantic selectors are unavailable.
 
 Permission requirements (set up once on the target Mac):
   - System Settings → Privacy & Security → Accessibility
@@ -36,6 +42,8 @@ import time
 from pathlib import Path
 from typing import Optional, Any
 
+import pyautogui
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -53,6 +61,10 @@ def _run(cmd: list[str], timeout: float = 10.0) -> tuple[int, str]:
 def _run_osascript(script: str, timeout: float = 10.0) -> tuple[int, str]:
     """Run an osascript -e invocation."""
     return _run(["osascript", "-e", script], timeout=timeout)
+
+
+def _allow_real_mouse_actions() -> bool:
+    return os.environ.get("EDR_WD_ALLOW_REAL_CLICKS", "0") == "1"
 
 
 # ── _MacOSConnectedApp: pywinauto-like interface for restore_edr ─────────────
@@ -1080,6 +1092,111 @@ class MacOSAccessibilityBackend:
             }
         return {"ok": True, "method": "osascript", "x": x, "y": y}
 
+    def double_click_at(self, x: int, y: int) -> dict:
+        if not _allow_real_mouse_actions():
+            return {
+                "ok": True,
+                "method": "dry_run",
+                "x": int(x),
+                "y": int(y),
+                "note": "double_click_at is in dry-run mode; set EDR_WD_ALLOW_REAL_CLICKS=1 to enable real clicks.",
+            }
+        try:
+            pyautogui.doubleClick(int(x), int(y), button="left")
+            return {"ok": True, "method": "pyautogui.doubleClick", "x": int(x), "y": int(y)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def right_click_at(self, x: int, y: int) -> dict:
+        if not _allow_real_mouse_actions():
+            return {
+                "ok": True,
+                "method": "dry_run",
+                "x": int(x),
+                "y": int(y),
+                "note": "right_click_at is in dry-run mode; set EDR_WD_ALLOW_REAL_CLICKS=1 to enable real clicks.",
+            }
+        try:
+            pyautogui.rightClick(int(x), int(y))
+            return {"ok": True, "method": "pyautogui.rightClick", "x": int(x), "y": int(y)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def middle_click_at(self, x: int, y: int) -> dict:
+        if not _allow_real_mouse_actions():
+            return {
+                "ok": True,
+                "method": "dry_run",
+                "x": int(x),
+                "y": int(y),
+                "note": "middle_click_at is in dry-run mode; set EDR_WD_ALLOW_REAL_CLICKS=1 to enable real clicks.",
+            }
+        try:
+            pyautogui.middleClick(int(x), int(y))
+            return {"ok": True, "method": "pyautogui.middleClick", "x": int(x), "y": int(y)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def hover_at(self, x: int, y: int) -> dict:
+        if not _allow_real_mouse_actions():
+            return {
+                "ok": True,
+                "method": "dry_run",
+                "x": int(x),
+                "y": int(y),
+                "note": "hover_at is in dry-run mode; set EDR_WD_ALLOW_REAL_CLICKS=1 to enable real mouse movement.",
+            }
+        try:
+            pyautogui.moveTo(int(x), int(y))
+            return {"ok": True, "method": "pyautogui.moveTo", "x": int(x), "y": int(y)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def drag(self, x1: int, y1: int, x2: int, y2: int, duration: float = 0.25) -> dict:
+        if not _allow_real_mouse_actions():
+            return {
+                "ok": True,
+                "method": "dry_run",
+                "start": {"x": int(x1), "y": int(y1)},
+                "end": {"x": int(x2), "y": int(y2)},
+                "duration": float(duration),
+                "note": "drag is in dry-run mode; set EDR_WD_ALLOW_REAL_CLICKS=1 to enable real drags.",
+            }
+        try:
+            pyautogui.moveTo(int(x1), int(y1))
+            pyautogui.dragTo(int(x2), int(y2), duration=float(duration), button="left")
+            return {
+                "ok": True,
+                "method": "pyautogui.dragTo",
+                "start": {"x": int(x1), "y": int(y1)},
+                "end": {"x": int(x2), "y": int(y2)},
+                "duration": float(duration),
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def scroll(self, clicks: int, x: Optional[int] = None, y: Optional[int] = None) -> dict:
+        if not _allow_real_mouse_actions():
+            payload = {
+                "ok": True,
+                "method": "dry_run",
+                "clicks": int(clicks),
+                "note": "scroll is in dry-run mode; set EDR_WD_ALLOW_REAL_CLICKS=1 to enable real scrolling.",
+            }
+            if x is not None and y is not None:
+                payload["point"] = {"x": int(x), "y": int(y)}
+            return payload
+        try:
+            if x is not None and y is not None:
+                pyautogui.moveTo(int(x), int(y))
+            pyautogui.scroll(int(clicks))
+            payload = {"ok": True, "method": "pyautogui.scroll", "clicks": int(clicks)}
+            if x is not None and y is not None:
+                payload["point"] = {"x": int(x), "y": int(y)}
+            return payload
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     # ── Connect-required ──────────────────────────────────────────────────────
 
     def connect(
@@ -1201,15 +1318,335 @@ class MacOSAccessibilityBackend:
 
         return {"ok": False, "error": "connect: must specify pid, bundle_id, process_name, app_name, or title_re"}
 
+    def _connected_process_name(self) -> Optional[str]:
+        app_name = getattr(self, "_connected_app", None)
+        if isinstance(app_name, str) and app_name.strip():
+            return app_name.strip()
+        snapshot = getattr(self, "_connected_window_snapshot", None)
+        if isinstance(snapshot, dict):
+            owner = snapshot.get("owner")
+            if isinstance(owner, str) and owner.strip():
+                return owner.strip()
+        return None
+
+    def _escape_applescript_string(self, value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    def _ax_tree_script(self, process_name: str, max_depth: int) -> str:
+        process_name = self._escape_applescript_string(process_name)
+        max_depth = max(0, int(max_depth))
+        return f'''
+on cleanText(v)
+    try
+        set s to v as text
+    on error
+        set s to ""
+    end try
+    set AppleScript's text item delimiters to tab
+    set parts to text items of s
+    set AppleScript's text item delimiters to " "
+    set s to parts as text
+    set AppleScript's text item delimiters to linefeed
+    set parts to text items of s
+    set AppleScript's text item delimiters to " "
+    set s to parts as text
+    set AppleScript's text item delimiters to ""
+    return s
+end cleanText
+
+on attrText(e, attrName)
+    try
+        return cleanText(value of attribute attrName of e)
+    on error
+        return ""
+    end try
+end attrText
+
+on boolText(e, propName)
+    try
+        if propName is "enabled" then
+            if enabled of e then return "true"
+            return "false"
+        end if
+    on error
+    end try
+    return "unknown"
+end boolText
+
+on describeElement(e, depth, pathText, controlId, windowName)
+    set roleText to ""
+    set titleText to ""
+    set descText to ""
+    set valueText to ""
+    try
+        set roleText to cleanText(role of e)
+    end try
+    try
+        set titleText to cleanText(name of e)
+    end try
+    try
+        set descText to cleanText(description of e)
+    end try
+    try
+        set valueText to cleanText(value of e)
+    end try
+    set identifierText to attrText(e, "AXIdentifier")
+    set subroleText to attrText(e, "AXSubrole")
+    set enabledText to boolText(e, "enabled")
+    set xText to ""
+    set yText to ""
+    set wText to ""
+    set hText to ""
+    try
+        set posValue to position of e
+        set xText to (item 1 of posValue) as text
+        set yText to (item 2 of posValue) as text
+    end try
+    try
+        set sizeValue to size of e
+        set wText to (item 1 of sizeValue) as text
+        set hText to (item 2 of sizeValue) as text
+    end try
+    return (controlId as text) & tab & (depth as text) & tab & cleanText(windowName) & tab & roleText & tab & subroleText & tab & titleText & tab & descText & tab & valueText & tab & identifierText & tab & enabledText & tab & xText & tab & yText & tab & wText & tab & hText & tab & pathText
+end describeElement
+
+on walkElement(e, depth, pathText, windowName)
+    global outText
+    global nextId
+    global depthLimit
+    set myId to nextId
+    set nextId to nextId + 1
+    set outText to outText & describeElement(e, depth, pathText, myId, windowName) & linefeed
+    if depth >= depthLimit then return
+    try
+        set kids to UI elements of e
+        set childIndex to 1
+        repeat with childElement in kids
+            my walkElement(childElement, depth + 1, pathText & "." & (childIndex as text), windowName)
+            set childIndex to childIndex + 1
+        end repeat
+    end try
+end walkElement
+
+global outText
+global nextId
+global depthLimit
+set outText to ""
+set nextId to 1
+set depthLimit to {max_depth}
+
+tell application "System Events"
+    tell process "{process_name}"
+        set frontmost to true
+        set windowIndex to 1
+        repeat with win in windows
+            set winName to ""
+            try
+                set winName to cleanText(name of win)
+            end try
+            my walkElement(win, 0, "w" & (windowIndex as text), winName)
+            set windowIndex to windowIndex + 1
+        end repeat
+    end tell
+end tell
+return outText
+'''
+
+    def _parse_ax_tree_lines(self, output: str) -> list[dict]:
+        controls: list[dict] = []
+        for raw in output.splitlines():
+            if not raw.strip():
+                continue
+            parts = raw.split("\t")
+            if len(parts) < 15:
+                continue
+            def _int_or_none(value: str) -> Optional[int]:
+                try:
+                    if value == "":
+                        return None
+                    return int(float(value))
+                except ValueError:
+                    return None
+            control_id = _int_or_none(parts[0])
+            depth = _int_or_none(parts[1]) or 0
+            x = _int_or_none(parts[10])
+            y = _int_or_none(parts[11])
+            w = _int_or_none(parts[12])
+            h = _int_or_none(parts[13])
+            rect = None
+            if x is not None and y is not None and w is not None and h is not None:
+                rect = {"x": x, "y": y, "w": w, "h": h}
+            enabled_value = parts[9].strip().lower()
+            controls.append({
+                "control_id": control_id,
+                "depth": depth,
+                "window_title": parts[2],
+                "role": parts[3],
+                "class_name": parts[3],
+                "subrole": parts[4],
+                "title": parts[5],
+                "text": parts[5] or parts[6] or parts[7],
+                "description": parts[6],
+                "value": parts[7],
+                "automation_id": parts[8],
+                "identifier": parts[8],
+                "is_enabled": enabled_value != "false",
+                "is_visible": rect is not None,
+                "rectangle": rect,
+                "path": parts[14],
+            })
+        return controls
+
+    def _load_ax_controls(
+        self,
+        window_title_re: Optional[str] = None,
+        max_depth: int = 10,
+    ) -> tuple[Optional[dict], list[dict]]:
+        process_name = self._connected_process_name()
+        if not process_name:
+            return {"ok": False, "error": "Not connected"}, []
+
+        rc, out = _run_osascript(self._ax_tree_script(process_name, max_depth), timeout=20)
+        if rc != 0:
+            return {
+                "ok": False,
+                "error": (
+                    f"AX tree enumeration failed for {process_name!r} (rc={rc}): {out.strip()}. "
+                    "Check Accessibility permission for the MCP server process."
+                ),
+            }, []
+
+        controls = self._parse_ax_tree_lines(out)
+        if window_title_re:
+            try:
+                rx = re.compile(window_title_re)
+                controls = [c for c in controls if rx.search(c.get("window_title") or "")]
+            except re.error as e:
+                return {"ok": False, "error": f"invalid window_title_re: {e}"}, []
+
+        return None, controls
+
+    def _selector_match_score(
+        self,
+        control: dict,
+        *,
+        control_id: Optional[int] = None,
+        text: Optional[str] = None,
+        class_name: Optional[str] = None,
+        parent_text: Optional[str] = None,
+        automation_id: Optional[str] = None,
+        auto_id_contains: Optional[str] = None,
+        auto_id_suffix: Optional[str] = None,
+        parent_of: Optional[str] = None,
+        control_type: Optional[str] = None,
+    ) -> int:
+        score = 0
+        haystack = " ".join(str(control.get(k) or "") for k in ("title", "text", "description", "value"))
+        role = str(control.get("role") or "")
+        identifier = str(control.get("automation_id") or "")
+
+        if control_id is not None:
+            if control.get("control_id") != control_id:
+                return -1
+            score += 1000
+        if automation_id:
+            if identifier != automation_id:
+                return -1
+            score += 900
+        if auto_id_contains:
+            if auto_id_contains not in identifier:
+                return -1
+            score += 650
+        if auto_id_suffix:
+            if not identifier.endswith(auto_id_suffix):
+                return -1
+            score += 650
+        if class_name:
+            if role != class_name and class_name.lower() not in role.lower():
+                return -1
+            score += 300
+        if control_type:
+            if control_type.lower() not in role.lower():
+                return -1
+            score += 300
+        if text:
+            if text == control.get("title") or text == control.get("text"):
+                score += 500
+            elif text in haystack:
+                score += 250
+            else:
+                try:
+                    if re.search(text, haystack):
+                        score += 200
+                    else:
+                        return -1
+                except re.error:
+                    return -1
+        if parent_text:
+            if parent_text not in str(control.get("path") or "") and parent_text not in haystack:
+                return -1
+            score += 50
+        if parent_of:
+            if parent_of not in haystack:
+                return -1
+            score += 50
+        if score == 0:
+            return -1
+        rect = control.get("rectangle")
+        if isinstance(rect, dict) and rect.get("w", 0) and rect.get("h", 0):
+            score += 25
+        if control.get("is_enabled"):
+            score += 10
+        return score
+
+    def _find_ax_control(self, **selector) -> tuple[Optional[dict], Optional[dict]]:
+        max_depth = int(selector.pop("max_depth", 10) or 10)
+        err, controls = self._load_ax_controls(max_depth=max_depth)
+        if err:
+            return err, None
+        scored = []
+        for control in controls:
+            score = self._selector_match_score(control, **selector)
+            if score >= 0:
+                scored.append((score, control))
+        if not scored:
+            return {
+                "ok": False,
+                "error": "No macOS AX control matched selector",
+                "selector": {k: v for k, v in selector.items() if v is not None},
+                "control_count": len(controls),
+            }, None
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return None, scored[0][1]
+
     def dump_tree(self, window_title_re: Optional[str] = None, max_depth: int = 10) -> dict:
+        err, controls = self._load_ax_controls(window_title_re=window_title_re, max_depth=max_depth)
+        if err:
+            return err
         return {
-            "ok": False,
-            "error": (
-                "dump_tree is not supported by the macos_accessibility backend. "
-                "Use list_windows/is_window_open to enumerate visible windows, "
-                "or click_at(x, y) for coordinate-based interaction."
-            ),
+            "ok": True,
+            "backend": self.backend,
+            "process_name": self._connected_process_name(),
+            "window_title_re": window_title_re,
+            "max_depth": max_depth,
+            "controls": controls,
+            "count": len(controls),
         }
+
+    def _click_control_center(self, control: dict, *, x_offset: int = 0, y_offset: int = 0) -> dict:
+        rect = control.get("rectangle")
+        if not isinstance(rect, dict):
+            return {"ok": False, "error": "matched control has no rectangle", "control": control}
+        w = int(rect.get("w") or 0)
+        h = int(rect.get("h") or 0)
+        if w <= 0 or h <= 0:
+            return {"ok": False, "error": "matched control has an empty rectangle", "control": control}
+        x = int(rect.get("x") or 0) + (w // 2) + int(x_offset)
+        y = int(rect.get("y") or 0) + (h // 2) + int(y_offset)
+        click_result = self.click_at(x, y)
+        click_result["matched_control"] = control
+        click_result["strategy"] = "ax_center_click"
+        return click_result
 
     def click(
         self,
@@ -1225,15 +1662,20 @@ class MacOSAccessibilityBackend:
         parent_fallback: bool = True,
         timeout: float = 5.0,
     ) -> dict:
-        return {
-            "ok": False,
-            "error": (
-                "control_id/automation_id-based click is not supported by the "
-                "macos_accessibility backend. Use click_at(x, y) for "
-                "coordinate-based interaction, or extend the backend to "
-                "expose AX tree lookup."
-            ),
-        }
+        err, control = self._find_ax_control(
+            control_id=control_id,
+            text=text,
+            class_name=class_name,
+            parent_text=parent_text,
+            automation_id=automation_id,
+            auto_id_contains=auto_id_contains,
+            auto_id_suffix=auto_id_suffix,
+            parent_of=parent_of,
+            control_type=control_type,
+        )
+        if err:
+            return err
+        return self._click_control_center(control)
 
     def click_target(
         self,
@@ -1242,11 +1684,64 @@ class MacOSAccessibilityBackend:
         class_name: Optional[str] = None,
         parent_text: Optional[str] = None,
         automation_id: Optional[str] = None,
+        auto_id_contains: Optional[str] = None,
+        auto_id_suffix: Optional[str] = None,
+        parent_of: Optional[str] = None,
+        control_type: Optional[str] = None,
+        x_offset: int = 0,
+        y_offset: int = 0,
+        parent_fallback: bool = True,
         timeout: float = 5.0,
     ) -> dict:
+        err, control = self._find_ax_control(
+            control_id=control_id,
+            text=text,
+            class_name=class_name,
+            parent_text=parent_text,
+            automation_id=automation_id,
+            auto_id_contains=auto_id_contains,
+            auto_id_suffix=auto_id_suffix,
+            parent_of=parent_of,
+            control_type=control_type,
+        )
+        if err:
+            return err
+        return self._click_control_center(control, x_offset=x_offset, y_offset=y_offset)
+
+    def find_control(
+        self,
+        text: Optional[str] = None,
+        role: Optional[str] = None,
+        identifier: Optional[str] = None,
+        title_re: Optional[str] = None,
+        max_depth: int = 10,
+    ) -> dict:
+        err, controls = self._load_ax_controls(max_depth=max_depth)
+        if err:
+            return err
+        matches = []
+        title_rx = None
+        if title_re:
+            try:
+                title_rx = re.compile(title_re)
+            except re.error as e:
+                return {"ok": False, "error": f"invalid title_re: {e}"}
+        for control in controls:
+            haystack = " ".join(str(control.get(k) or "") for k in ("title", "text", "description", "value"))
+            if text and text not in haystack:
+                continue
+            if role and role.lower() not in str(control.get("role") or "").lower():
+                continue
+            if identifier and identifier != control.get("identifier"):
+                continue
+            if title_rx and not title_rx.search(haystack):
+                continue
+            matches.append(control)
         return {
-            "ok": False,
-            "error": "click_target is not supported by the macos_accessibility backend.",
+            "ok": bool(matches),
+            "matches": matches,
+            "count": len(matches),
+            "error": None if matches else "No macOS AX control matched selector",
         }
 
     def click_window_at(self, x: int, y: int, window_title_re: Optional[str] = None) -> dict:
