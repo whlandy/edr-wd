@@ -189,6 +189,152 @@ class MacOSAccessibilityBackend:
     def backend(self) -> str:
         return "macos_accessibility"
 
+    # ── Window lock ──────────────────────────────────────────────────────────
+
+    def _frontmost_window_state(self) -> dict:
+        script = (
+            'tell application "System Events"\n'
+            '  set frontProc to first process whose frontmost is true\n'
+            '  set procName to name of frontProc\n'
+            '  set pidStr to unix id of frontProc as string\n'
+            '  set winName to ""\n'
+            '  try\n'
+            '    if exists window 1 of frontProc then set winName to name of window 1 of frontProc\n'
+            '  end try\n'
+            '  return procName & "\\t" & pidStr & "\\t" & winName\n'
+            'end tell\n'
+        )
+        rc, out = _run_osascript(script, timeout=5)
+        if rc != 0:
+            return {"ok": False, "error": f"frontmost window query failed (rc={rc}): {out.strip()}"}
+        parts = out.strip().split("\t")
+        pid = None
+        if len(parts) > 1:
+            try:
+                pid = int(parts[1])
+            except ValueError:
+                pass
+        return {
+            "ok": True,
+            "process_name": parts[0] if parts else "",
+            "pid": pid,
+            "title": parts[2] if len(parts) > 2 else "",
+        }
+
+    def _connected_window_state(self) -> dict:
+        snapshot = getattr(self, "_connected_window_snapshot", None)
+        if isinstance(snapshot, dict):
+            return {
+                "ok": True,
+                "process_name": snapshot.get("owner") or getattr(self, "_connected_app", None),
+                "pid": snapshot.get("pid") or getattr(self, "_connected_pid", None),
+                "title": snapshot.get("title") or snapshot.get("window_title") or "",
+                "rectangle": snapshot.get("rectangle"),
+            }
+        app_name = getattr(self, "_connected_app", None)
+        pid = getattr(self, "_connected_pid", None)
+        if app_name or pid:
+            return {"ok": True, "process_name": app_name, "pid": pid, "title": ""}
+        return {"ok": False, "error": "Not connected"}
+
+    def _state_matches_lock(self, state: dict, lock: dict) -> bool:
+        if not state.get("ok"):
+            return False
+        if lock.get("pid") is not None and state.get("pid") != lock.get("pid"):
+            return False
+        if lock.get("process_name"):
+            current = (state.get("process_name") or "").lower()
+            expected = str(lock["process_name"]).lower()
+            if expected not in current and current not in expected:
+                return False
+        if lock.get("title_re"):
+            try:
+                if not re.search(str(lock["title_re"]), state.get("title") or ""):
+                    return False
+            except re.error:
+                return False
+        return True
+
+    def _activate_locked_window(self) -> dict:
+        lock = getattr(self, "_window_lock", None)
+        if not isinstance(lock, dict):
+            return {"ok": False, "error": "No window lock"}
+        app_name = lock.get("process_name")
+        if not app_name:
+            return {"ok": False, "error": "Window lock has no process_name"}
+        return self.activate_app(app_name=str(app_name))
+
+    def lock_window(
+        self,
+        title_re: Optional[str] = None,
+        process_name: Optional[str] = None,
+        pid: Optional[int] = None,
+        strict: bool = True,
+        activate: bool = True,
+    ) -> dict:
+        state = self._connected_window_state()
+        if not state.get("ok"):
+            state = self._frontmost_window_state()
+        if not state.get("ok"):
+            return state
+        lock = {
+            "backend": self.backend,
+            "title_re": title_re or (re.escape(state.get("title") or "") if state.get("title") else None),
+            "process_name": process_name or state.get("process_name"),
+            "pid": pid if pid is not None else state.get("pid"),
+            "strict": bool(strict),
+            "snapshot": state,
+        }
+        self._window_lock = lock
+        if activate:
+            self._activate_locked_window()
+        verify = self.verify_window_lock(activate=activate)
+        return {"ok": verify.get("ok") is True, "lock": lock, "verify": verify}
+
+    def unlock_window(self) -> dict:
+        previous = getattr(self, "_window_lock", None)
+        self._window_lock = None
+        return {"ok": True, "previous": previous}
+
+    def get_window_lock(self) -> dict:
+        lock = getattr(self, "_window_lock", None)
+        return {"ok": True, "locked": lock is not None, "lock": lock}
+
+    def verify_window_lock(self, activate: bool = True) -> dict:
+        lock = getattr(self, "_window_lock", None)
+        if not isinstance(lock, dict):
+            return {"ok": True, "locked": False}
+        state = self._frontmost_window_state()
+        if self._state_matches_lock(state, lock):
+            return {"ok": True, "locked": True, "active": state, "lock": lock}
+        activation = None
+        if activate:
+            activation = self._activate_locked_window()
+            time.sleep(0.2)
+            state = self._frontmost_window_state()
+            if self._state_matches_lock(state, lock):
+                return {
+                    "ok": True,
+                    "locked": True,
+                    "active": state,
+                    "lock": lock,
+                    "activation": activation,
+                }
+        return {
+            "ok": False,
+            "locked": True,
+            "error": "Window lock mismatch",
+            "active": state,
+            "lock": lock,
+            "activation": activation,
+        }
+
+    def _ensure_window_lock(self) -> Optional[dict]:
+        check = self.verify_window_lock(activate=True)
+        if check.get("ok"):
+            return None
+        return check
+
     # ── Always-available ──────────────────────────────────────────────────────
 
     def screenshot(self, path: Optional[str] = None) -> dict:
@@ -1051,6 +1197,8 @@ class MacOSAccessibilityBackend:
         callers should divide pixel coordinates by 2 before passing
         in (or set their capture/click DPI explicitly).
         """
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         import os as _os
         allow_real = _os.environ.get("EDR_WD_ALLOW_REAL_CLICKS", "0") == "1"
         if not allow_real:
@@ -1093,6 +1241,8 @@ class MacOSAccessibilityBackend:
         return {"ok": True, "method": "osascript", "x": x, "y": y}
 
     def double_click_at(self, x: int, y: int) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         if not _allow_real_mouse_actions():
             return {
                 "ok": True,
@@ -1108,6 +1258,8 @@ class MacOSAccessibilityBackend:
             return {"ok": False, "error": str(e)}
 
     def right_click_at(self, x: int, y: int) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         if not _allow_real_mouse_actions():
             return {
                 "ok": True,
@@ -1123,6 +1275,8 @@ class MacOSAccessibilityBackend:
             return {"ok": False, "error": str(e)}
 
     def middle_click_at(self, x: int, y: int) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         if not _allow_real_mouse_actions():
             return {
                 "ok": True,
@@ -1138,6 +1292,8 @@ class MacOSAccessibilityBackend:
             return {"ok": False, "error": str(e)}
 
     def hover_at(self, x: int, y: int) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         if not _allow_real_mouse_actions():
             return {
                 "ok": True,
@@ -1153,6 +1309,8 @@ class MacOSAccessibilityBackend:
             return {"ok": False, "error": str(e)}
 
     def drag(self, x1: int, y1: int, x2: int, y2: int, duration: float = 0.25) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         if not _allow_real_mouse_actions():
             return {
                 "ok": True,
@@ -1176,6 +1334,8 @@ class MacOSAccessibilityBackend:
             return {"ok": False, "error": str(e)}
 
     def scroll(self, clicks: int, x: Optional[int] = None, y: Optional[int] = None) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         if not _allow_real_mouse_actions():
             payload = {
                 "ok": True,

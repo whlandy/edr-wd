@@ -197,6 +197,14 @@ basic Accessibility component discovery path:
   filters the Accessibility tree.
 - `click` / `click_target` work on macOS for common selectors by resolving a
   matched AX node and falling back to its rectangle center.
+- `lock_window` pins subsequent click/drag/scroll actions to the connected or
+  specified target window. This follows the same safety principle as maa-fw's
+  window locator: before a pointer action, confirm the foreground window still
+  matches the intended target, try one activation if needed, and fail closed if
+  the active window is different.
+- `unlock_window`, `get_window_lock`, and `verify_window_lock` manage and
+  inspect that lock. Recommended GUI flow is `connect` -> `lock_window` ->
+  `dump_tree/find_control` -> `click/click_target/click_at` -> `unlock_window`.
 - macOS uses Accessibility/System Events plus app/window detection
 - macOS `click_at` is dry-run by default; set
   `EDR_WD_ALLOW_REAL_CLICKS=1` on the target server before relying on it for
@@ -229,7 +237,8 @@ by `EDR_WD_AUTOMATION_BACKEND`:
 
 Primary tools:
 
-- GUI: `connect`, `dump_tree`, `click`, `click_target`, `click_at`,
+- GUI: `connect`, `lock_window`, `unlock_window`, `get_window_lock`,
+  `verify_window_lock`, `dump_tree`, `find_control`, `click`, `click_target`, `click_at`,
   `click_window_at`, `double_click_at`, `right_click_at`, `middle_click_at`,
   `hover_at`, `drag`, `scroll`, `type_text`, `select`, `get_text`,
   `screenshot`, `restore_edr`

@@ -10,6 +10,7 @@ Tests:
   - tools/list                  (verifies MCP handshake is healthy)
   - status                      (verifies backend is reporting "macos_accessibility")
   - status.action_space         (verifies action-space plumbing is exposed)
+  - window lock                 (verifies click preflight lock plumbing)
   - dump_tree                   (verifies AX component discovery plumbing)
   - find_control                (verifies selector matching plumbing)
   - screenshot                  (verifies screencapture works)
@@ -116,6 +117,10 @@ def run_macos_generic_tests(client, verbose: bool = False) -> tuple[int, int, in
         "wait_window",
         "connect",
         "screenshot",
+        "lock_window",
+        "unlock_window",
+        "get_window_lock",
+        "verify_window_lock",
     }
     expected_true.update({"click", "click_target", "dump_tree", "find_control"})
     expected_false = {"type_text", "select", "get_text"}
@@ -133,7 +138,23 @@ def run_macos_generic_tests(client, verbose: bool = False) -> tuple[int, int, in
         detail = f"action_space={action_space}"
     record("status action_space", action_ok, detail)
 
-    # ── 2c. dump_tree / find_control after Finder connect ─────────
+    # ── 2c. window lock after Finder connect ──────────────────────
+    print("\n  window lock... ", end="", flush=True)
+    lock_connect = call_tool("connect", {"process_name": "Finder", "timeout": 5, "auto_activate": True})
+    if lock_connect.get("ok") is not True:
+        record("window lock", False, f"connect failed: {lock_connect.get('error', lock_connect)}")
+    else:
+        locked = call_tool("lock_window", {"process_name": "Finder", "activate": True})
+        lock_state = call_tool("get_window_lock", {})
+        verified = call_tool("verify_window_lock", {"activate": True})
+        call_tool("unlock_window", {})
+        record(
+            "window lock",
+            locked.get("ok") is True and lock_state.get("locked") is True and verified.get("ok") is True,
+            f"locked={lock_state.get('locked')} verify={verified.get('ok')}",
+        )
+
+    # ── 2d. dump_tree / find_control after Finder connect ─────────
     print("\n  component discovery... ", end="", flush=True)
     connect_for_tree = call_tool("connect", {"process_name": "Finder", "timeout": 5, "auto_activate": True})
     if connect_for_tree.get("ok") is not True:

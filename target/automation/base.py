@@ -99,6 +99,17 @@ class AutomationBackend(Protocol):
         x: Optional[int] = None,
         y: Optional[int] = None,
     ) -> dict: ...
+    def lock_window(
+        self,
+        title_re: Optional[str] = None,
+        process_name: Optional[str] = None,
+        pid: Optional[int] = None,
+        strict: bool = True,
+        activate: bool = True,
+    ) -> dict: ...
+    def unlock_window(self) -> dict: ...
+    def get_window_lock(self) -> dict: ...
+    def verify_window_lock(self, activate: bool = True) -> dict: ...
 
     # ── Connect-required ─────────────────────────────────────────────────────
 

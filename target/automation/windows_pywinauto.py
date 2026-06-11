@@ -18,6 +18,7 @@ cases by returning a structured error.
 from __future__ import annotations
 
 import re
+import time
 from typing import Optional, Any
 
 import pyautogui
@@ -37,6 +38,7 @@ class WindowsPywinautoBackend:
         # instantiate this backend.
         from pywinauto_client import WindowsGUI
         self._gui = WindowsGUI()
+        self._window_lock: dict | None = None
 
     # ── Identity ──────────────────────────────────────────────────────────────
 
@@ -58,6 +60,169 @@ class WindowsPywinautoBackend:
     def main_window(self):
         """Expose the connected main window (used by status tool)."""
         return self._gui.main_window
+
+    # ── Window lock ──────────────────────────────────────────────────────────
+
+    def _active_window_state(self) -> dict:
+        try:
+            from pywinauto import Desktop
+            active = Desktop(backend=self.backend).get_active()
+            title = active.window_text()
+            pid = active.process_id()
+            process_name = None
+            try:
+                import psutil
+                process_name = psutil.Process(pid).name()
+            except Exception:
+                pass
+            rect = None
+            try:
+                r = active.rectangle()
+                rect = {"x": r.left, "y": r.top, "w": r.width(), "h": r.height()}
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "title": title,
+                "pid": pid,
+                "process_name": process_name,
+                "rectangle": rect,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _connected_window_state(self) -> dict:
+        win = self._gui.main_window
+        if win is None:
+            return {"ok": False, "error": "Not connected"}
+        try:
+            title = win.window_text()
+        except Exception:
+            title = ""
+        try:
+            pid = win.process_id()
+        except Exception:
+            pid = None
+        process_name = None
+        if pid:
+            try:
+                import psutil
+                process_name = psutil.Process(pid).name()
+            except Exception:
+                pass
+        rect = None
+        try:
+            r = win.rectangle()
+            rect = {"x": r.left, "y": r.top, "w": r.width(), "h": r.height()}
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "title": title,
+            "pid": pid,
+            "process_name": process_name,
+            "rectangle": rect,
+        }
+
+    def _state_matches_lock(self, state: dict, lock: dict) -> bool:
+        if not state.get("ok"):
+            return False
+        if lock.get("pid") is not None and state.get("pid") != lock.get("pid"):
+            return False
+        if lock.get("process_name"):
+            current = (state.get("process_name") or "").lower()
+            expected = str(lock["process_name"]).lower()
+            if expected not in current and current not in expected:
+                return False
+        if lock.get("title_re"):
+            try:
+                if not re.search(str(lock["title_re"]), state.get("title") or ""):
+                    return False
+            except re.error:
+                return False
+        return True
+
+    def _activate_locked_window(self) -> dict:
+        if self._gui.main_window is None:
+            return {"ok": False, "error": "No connected main window to activate"}
+        try:
+            self._gui.main_window.restore()
+        except Exception:
+            pass
+        try:
+            self._gui.main_window.set_focus()
+            time.sleep(0.2)
+            return {"ok": True, "method": "pywinauto.set_focus"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def lock_window(
+        self,
+        title_re: Optional[str] = None,
+        process_name: Optional[str] = None,
+        pid: Optional[int] = None,
+        strict: bool = True,
+        activate: bool = True,
+    ) -> dict:
+        state = self._connected_window_state()
+        if not state.get("ok"):
+            state = self._active_window_state()
+        if not state.get("ok"):
+            return state
+        lock = {
+            "backend": "windows_pywinauto",
+            "title_re": title_re or (re.escape(state.get("title") or "") if state.get("title") else None),
+            "process_name": process_name or state.get("process_name"),
+            "pid": pid if pid is not None else state.get("pid"),
+            "strict": bool(strict),
+            "snapshot": state,
+        }
+        self._window_lock = lock
+        if activate:
+            self._activate_locked_window()
+        verify = self.verify_window_lock(activate=activate)
+        return {"ok": verify.get("ok") is True, "lock": lock, "verify": verify}
+
+    def unlock_window(self) -> dict:
+        previous = self._window_lock
+        self._window_lock = None
+        return {"ok": True, "previous": previous}
+
+    def get_window_lock(self) -> dict:
+        return {"ok": True, "locked": self._window_lock is not None, "lock": self._window_lock}
+
+    def verify_window_lock(self, activate: bool = True) -> dict:
+        if self._window_lock is None:
+            return {"ok": True, "locked": False}
+        state = self._active_window_state()
+        if self._state_matches_lock(state, self._window_lock):
+            return {"ok": True, "locked": True, "active": state, "lock": self._window_lock}
+        activation = None
+        if activate:
+            activation = self._activate_locked_window()
+            state = self._active_window_state()
+            if self._state_matches_lock(state, self._window_lock):
+                return {
+                    "ok": True,
+                    "locked": True,
+                    "active": state,
+                    "lock": self._window_lock,
+                    "activation": activation,
+                }
+        return {
+            "ok": False,
+            "locked": True,
+            "error": "Window lock mismatch",
+            "active": state,
+            "lock": self._window_lock,
+            "activation": activation,
+        }
+
+    def _ensure_window_lock(self) -> Optional[dict]:
+        check = self.verify_window_lock(activate=True)
+        if check.get("ok"):
+            return None
+        return check
 
     # ── Always-available ──────────────────────────────────────────────────────
 
@@ -111,9 +276,13 @@ class WindowsPywinautoBackend:
         return self._gui.screenshot(path)  # type: ignore[arg-type]
 
     def click_at(self, x: int, y: int) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         return self._gui.click_at(x, y)
 
     def double_click_at(self, x: int, y: int) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         try:
             pyautogui.doubleClick(x=int(x), y=int(y), button="left")
             return {"ok": True, "method": "pyautogui.doubleClick", "x": int(x), "y": int(y)}
@@ -121,6 +290,8 @@ class WindowsPywinautoBackend:
             return {"ok": False, "error": str(e)}
 
     def right_click_at(self, x: int, y: int) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         try:
             pyautogui.rightClick(x=int(x), y=int(y))
             return {"ok": True, "method": "pyautogui.rightClick", "x": int(x), "y": int(y)}
@@ -128,6 +299,8 @@ class WindowsPywinautoBackend:
             return {"ok": False, "error": str(e)}
 
     def middle_click_at(self, x: int, y: int) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         try:
             pyautogui.middleClick(x=int(x), y=int(y))
             return {"ok": True, "method": "pyautogui.middleClick", "x": int(x), "y": int(y)}
@@ -135,6 +308,8 @@ class WindowsPywinautoBackend:
             return {"ok": False, "error": str(e)}
 
     def hover_at(self, x: int, y: int) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         try:
             pyautogui.moveTo(int(x), int(y))
             return {"ok": True, "method": "pyautogui.moveTo", "x": int(x), "y": int(y)}
@@ -142,6 +317,8 @@ class WindowsPywinautoBackend:
             return {"ok": False, "error": str(e)}
 
     def drag(self, x1: int, y1: int, x2: int, y2: int, duration: float = 0.25) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         try:
             pyautogui.moveTo(int(x1), int(y1))
             pyautogui.dragTo(int(x2), int(y2), duration=float(duration), button="left")
@@ -156,6 +333,8 @@ class WindowsPywinautoBackend:
             return {"ok": False, "error": str(e)}
 
     def scroll(self, clicks: int, x: Optional[int] = None, y: Optional[int] = None) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         try:
             if x is not None and y is not None:
                 pyautogui.moveTo(int(x), int(y))
@@ -250,6 +429,8 @@ class WindowsPywinautoBackend:
         parent_fallback: bool = True,
         timeout: float = 5.0,
     ) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         # `timeout` is accepted for backend uniformity but WindowsGUI.click
         # does not yet take it — drop it from the positional args.
         # The WindowsGUI signatures predate PEP 604 (no Optional[]), so all
@@ -276,6 +457,8 @@ class WindowsPywinautoBackend:
         parent_fallback: bool = True,
         timeout: float = 5.0,
     ) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         # Same — drop timeout; click_target does not take it.
         return self._gui.click_target(  # type: ignore[call-overload]
             control_id, text, class_name, parent_text, automation_id,
@@ -284,6 +467,8 @@ class WindowsPywinautoBackend:
         )
 
     def click_window_at(self, x: int, y: int, window_title_re: Optional[str] = None) -> dict:
+        if (lock_error := self._ensure_window_lock()) is not None:
+            return lock_error
         return self._gui.click_window_at(x, y, window_title_re)  # type: ignore[arg-type]
 
     def type_text(

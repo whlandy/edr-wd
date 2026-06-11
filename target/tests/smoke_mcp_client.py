@@ -166,11 +166,11 @@ def main():
     if not isinstance(action_space, dict):
         raise RuntimeError(f"status.action_space malformed: {action_space!r}")
     if backend_kind == "windows_pywinauto":
-        for key in ("click", "dump_tree", "find_control", "type_text", "select", "click_at", "drag", "scroll", "restore_edr"):
+        for key in ("click", "dump_tree", "find_control", "type_text", "select", "click_at", "drag", "scroll", "lock_window", "verify_window_lock", "restore_edr"):
             if action_space.get(key) is not True:
                 raise RuntimeError(f"status.action_space missing supported windows action {key!r}: {action_space}")
     elif backend_kind == "macos_accessibility":
-        for key in ("click", "click_target", "dump_tree", "find_control", "click_at", "click_window_at", "double_click_at", "right_click_at", "middle_click_at", "hover_at", "drag", "scroll", "restore_edr"):
+        for key in ("click", "click_target", "dump_tree", "find_control", "click_at", "click_window_at", "double_click_at", "right_click_at", "middle_click_at", "hover_at", "drag", "scroll", "lock_window", "verify_window_lock", "restore_edr"):
             if action_space.get(key) is not True:
                 raise RuntimeError(f"status.action_space missing supported macOS action {key!r}: {action_space}")
         for key in ("type_text", "select", "get_text"):
@@ -187,6 +187,10 @@ def main():
         "is_window_open",
         "wait_window",
         "screenshot",
+        "lock_window",
+        "unlock_window",
+        "get_window_lock",
+        "verify_window_lock",
         "find_control",
         "click_at",
         "click_window_at",

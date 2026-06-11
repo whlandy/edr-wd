@@ -140,6 +140,68 @@ def connect(
 
 
 @mcp.tool(
+    name="lock_window",
+    description=(
+        "Lock subsequent click/drag/scroll actions to the connected or specified window. "
+        "When a lock exists, pointer actions verify the active/frontmost window before executing."
+    ),
+)
+def lock_window(
+    title_re: str = None,
+    process_name: str = None,
+    pid: int = None,
+    strict: bool = True,
+    activate: bool = True,
+) -> str:
+    if _backend is None:
+        return _backend_unavailable("lock_window")
+    result = _backend.lock_window(
+        title_re=title_re,
+        process_name=process_name,
+        pid=pid,
+        strict=strict,
+        activate=activate,
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="unlock_window",
+    description="Clear the current target window lock.",
+)
+def unlock_window() -> str:
+    if _backend is None:
+        return _backend_unavailable("unlock_window")
+    result = _backend.unlock_window()
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="get_window_lock",
+    description="Return the current target window lock snapshot, if any.",
+)
+def get_window_lock() -> str:
+    if _backend is None:
+        return _backend_unavailable("get_window_lock")
+    result = _backend.get_window_lock()
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="verify_window_lock",
+    description=(
+        "Verify the active/frontmost window still matches the current lock. "
+        "If activate=true, the backend may try to bring the locked window forward once."
+    ),
+)
+def verify_window_lock(activate: bool = True) -> str:
+    if _backend is None:
+        return _backend_unavailable("verify_window_lock")
+    result = _backend.verify_window_lock(activate=activate)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
     name="activate_app",
     description=(
         "Activate (bring to foreground) an application by app_name or bundle_id. "
@@ -683,6 +745,10 @@ def status() -> str:
                 "wait_window": True,
                 "connect": True,
                 "screenshot": True,
+                "lock_window": True,
+                "unlock_window": True,
+                "get_window_lock": True,
+                "verify_window_lock": True,
                 "click": True,
                 "click_target": True,
                 "find_control": True,
@@ -709,6 +775,10 @@ def status() -> str:
                 "wait_window": True,
                 "connect": True,
                 "screenshot": True,
+                "lock_window": True,
+                "unlock_window": True,
+                "get_window_lock": True,
+                "verify_window_lock": True,
                 "click": True,
                 "click_target": True,
                 "find_control": True,
@@ -720,6 +790,11 @@ def status() -> str:
                 "restore_edr": True,
             }
         result["action_space"] = action_space
+        if hasattr(_backend, "get_window_lock"):
+            try:
+                result["window_lock"] = _backend.get_window_lock()
+            except Exception as e:
+                result["window_lock"] = {"ok": False, "error": str(e)}
 
     # Probe HiSecEndpoint process and window presence only on macOS.
     # Windows backends already have their own activation/status flow and

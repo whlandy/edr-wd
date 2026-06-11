@@ -8,6 +8,7 @@ Provide a cross-platform automation path that can:
 - resolve components to on-screen targets
 - click those components reliably
 - expose a shared action space for click, drag, scroll, hover, and text input
+- lock actions to the intended foreground window before pointer execution
 - return structured results that can be used by the agent and tests
 
 This phase exists because macOS targets do not have a pywinauto-like tree
@@ -23,6 +24,7 @@ layer:
 - `dump_tree` through System Events Accessibility
 - `find_control`
 - selector-based `click` / `click_target`
+- `lock_window` / `verify_window_lock` preflight checks
 - `click_at(x, y)` and other coordinate fallback actions
 
 That gives macOS the same high-level workflow shape as Windows: find a
@@ -66,6 +68,8 @@ The design goal is therefore not only to click, but to **find then click**.
 4. Return structured JSON for all discovery and click operations.
 5. Never assume that a visible window is automatically frontmost or interactive.
 6. Treat permissions as part of the contract, not as an implementation detail.
+7. Lock pointer actions to the intended target window when the workflow depends
+   on a specific app/window.
 
 ---
 
@@ -165,6 +169,8 @@ for both Windows and macOS workflows. This design borrows that idea directly:
 - component discovery produces candidate targets
 - the action space defines what can be done to a target
 - the executor chooses the safest action first and falls back when needed
+- window locating/locking is a preflight step before screenshot or pointer
+  actions, so automation does not operate on the wrong foreground window
 
 The main difference in EDR-WD is that Windows already has a stronger tree
 inspector, while macOS must build the same semantics on top of Accessibility
@@ -245,6 +251,22 @@ Before clicking a component, the backend must be able to:
 This is important because a component may exist in the tree but still not be
 clickable if the window is backgrounded.
 
+### 6.5 Window lock
+
+EDR-WD adds a lightweight target-window lock:
+
+- `lock_window(...)` records a selector and snapshot for the intended target
+  window
+- pointer actions call `verify_window_lock()` before moving or clicking
+- verification checks the current foreground/frontmost window
+- if the active window differs, the backend tries to activate the locked window
+  once
+- if it still differs, the action fails closed with a structured mismatch
+
+This is deliberately simpler than a full ROI locator. It gives EDR-WD the
+important safety property first: do not click if the active window is not the
+window the agent meant to control.
+
 ---
 
 ## 7. Proposed Backend APIs
@@ -257,6 +279,8 @@ The macOS backend can evolve toward the following capabilities:
 - `find_control(selector)` for a single best match
 - `find_controls(selector)` for multiple matches
 - `is_window_open(...)` for window-level sanity checks
+- `lock_window(...)` for target-window preflight state
+- `verify_window_lock(...)` for explicit foreground validation
 
 ### 7.2 Interaction APIs
 
@@ -321,8 +345,9 @@ The fallback order should be:
 
 1. semantic selector click
 2. clickable ancestor click
-3. geometry-based click on the discovered node
-4. absolute `click_at(x, y)`
+3. verify the target window lock
+4. geometry-based click on the discovered node
+5. absolute `click_at(x, y)`
 
 If all fallback stages fail, the backend must return a structured error that
 includes:
@@ -477,6 +502,8 @@ Tests must cover:
 - exact match
 - regex match
 - stale or background window
+- lock mismatch before click
+- activation retry after lock mismatch
 - missing Accessibility permission
 - fallback to coordinate clicking
 
@@ -539,6 +566,15 @@ Integrate foregrounding and fallback coordinate click behavior.
 
 Status: implemented for the connected process by setting the process frontmost
 before AX enumeration and by routing clicks through `click_at()`.
+
+### Step 4b
+
+Add window lock preflight for pointer actions.
+
+Status: implemented. Windows and macOS backends expose `lock_window`,
+`unlock_window`, `get_window_lock`, and `verify_window_lock`. Pointer actions
+fail closed when a lock exists and the foreground window cannot be restored to
+the locked target.
 
 ### Step 5
 
