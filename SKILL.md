@@ -187,12 +187,16 @@ macOS lifecycle is handled by `agent/lifecycle/macos.py` and the scripts under
 - `stop_server.sh` stops the server by port/pidfile
 - `com.edr-wd.target.plist.template` is rendered during install
 
-The macOS backend is still narrower than the Windows backend, but it now has a
-basic Accessibility component discovery path:
+- **Element-level click on macOS**: `dump_tree` and `click` (by control_id) are
+  Windows-only. On macOS, write a Swift script that uses the AX API
+  (`AXUIElement`, `AXPressAction`, CGEvent) and execute it over SSH. See
+  [references/element-click.md](references/element-click.md) for the complete
+  pattern — including how to find elements by title/role, AXPress vs CGEvent,
+  and a ready-to-use script template.
 
-- `dump_tree` on Windows uses pywinauto/UIA; `dump_tree` on macOS uses System
-  Events Accessibility and returns normalized controls with `role`, `title`,
-  `description`, `value`, `identifier`, `rectangle`, and `control_id`
+- `dump_tree` on Windows uses pywinauto/UIA; on macOS it returns normalized
+  controls with `role`, `title`, `description`, `value`, `identifier`,
+  `rectangle`, and `control_id` (requires Accessibility permission).
 - `find_control` works on both platforms. Windows filters the UIA dump; macOS
   filters the Accessibility tree.
 - `click` / `click_target` work on macOS for common selectors by resolving a
@@ -338,6 +342,13 @@ Testing and diagnostics:
 - [test_case/run_windows_hisec.py](test_case/run_windows_hisec.py): Windows HiSec flow.
 - [test_case/run_macos_generic.py](test_case/run_macos_generic.py): macOS generic flow.
 - [scripts/redact_config.py](scripts/redact_config.py): safe local config inspection.
+
+References:
+
+- [references/element-click.md](references/element-click.md): macOS element-level
+  click via Swift + AX API — AXPress, CGEvent fallback, AX tree traversal.
+- [references/activate-edr.md](references/activate-edr.md): HiSecEndpoint activation
+  internals on both Windows and macOS.
 
 Compatibility helpers:
 
