@@ -219,14 +219,14 @@ macOS lifecycle is handled by `agent/lifecycle/macos.py` and the scripts under
 - `status.action_space` reports which action primitives are actually supported
   by the loaded backend. Use it in tests before assuming a selector or gesture
   exists on a platform.
-- `activate_edr` on macOS targets the `EDRClient` application window. It first
-  tries `/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh`
-  via non-interactive sudo and only accepts success when an `EDRClient` window
-  is detected. If sudo/script startup fails, it first tries `open
-  /Applications/HiSecEndpoint.app` to bring the app bundle into the GUI
-  session, then falls back to `HiSecEndpointAgent cmd ui` without redirecting
-  stdout/stderr. In both fallback paths it explicitly brings the HiSec entry
-  window to the foreground before using the Swift Accessibility helper to click
+- `activate_edr` on macOS must make both the `HiSecEndpointAgent` entry window
+  and the `EDRClient` target window visible. It first ensures the HiSec entry
+  window by trying `open /Applications/HiSecEndpoint.app`, then falling back to
+  `HiSecEndpointAgent cmd ui` without redirecting stdout/stderr. It then tries
+  `/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh` via
+  non-interactive sudo as the primary EDRClient launch path. If that script
+  fails or does not produce an EDRClient window, it brings the HiSec entry
+  window to the foreground and uses the Swift Accessibility helper to click
   "前往安全防护中心". The click helper is only meaningful after the HiSec
   entry window is active; do not assume a visible-but-background window is
   clickable.

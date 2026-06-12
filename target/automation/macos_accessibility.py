@@ -590,23 +590,28 @@ class MacOSAccessibilityBackend:
         edr_widget_auto_id: Optional[str] = None,
     ) -> dict:
         """
-        macOS-specific: ensure the EDRClient GUI is visible.
+        macOS-specific: ensure both HiSecEndpointAgent and EDRClient windows
+        are visible.
 
         Core principle: process_found cannot represent window_found.
-        The only reliable success signal is the EDRClient application window,
-        not the HiSecEndpointAgent entry window or a process hit.
+        The reliable success signal is the visible window pair, not only a
+        process hit.
 
         The target application/window is EDRClient ("华为HiSec Endpoint").
-        HiSecEndpointAgent ("华为智能终端安全系统") is only an entry window used by
-        the fallback click path.
+        HiSecEndpointAgent ("华为智能终端安全系统") is the entry window and must
+        also be visible for the E2E window-pair contract.
 
-        EDRClient is first started through
+        Flow:
+        1. Ensure HiSecEndpointAgent is visible via the app bundle or
+           `HiSecEndpointAgent cmd ui`.
+        2. Open EDRClient through
         /Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh.
         That script requires root privileges, so we call it with `sudo -n`:
-        it succeeds only when the server account can sudo without an interactive
-        password prompt. If that fails or does not produce the EDRClient window,
-        we open HiSecEndpointAgent and click "前往安全防护中心" — the same action a
-        human user would take.
+           it succeeds only when the server account can sudo without an
+           interactive password prompt.
+        3. If that fails or does not produce the EDRClient window, click
+           "前往安全防护中心" in HiSecEndpointAgent — the same action a human
+           user would take.
 
         exe_path: optional path to a custom HiSecEndpointAgent binary.
         wait:    if True, poll for the EDRClient window to appear (up to timeout).
@@ -641,8 +646,8 @@ class MacOSAccessibilityBackend:
             }
           }
 
-        ok=true only when the EDRClient window is visible. main.window_found
-        describes the fallback entry window, not the target application.
+        ok=true only when both main.window_found and client.window_found are
+        true.
         """
         import subprocess as _subprocess
         import os as _os
@@ -928,6 +933,98 @@ class MacOSAccessibilityBackend:
         cmd_ui_attempted = False
         activated_by = "HiSecEndpointAgent cmd ui"
 
+        def _ensure_hisec_entry_window() -> Optional[dict]:
+            """
+            Ensure the HiSecEndpointAgent entry window is visible before any
+            success return. This keeps macOS aligned with the Windows flow:
+            main entry window first, target EDRClient window second.
+            """
+            nonlocal main_window_found
+            nonlocal hisec_process_found
+            nonlocal cmd_ui_attempted
+            nonlocal activated_by
+
+            if main_window_found:
+                _bring_hisec_to_front()
+                return None
+
+            cmd_ui_attempted = True
+            if not Path(HISEC_AGENT_BIN).exists():
+                return _result(
+                    ok=False,
+                    stage="main_window_not_found",
+                    already_open=False,
+                    main_window_found=False,
+                    hisec_process_found=hisec_process_found,
+                    cmd_ui_attempted=False,
+                    client_window_found=client_window_found,
+                    root_start_client=root_start_client,
+                    click_attempts=click_attempts,
+                    successful_click_method=None,
+                    click_error="HiSecEndpointAgent binary not found",
+                    detected_window_title=detected_window_title,
+                    detected_by=detected_by,
+                    error="HiSecEndpointAgent binary not found",
+                    activated_by=activated_by,
+                )
+
+            bundle_launch = _launch_hisec_bundle()
+            if bundle_launch.get("ok"):
+                activated_by = "open /Applications/HiSecEndpoint.app"
+                deadline = time.time() + min(timeout, 3.0)
+                while time.time() < deadline:
+                    if _hisec_window_visible():
+                        main_window_found = True
+                        break
+                    time.sleep(0.4)
+                if not main_window_found:
+                    bundle_launch["error"] = (
+                        "open returned success, but HiSecEndpointAgent window did not appear within 3s"
+                    )
+
+            if not main_window_found:
+                activated_by = "HiSecEndpointAgent cmd ui"
+                # IMPORTANT: do not redirect stdout/stderr; the GUI can go offscreen.
+                _subprocess.Popen(
+                    [HISEC_AGENT_BIN, "cmd", "ui"],
+                    cwd="/Applications/HiSecEndpoint.app/Contents/MacOS/safra",
+                    env=_os.environ.copy(),
+                )
+                hisec_process_found = True
+
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    if _hisec_window_visible():
+                        main_window_found = True
+                        break
+                    time.sleep(0.5)
+                else:
+                    found, title, detection_method = _edr_client_window_visible()
+                    return _result(
+                        ok=False,
+                        stage="main_window_not_found",
+                        already_open=False,
+                        main_window_found=False,
+                        hisec_process_found=hisec_process_found,
+                        cmd_ui_attempted=True,
+                        client_window_found=found,
+                        root_start_client=root_start_client,
+                        click_attempts=click_attempts,
+                        successful_click_method=None,
+                        click_error="main window did not appear within timeout",
+                        detected_window_title=title,
+                        detected_by=detection_method if found else None,
+                        error="HiSecEndpointAgent window did not appear within timeout",
+                        activated_by=activated_by,
+                    )
+
+            _bring_hisec_to_front()
+            return None
+
+        entry_error = _ensure_hisec_entry_window()
+        if entry_error is not None:
+            return entry_error
+
         # already_open means the target app window is visible.  CGWindowList
         # can report a stale window (process killed but X window still in the
         # list), so when the initial detection came from CGWindowList we use
@@ -949,7 +1046,7 @@ class MacOSAccessibilityBackend:
                 already_open=True,
                 main_window_found=main_window_found,
                 hisec_process_found=hisec_process_found,
-                cmd_ui_attempted=False,
+                cmd_ui_attempted=cmd_ui_attempted,
                 client_window_found=True,
                 root_start_client=root_start_client,
                 click_attempts=click_attempts,
@@ -961,8 +1058,8 @@ class MacOSAccessibilityBackend:
                 activated_by=activated_by,
             )
 
-        # Stage 3: primary EDRClient path. This does not require the
-        # HiSecEndpointAgent entry window.
+        # Stage 3: primary EDRClient path. At this point the
+        # HiSecEndpointAgent entry window is already visible.
         root_start_client = _run_root_start_client()
         if root_start_client.get("ok"):
             deadline = time.time() + min(timeout, 5.0)
@@ -974,9 +1071,9 @@ class MacOSAccessibilityBackend:
                         ok=True,
                         stage="done",
                         already_open=False,
-                        main_window_found=_hisec_window_visible(),
+                        main_window_found=main_window_found,
                         hisec_process_found=_proc_exists("HiSecEndpointAgent"),
-                        cmd_ui_attempted=False,
+                        cmd_ui_attempted=cmd_ui_attempted,
                         client_window_found=True,
                         root_start_client=root_start_client,
                         click_attempts=click_attempts,
@@ -993,84 +1090,7 @@ class MacOSAccessibilityBackend:
                 "did not appear within 5s"
             )
 
-        # Stage 4: fallback: ensure the HiSecEndpointAgent entry window exists.
-        if not main_window_found:
-            cmd_ui_attempted = True
-            if not Path(HISEC_AGENT_BIN).exists():
-                return _result(
-                    ok=False,
-                    stage="fallback_main_window_not_found",
-                    already_open=False,
-                    main_window_found=False,
-                    hisec_process_found=hisec_process_found,
-                    cmd_ui_attempted=False,
-                    client_window_found=False,
-                    root_start_client=root_start_client,
-                    click_attempts=click_attempts,
-                    successful_click_method=None,
-                    click_error="HiSecEndpointAgent binary not found",
-                    detected_window_title="",
-                    detected_by=None,
-                    error="HiSecEndpointAgent binary not found",
-                    activated_by=activated_by,
-                )
-
-            bundle_launch = _launch_hisec_bundle()
-            if bundle_launch.get("ok"):
-                activated_by = "open /Applications/HiSecEndpoint.app"
-                deadline = time.time() + min(timeout, 3.0)
-                while time.time() < deadline:
-                    if _hisec_window_visible():
-                        main_window_found = True
-                        break
-                    time.sleep(0.4)
-                if not main_window_found:
-                    bundle_launch["error"] = (
-                        "open returned success, but HiSecEndpointAgent window did not appear within 3s"
-                    )
-
-            if not main_window_found:
-                activated_by = "HiSecEndpointAgent cmd ui"
-                # Main path: HiSecEndpointAgent cmd ui (not activate_app)
-                # IMPORTANT: do not redirect stdout/stderr; the GUI can go offscreen.
-                _subprocess.Popen(
-                    [HISEC_AGENT_BIN, "cmd", "ui"],
-                    cwd="/Applications/HiSecEndpoint.app/Contents/MacOS/safra",
-                    env=_os.environ.copy(),
-                )
-                hisec_process_found = True
-
-                # Wait for main window to appear (poll up to timeout)
-                deadline = time.time() + timeout
-                while time.time() < deadline:
-                    if _hisec_window_visible():
-                        main_window_found = True
-                        break
-                    time.sleep(0.5)
-                else:
-                    # Timeout: main window never appeared
-                    found, title, detection_method = _edr_client_window_visible()
-                    return _result(
-                        ok=False,
-                        stage="fallback_main_window_not_found",
-                        already_open=False,
-                        main_window_found=False,
-                        hisec_process_found=hisec_process_found,
-                        cmd_ui_attempted=True,
-                        client_window_found=found,
-                        root_start_client=root_start_client,
-                        click_attempts=click_attempts,
-                        successful_click_method=None,
-                        click_error="main window did not appear within timeout",
-                        detected_window_title=title,
-                        detected_by=detection_method if found else None,
-                        error="HiSecEndpointAgent fallback window did not appear within timeout",
-                        activated_by=activated_by,
-                    )
-        if main_window_found:
-            _bring_hisec_to_front()
-
-        # Stage 5: fallback click from HiSecEndpointAgent to open EDRClient.
+        # Stage 4: fallback click from HiSecEndpointAgent to open EDRClient.
         if not client_window_found:
             for click_method_label in ["ax_press", "cgevent_center", "auto"]:
                 _bring_hisec_to_front()
