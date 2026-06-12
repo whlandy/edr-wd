@@ -51,8 +51,48 @@ class WindowsGUI:
             logger.exception("connect_by_title failed")
             return {"ok": False, "error": str(e)}
 
+    def _wrapper_handle(self, win) -> Optional[int]:
+        """Return a pywinauto wrapper handle across UIA/win32 wrapper variants."""
+        try:
+            handle = getattr(win, "handle", None)
+            if callable(handle):
+                handle = handle()
+            return int(handle) if handle else None
+        except Exception:
+            return None
+
+    def _desktop_windows_for_pid(self, pid: int) -> list:
+        """Return visible top-level Desktop windows for a PID."""
+        from pywinauto import Desktop
+
+        windows = []
+        for win in Desktop(backend=self.backend).windows():
+            try:
+                if not win.is_top_level():
+                    continue
+            except Exception:
+                pass
+            try:
+                if win.process_id() != pid:
+                    continue
+            except Exception:
+                continue
+            try:
+                if not win.is_visible():
+                    continue
+            except Exception:
+                pass
+            windows.append(win)
+        return windows
+
     def connect_by_process(self, process_name: str, timeout: float = 10.0) -> dict:
-        """通过进程名连接应用（先用 psutil 解析 PID，再调 Application.connect(process=PID)）"""
+        """
+        Connect by process name.
+
+        Some Qt/UIA apps expose top-level windows through Desktop enumeration
+        but cannot be reached by Application.connect(process=PID). Prefer the
+        Desktop window handle path and keep process connect as fallback.
+        """
         try:
             # Step 1: psutil 查找匹配的进程 PID
             matches = []
@@ -69,19 +109,55 @@ class WindowsGUI:
             # 返回多个候选，方便调试
             candidates = [{"pid": m["pid"], "name": m["name"]} for m in matches]
 
-            # 取第一个匹配（最常见的同名单实例情况）
-            pid = matches[0]["pid"]
+            errors = []
+            for match in matches:
+                pid = match["pid"]
 
-            # Step 2: 用 PID 连接
-            self.app = Application(backend=self.backend).connect(process=pid)
-            # top_window() 比 windows()[0] 更安全——会自动等窗口就绪
-            self.main_window = self.app.top_window()
+                # Step 2a: prefer Desktop top-level window handle. This matches
+                # is_window_open/list_windows and works for apps where
+                # Application.connect(process=PID) reports no windows.
+                desktop_windows = self._desktop_windows_for_pid(pid)
+                for win in desktop_windows:
+                    handle = self._wrapper_handle(win)
+                    if not handle:
+                        continue
+                    try:
+                        self.app = Application(backend=self.backend).connect(handle=handle, timeout=timeout)
+                        self.main_window = self.app.window(handle=handle)
+                        self.main_window.wait("visible", timeout=timeout)
+                        return {
+                            "ok": True,
+                            "process": process_name,
+                            "pid": pid,
+                            "handle": handle,
+                            "title": self.main_window.window_text(),
+                            "method": "desktop_handle",
+                            "candidates": candidates,
+                        }
+                    except Exception as e:
+                        errors.append(f"handle {handle}: {e}")
+
+                # Step 2b: fallback to pywinauto's process connection.
+                try:
+                    self.app = Application(backend=self.backend).connect(process=pid, timeout=timeout)
+                    self.main_window = self.app.top_window()
+                    self.main_window.wait("visible", timeout=timeout)
+                    return {
+                        "ok": True,
+                        "process": process_name,
+                        "pid": pid,
+                        "method": "process",
+                        "candidates": candidates,
+                    }
+                except Exception as e:
+                    errors.append(f"process {pid}: {e}")
 
             return {
-                "ok": True,
+                "ok": False,
+                "error": "No connectable top-level windows found for process",
                 "process": process_name,
-                "pid": pid,
-                "candidates": candidates,  # 多进程时可供排查
+                "candidates": candidates,
+                "attempt_errors": errors,
             }
         except Exception as e:
             logger.exception("connect_by_process failed")
@@ -135,10 +211,7 @@ class WindowsGUI:
             enabled = win.is_enabled()
         except Exception:
             enabled = False
-        try:
-            handle = win.handle()
-        except Exception:
-            handle = None
+        handle = self._wrapper_handle(win)
 
         return {
             "title": title,
@@ -613,10 +686,27 @@ class WindowsGUI:
                                 ctrl.automation_id(), parent_ctrl.automation_id())
                     ctrl = parent_ctrl
 
-            ctrl.click_input()
-            time.sleep(0.1)
-            return {"ok": True, "method": "click_input", "control_id": control_id,
-                    "automation_id": getattr(ctrl, "automation_id", lambda: None)()}
+            try:
+                ctrl.click_input()
+                time.sleep(0.1)
+                return {"ok": True, "method": "click_input", "control_id": control_id,
+                        "automation_id": getattr(ctrl, "automation_id", lambda: None)()}
+            except Exception as click_error:
+                logger.warning("click_input failed; falling back to coordinates: %s", click_error)
+                rect = ctrl.rectangle()
+                x = int(rect.left + rect.width() / 2)
+                y = int(rect.top + rect.height() / 2)
+                mouse.click(button="left", coords=(x, y))
+                time.sleep(0.1)
+                return {
+                    "ok": True,
+                    "method": "coordinate_fallback",
+                    "control_id": control_id,
+                    "automation_id": getattr(ctrl, "automation_id", lambda: None)(),
+                    "x": x,
+                    "y": y,
+                    "click_input_error": str(click_error),
+                }
         except Exception as e:
             logger.exception("click failed")
             return {"ok": False, "error": str(e)}
