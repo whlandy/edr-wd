@@ -520,11 +520,11 @@ def screenshot(path: str = None) -> str:
 @mcp.tool(
     name="activate_edr",
     description=(
-        "Windows HiSec EDR specific. Activate the EDR GUI by launching "
-        "HisecEndpointAgent with 'cmd ui'. By default waits up to 15 s for the "
-        "EDRClient window to appear. If the window is already open, returns "
-        "immediately with already_open=true. exe_path can override the default "
-        "EDR executable path. Requires EDR_WD_ENABLE_POWERSHELL=1 on the server. "
+        "HiSec EDR specific. On Windows, ensures HisecEndpointAgent is visible "
+        "with 'cmd ui', then prefers EDRClient.exe 17 --show and falls back to "
+        "clicking edrWidget. By default waits up to 15 s for the EDRClient "
+        "window to appear. exe_path can override the default HisecEndpointAgent "
+        "executable path. "
         "On non-Windows backends, returns ok=false with an explanatory error."
     ),
 )

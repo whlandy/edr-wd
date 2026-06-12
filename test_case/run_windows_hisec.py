@@ -60,14 +60,8 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, in
         return True, None
 
     def launch_hisec_agent_entry_window() -> dict:
-        """Open the HisecEndpointAgent entry window through MCP PowerShell."""
-        command = (
-            "$p = 'C:\\Program Files\\HiSec-Endpoint\\core\\safra\\HisecEndpointAgent.exe'; "
-            "if (-not (Test-Path $p)) { throw \"HisecEndpointAgent.exe not found: $p\" }; "
-            "Start-Process -FilePath $p -ArgumentList @('cmd','ui'); "
-            "Write-Output 'started'"
-        )
-        return call_tool("run_powershell", {"command": command, "timeout": 10})
+        """Open the HisecEndpointAgent entry window through activate_edr."""
+        return call_tool("activate_edr", {"wait": True, "timeout": 15.0})
 
     # ── Basic / integration tests ─────────────────────────────────
     print()
@@ -189,7 +183,7 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, in
 
     e2e_steps = [
         ("Step0: is_window_open(EDRClient.exe)",            "is_window_open", {"process_name": "EDRClient.exe"}, False),
-        ("Step1: open HisecEndpointAgent entry window",     "run_powershell", {"command": "$p = 'C:\\Program Files\\HiSec-Endpoint\\core\\safra\\HisecEndpointAgent.exe'; if (-not (Test-Path $p)) { throw \"HisecEndpointAgent.exe not found: $p\" }; Start-Process -FilePath $p -ArgumentList @('cmd','ui'); Write-Output 'started'", "timeout": 10}, True),
+        ("Step1: open HisecEndpointAgent entry window",     "activate_edr",   {"wait": True, "timeout": 15.0}, True),
         ("Step2: wait_window(HisecEndpointAgent.exe)",      "wait_window",    {"process_name": "HisecEndpointAgent.exe", "timeout": 15.0, "interval": 0.5}, True),
         ("Step3: activate_edr",                             "activate_edr",   {"wait": True, "timeout": 15.0}, True),
         ("Step4: wait_window(EDRClient.exe)",               "wait_window",    {"process_name": "EDRClient.exe", "timeout": 15.0, "interval": 0.5}, True),

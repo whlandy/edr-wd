@@ -3,9 +3,9 @@ test_windows_hisec_e2e.py — Windows HiSec EDR 端到端测试。
 
 测试流程：
   1. is_window_open(process_name="EDRClient.exe")   # 检查是否已打开
-  2. run_powershell 启动 HisecEndpointAgent.exe     # 打开入口窗口
+  2. activate_edr 预热 HisecEndpointAgent.exe       # 打开入口窗口
   3. wait_window(process_name="HisecEndpointAgent.exe")
-  4. activate_edr(wait=True, timeout=15)           # 激活 EDRClient 窗口
+  4. activate_edr(wait=True, timeout=15)           # EDRClient.exe 17 --show 主路径
   5. wait_window(process_name="EDRClient.exe")      # 等待目标窗口出现
   6. is_window_open 检测两个窗口都在桌面上
   7. connect(process_name="EDRClient.exe")          # 连接到目标窗口
@@ -75,16 +75,12 @@ class TestWindowsHisecE2E:
         assert result.get("ok") is True
 
     def test_1_open_hisec_agent_entry_window(self, client, windows_backend):
-        """Step 1: 通过 MCP PowerShell 打开 HisecEndpointAgent 入口窗口"""
-        command = (
-            "$p = 'C:\\Program Files\\HiSec-Endpoint\\core\\safra\\HisecEndpointAgent.exe'; "
-            "if (-not (Test-Path $p)) { throw \"HisecEndpointAgent.exe not found: $p\" }; "
-            "Start-Process -FilePath $p -ArgumentList @('cmd','ui'); "
-            "Write-Output 'started'"
-        )
-        result = client.call_tool("run_powershell", {"command": command, "timeout": 10})
-        print(f"\n[Step1 open HisecEndpointAgent] {result}")
-        assert result.get("ok") is True, f"open HisecEndpointAgent failed: {result}"
+        """Step 1: 通过 activate_edr 预热入口窗口，避免依赖 PowerShell"""
+        result = client.call_tool("activate_edr", {"wait": True, "timeout": 15.0})
+        print(f"\n[Step1 activate window pair] {result}")
+        assert result.get("ok") is True, f"activate_edr failed while opening HisecEndpointAgent: {result}"
+        main = result.get("main", {})
+        assert main.get("window_found") is True, f"HisecEndpointAgent window not found: {result}"
 
     def test_2_wait_hisec_agent_window(self, client, windows_backend):
         """Step 2: 用窗口检测确认 HisecEndpointAgent 已打开在桌面上"""

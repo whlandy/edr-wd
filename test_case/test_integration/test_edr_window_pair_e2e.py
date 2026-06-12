@@ -55,16 +55,6 @@ def _require_hisec_backend(backend_kind):
         )
 
 
-def _open_hisec_agent(client):
-    command = (
-        "$p = 'C:\\Program Files\\HiSec-Endpoint\\core\\safra\\HisecEndpointAgent.exe'; "
-        "if (-not (Test-Path $p)) { throw \"HisecEndpointAgent.exe not found: $p\" }; "
-        "Start-Process -FilePath $p -ArgumentList @('cmd','ui'); "
-        "Write-Output 'started'"
-    )
-    return client.call_tool("run_powershell", {"command": command, "timeout": 10})
-
-
 def _wait_visible(client, process_name):
     return client.call_tool(
         "wait_window",
@@ -84,8 +74,11 @@ def _assert_visible(client, process_name, title_re=None):
 
 
 def _run_windows_window_pair_e2e(client):
-    launch = _open_hisec_agent(client)
-    assert launch.get("ok") is True, f"open {WINDOWS_HISEC_AGENT} failed: {launch}"
+    launch = client.call_tool("activate_edr", {"wait": True, "timeout": 15.0})
+    assert launch.get("ok") is True, f"activate_edr failed: {launch}"
+    assert launch.get("main", {}).get("window_found") is True, (
+        f"{WINDOWS_HISEC_AGENT} desktop window not found after activate_edr: {launch}"
+    )
 
     hisec_wait = _wait_visible(client, WINDOWS_HISEC_AGENT)
     assert hisec_wait.get("ok") is not False, (
@@ -94,9 +87,6 @@ def _run_windows_window_pair_e2e(client):
     assert hisec_wait.get("found") is True, (
         f"{WINDOWS_HISEC_AGENT} desktop window not found: {hisec_wait}"
     )
-
-    activate = client.call_tool("activate_edr", {"wait": True, "timeout": 15.0})
-    assert activate.get("ok") is True, f"activate_edr failed: {activate}"
 
     edr_wait = _wait_visible(client, WINDOWS_EDR_CLIENT)
     assert edr_wait.get("ok") is not False, (

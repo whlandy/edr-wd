@@ -275,10 +275,12 @@ The smoke client is backend-aware:
   successful file-only capture without inline image payload is skipped rather
   than failed, and the final post-restore visibility check is diagnostic-only
   because `restore_edr` is non-destructive on macOS
-- Windows GUI smoke/E2E coverage opens `HisecEndpointAgent.exe` first, then
-  `EDRClient.exe`, and verifies both desktop windows with `wait_window` /
-  `is_window_open`. The same window-pair E2E is part of the basic pytest
-  integration suite in `test_case/test_integration/test_edr_window_pair_e2e.py`.
+- Windows GUI smoke/E2E coverage calls `activate_edr` to make both windows
+  visible. The Windows backend opens `HisecEndpointAgent.exe cmd ui`, then
+  prefers `EDRClient.exe 17 --show` and only falls back to clicking
+  `edrWidget` when the direct client launch does not produce the window. The
+  same window-pair E2E is part of the basic pytest integration suite in
+  `test_case/test_integration/test_edr_window_pair_e2e.py`.
 
 Full profile-dispatched tests:
 
