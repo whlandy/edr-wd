@@ -68,6 +68,18 @@ def macos_backend(client, tools):
     return status
 
 
+@pytest.fixture(scope="module")
+def macos_hisec_ready(client, macos_backend):
+    """Activate HiSec once for the module, or skip when the app is absent."""
+    result = client.call_tool("activate_edr", {"wait": True, "timeout": 20.0})
+    if (
+        result.get("ok") is False
+        and "binary not found" in str(result.get("error", "")).lower()
+    ):
+        pytest.skip(f"macOS HiSecEndpoint.app is not installed on this target: {result.get('error')}")
+    return result
+
+
 @pytest.mark.skipif(not is_server_online(), reason="MCP server not reachable")
 class TestMacosHisecE2E:
     """macOS HiSecEndpoint E2E: 弹出 EDRClient + HisecEndpointAgent 窗口"""
@@ -84,9 +96,9 @@ class TestMacosHisecE2E:
         print(f"\n[Step1 backend] {backend}")
         assert backend == MACOS_BACKEND
 
-    def test_2_activate_edr(self, client, macos_backend):
+    def test_2_activate_edr(self, macos_hisec_ready):
         """Step 2: 激活 HiSecEndpoint（弹出主窗口 + EDRClient 子窗口）"""
-        result = client.call_tool("activate_edr", {"wait": True, "timeout": 20.0})
+        result = macos_hisec_ready
         print(f"\n[Step2 activate_edr] ok={result.get('ok')}")
         print(f"  main window_found={result.get('main', {}).get('window_found')}")
         print(f"  client window_found={result.get('client', {}).get('window_found')}")
@@ -102,7 +114,7 @@ class TestMacosHisecE2E:
         assert result.get("client", {}).get("window_found") is True, \
             f"EDRClient sub-window not found: {result}"
 
-    def test_3_verify_hisec_agent_window(self, client, macos_backend):
+    def test_3_verify_hisec_agent_window(self, client, macos_hisec_ready):
         """Step 3: 确认 HisecEndpointAgent 主窗口在桌面上"""
         result = client.call_tool("is_window_open", {
             "process_name": "HiSecEndpointAgent",
@@ -114,7 +126,7 @@ class TestMacosHisecE2E:
         assert result.get("found") is True, \
             f"HisecEndpointAgent main window not on desktop: {result}"
 
-    def test_4_verify_edr_client_window(self, client, macos_backend):
+    def test_4_verify_edr_client_window(self, client, macos_hisec_ready):
         """Step 4: 确认 EDRClient 子窗口在桌面上"""
         result = client.call_tool("is_window_open", {
             "process_name": "EDRClient",

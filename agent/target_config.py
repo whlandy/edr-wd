@@ -403,7 +403,8 @@ class TargetConfig:
         """
         Build the MCP HTTP URL for the target.
 
-        connect_mode=direct  → http://{ssh.host}:{mcp.port}{mcp.path}
+        connect_mode=direct → http://{ssh.host}:{mcp.port}{mcp.path}
+        connect_mode=local  → http://127.0.0.1:{mcp.port}{mcp.path}
         connect_mode=tunnel → http://127.0.0.1:{tunnel.local_port}{mcp.path}
 
         For legacy normalized configs, _direct_url_override / _tunnel_url_override
@@ -427,13 +428,23 @@ class TargetConfig:
             port = mcp.get("port", 8765)
             path = mcp.get("path", "/mcp")
             return f"http://{host}:{port}{path}"
-        else:  # tunnel
+        if connect_mode == "local":
+            port = mcp.get("port", 8765)
+            path = mcp.get("path", "/mcp")
+            return f"http://127.0.0.1:{port}{path}"
+
+        if connect_mode == "tunnel":
             tunnel_url = mcp.get("_tunnel_url_override")
             if tunnel_url:
                 return tunnel_url
             local_port = mcp.get("tunnel", {}).get("local_port", 18765)
             path = mcp.get("path", "/mcp")
             return f"http://127.0.0.1:{local_port}{path}"
+
+        raise KeyError(
+            f"Target '{target_name}': unsupported mcp.connect_mode={connect_mode!r}; "
+            "expected 'direct', 'local', or 'tunnel'"
+        )
 
     # ── Auth resolver ─────────────────────────────────────────────────────────
 

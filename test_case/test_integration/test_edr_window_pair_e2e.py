@@ -102,6 +102,11 @@ def _run_windows_window_pair_e2e(client):
 
 def _run_macos_window_pair_e2e(client):
     activate = client.call_tool("activate_edr", {"wait": True, "timeout": 20.0})
+    if (
+        activate.get("ok") is False
+        and "binary not found" in str(activate.get("error", "")).lower()
+    ):
+        pytest.skip(f"macOS HiSecEndpoint.app is not installed on this target: {activate.get('error')}")
     assert activate.get("ok") is True, f"activate_edr failed: {activate}"
     assert activate.get("main", {}).get("window_found") is True, (
         f"HiSecEndpointAgent main window not found: {activate}"

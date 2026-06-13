@@ -279,13 +279,16 @@ def check_server_health(name: Optional[str] = None) -> dict:
         if connect_mode == "direct":
             check_host = ssh_cfg["host"]
             check_port = mcp_cfg["port"]
-            mcp_path = mcp_cfg["path"]
-            mcp_url = f"http://{check_host}:{check_port}{mcp_path}"
-        else:  # tunnel
+        elif connect_mode == "local":
+            check_host = "127.0.0.1"
+            check_port = mcp_cfg["port"]
+        elif connect_mode == "tunnel":
             check_host = "127.0.0.1"
             check_port = mcp_cfg["tunnel"]["local_port"]
-            mcp_path = mcp_cfg["path"]
-            mcp_url = f"http://127.0.0.1:{check_port}{mcp_path}"
+        else:
+            raise ValueError(f"Unsupported mcp.connect_mode={connect_mode!r}")
+        mcp_path = mcp_cfg["path"]
+        mcp_url = f"http://{check_host}:{check_port}{mcp_path}"
 
         port_open = _is_port_listening(check_host, check_port)
 
@@ -368,6 +371,8 @@ def ensure_server_running(name: Optional[str] = None) -> dict:
         connect_mode = mcp_cfg["connect_mode"]
         if connect_mode == "direct":
             check_host = ssh_cfg["host"]
+        elif connect_mode == "local":
+            check_host = "127.0.0.1"
         else:
             check_host = "127.0.0.1"
         check_port = mcp_cfg["port"]
@@ -505,9 +510,13 @@ def _build_mcp_url(cfg: dict) -> str:
     """
     mcp_cfg = cfg["mcp"]
     ssh_cfg = cfg["ssh"]
-    if mcp_cfg["connect_mode"] == "direct":
+    connect_mode = mcp_cfg["connect_mode"]
+    if connect_mode == "direct":
         # Client connects to the SSH host address, not 0.0.0.0
         return f"http://{ssh_cfg['host']}:{mcp_cfg['port']}{mcp_cfg['path']}"
-    else:
+    if connect_mode == "local":
+        return f"http://127.0.0.1:{mcp_cfg['port']}{mcp_cfg['path']}"
+    if connect_mode == "tunnel":
         local_port = mcp_cfg.get("tunnel", {}).get("local_port", 18765)
         return f"http://127.0.0.1:{local_port}{mcp_cfg['path']}"
+    raise ValueError(f"Unsupported mcp.connect_mode={connect_mode!r}")

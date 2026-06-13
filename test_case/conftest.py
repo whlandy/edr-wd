@@ -258,9 +258,13 @@ def check_mcp_server() -> tuple[bool, str]:
         mcp = cfg.get("mcp", {})
         ssh = cfg.get("ssh", {})
         path = mcp.get("path", "/mcp")
-        if mcp.get("connect_mode", "direct") == "tunnel":
+        connect_mode = mcp.get("connect_mode", "direct")
+        if connect_mode == "tunnel":
             host = "127.0.0.1"
             port = mcp.get("tunnel", {}).get("local_port", 18765)
+        elif connect_mode == "local":
+            host = "127.0.0.1"
+            port = mcp.get("port", 8765)
         else:
             host = ssh.get("host", "")
             port = mcp.get("port", 8765)

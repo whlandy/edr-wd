@@ -424,6 +424,12 @@ class MacOSAccessibilityBackend:
                 "bundle_id": None,  # filled lazily by activate_app
                 "window_title": window_title,
                 "pid": pid,
+                "title": window_title,
+                "class_name": app_name,
+                "process_id": pid,
+                "rectangle": None,
+                "visible": True,
+                "enabled": True,
             })
 
         return {"ok": True, "windows": windows, "count": len(windows)}
@@ -464,12 +470,17 @@ class MacOSAccessibilityBackend:
                                 "bundle_id": None,
                                 "window_title": win_info.get("title", ""),
                                 "pid": win_info.get("pid"),
+                                "title": win_info.get("title", ""),
+                                "class_name": getattr(self, "_connected_app", process_name) or process_name,
+                                "process_id": win_info.get("pid"),
                                 "rectangle": {
                                     "x": rect.left,
                                     "y": rect.top,
                                     "w": rect.width(),
                                     "h": rect.height(),
                                 },
+                                "visible": True,
+                                "enabled": True,
                             })
                         except Exception:
                             normalized.append({
@@ -477,6 +488,12 @@ class MacOSAccessibilityBackend:
                                 "bundle_id": None,
                                 "window_title": "",
                                 "pid": None,
+                                "title": "",
+                                "class_name": getattr(self, "_connected_app", process_name) or process_name,
+                                "process_id": None,
+                                "rectangle": None,
+                                "visible": True,
+                                "enabled": True,
                             })
                     return {"ok": True, "found": True, "windows": normalized, "count": len(normalized)}
             except Exception:
@@ -551,8 +568,17 @@ class MacOSAccessibilityBackend:
             )
             if r.get("ok") and r.get("found"):
                 return r
+            last = r
             time.sleep(interval)
-        return {"ok": False, "error": "timeout", "found": False}
+        if isinstance(locals().get("last"), dict):
+            return {
+                "ok": False,
+                "error": "timeout",
+                "found": False,
+                "windows": last.get("windows", []),
+                "count": last.get("count", 0),
+            }
+        return {"ok": False, "error": "timeout", "found": False, "windows": [], "count": 0}
 
     def activate_app(
         self,
@@ -755,6 +781,8 @@ class MacOSAccessibilityBackend:
                 'return matchedTitle\n'
             )
             rc, out = _run(["osascript", "-e", script], timeout=5)
+            if rc != 0:
+                return False, "", "cgwindowlist"
             title = out.strip()
             # title is "missing value" (None) when window has no name — still OK if owner matched
             if title and title != "missing value":
@@ -1454,13 +1482,19 @@ class MacOSAccessibilityBackend:
                     if hasattr(self, "_connected_pid") and self._connected_pid and                        self._connected_app and process_name.lower() in self._connected_app.lower():
                         return {"ok": True, "matched": "process_name", "pid": self._connected_pid}
                     return {"ok": False, "error": f"connect: no visible window for {process_name}"}
-            self._connected_pid = r["windows"][0]["pid"]
+            first_window = r["windows"][0]
+            self._connected_pid = first_window.get("pid") or self._pid_for_app(process_name)
+            if not self._connected_pid:
+                return {
+                    "ok": False,
+                    "error": f"connect: visible window found for {process_name}, but pid could not be resolved",
+                }
             self._connected_app = process_name
             self._connected_window_snapshot = {
                 "pid": self._connected_pid,
-                "title": r["windows"][0].get("window_title", ""),
-                "owner": r["windows"][0].get("app_name", process_name),
-                "rectangle": r["windows"][0].get("rectangle", {"x": 0, "y": 0, "w": 800, "h": 600}),
+                "title": first_window.get("window_title", ""),
+                "owner": first_window.get("app_name", process_name),
+                "rectangle": first_window.get("rectangle", {"x": 0, "y": 0, "w": 800, "h": 600}),
             }
             self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "process_name", "pid": self._connected_pid}
@@ -1534,14 +1568,6 @@ on cleanText(v)
     return s
 end cleanText
 
-on attrText(e, attrName)
-    try
-        return cleanText(value of attribute attrName of e)
-    on error
-        return ""
-    end try
-end attrText
-
 on boolText(e, propName)
     try
         if propName is "enabled" then
@@ -1570,8 +1596,8 @@ on describeElement(e, depth, pathText, controlId, windowName)
     try
         set valueText to cleanText(value of e)
     end try
-    set identifierText to attrText(e, "AXIdentifier")
-    set subroleText to attrText(e, "AXSubrole")
+    set identifierText to ""
+    set subroleText to ""
     set enabledText to boolText(e, "enabled")
     set xText to ""
     set yText to ""
@@ -1599,10 +1625,12 @@ on walkElement(e, depth, pathText, windowName)
     set outText to outText & describeElement(e, depth, pathText, myId, windowName) & linefeed
     if depth >= depthLimit then return
     try
-        set kids to UI elements of e
+        tell application "System Events" to set kids to UI elements of e
         set childIndex to 1
         repeat with childElement in kids
-            my walkElement(childElement, depth + 1, pathText & "." & (childIndex as text), windowName)
+            set childDepth to depth + 1
+            set childPath to pathText & "." & (childIndex as text)
+            my walkElement(childElement, childDepth, childPath, windowName)
             set childIndex to childIndex + 1
         end repeat
     end try
