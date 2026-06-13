@@ -165,12 +165,22 @@ macOS flow:
 For details, read `references/activate-edr.md` only when changing activation
 logic.
 
-## macOS Element Clicks
+## Component-Tree Clicks
 
-For macOS, `dump_tree`, `find_control`, `click`, and `click_target` use
-Accessibility data. When a standard selector is insufficient, use a Swift AX
-helper under `target/scripts/macos/`. Read `references/element-click.md` before
-changing Swift helper behavior.
+For precise UI actions, always use the component tree before pointer
+coordinates:
+
+1. Verify and connect to the exact target window/process.
+2. `dump_tree(max_depth=...)`.
+3. Select a unique node using `automation_id`, `control_id`, or
+   `text + class_name + control_type`.
+4. Use `click()` and require a semantic component result where available
+   (`uia_invoke` / `uia_toggle` on Windows, AX action on macOS).
+5. Re-run `dump_tree()` and verify the resulting page text.
+
+Do not start with `click_at`, `click_window_at`, `click_target`, or a bare
+text-only click when a component-tree selector is available. Read
+`references/element-click.md` before implementing or debugging click behavior.
 
 macOS `click_at` is dry-run by default. Set `EDR_WD_ALLOW_REAL_CLICKS=1` on the
 target server only when real pointer actions are intended.
@@ -214,7 +224,8 @@ Load these only when relevant:
 
 - `references/activate-edr.md`: Windows/macOS HiSec activation internals.
 - `references/window-detection.md`: window verification and debugging workflow.
-- `references/element-click.md`: macOS Swift AX element-click pattern.
+- `references/element-click.md`: component-tree click SOP for Windows UIA and
+  macOS AX, including the HiSec “安全中心” compliance template.
 - `docs/architecture/`: historical architecture notes and deeper context.
 
 ## Housekeeping

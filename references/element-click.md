@@ -1,325 +1,235 @@
-# Element-Level Click on macOS Targets
+# Component-Tree Click SOP
 
-## The Problem
+Use this SOP whenever an EDR-WD task says "click a button/control/tab" or asks
+for page data after a click. The goal is to act on the component tree, not on
+guessed screen coordinates.
 
-The MCP `click` tool (by `control_id`/`automation_id`) and `dump_tree` are **Windows-only** in the current edr-wd backend. On macOS targets, the `macos_accessibility` backend only exposes `click_at(x, y)` — coordinate-based clicking.
+## Core Rule
 
-This means the AI **cannot** discover UI elements through the MCP interface on macOS. The workaround is to write a **Swift script** that uses macOS Accessibility APIs directly, then execute it over SSH.
+Do not start with `click_at`, `click_window_at`, or a bare
+`click(text="...")`.
 
----
+Start with window verification, connect to the exact process/window, dump the
+tree, select one unique node, then trigger the node through its semantic action.
+Only use coordinates as an explicitly documented fallback after semantic actions
+fail.
 
-## The Solution: Swift + AX API
+## Required Sequence
 
-macOS exposes its entire UI as an **Accessibility tree** (AX tree) through the Application Services framework — equivalent to Windows UIAutomation. Any element can be found by title/role/value, and clicked via `AXPressAction` or CGEvent.
+1. Make the target window visible.
 
-### When to Use This
+   ```python
+   agent.call_tool("activate_edr", {"wait": True, "timeout": 20})
+   agent.call_tool("wait_window", {"process_name": "HisecEndpointAgent.exe", "timeout": 10})
+   ```
 
-- You need to click a button/link/control by its **label text** on a macOS target
-- `click_at(x, y)` is unreliable (dynamic UI, unknown position)
-- `dump_tree` / `click` MCP tools are Windows-only
-- The standard `activate_edr` → `click_at` flow isn't sufficient
+2. Connect to the exact window.
 
----
+   ```python
+   agent.call_tool("connect", {
+       "process_name": "HisecEndpointAgent.exe",
+       "timeout": 10,
+   })
+   ```
 
-## Complete Pattern
+   Use `EDRClient.exe` only when the requested control is inside the EDRClient
+   window. For the HiSec entry window, always use `HisecEndpointAgent.exe`.
 
-### Step 1: Find the Target App's PID
+3. Dump the component tree.
 
-```bash
-PID=$(sshpass -p 'PASSWORD' pgrep -f "AppName" | head -1)
-echo "PID: $PID"
-```
+   ```python
+   tree = agent.call_tool("dump_tree", {"max_depth": 20}, timeout=40)
+   controls = tree.get("controls") or []
+   ```
 
-Or via Swift (enumerate all running apps):
+4. Find candidate nodes from the tree and print the evidence.
 
-```swift
-import Cocoa
+   ```python
+   candidates = [
+       c for c in controls
+       if (c.get("text") or c.get("title") or c.get("name")) == "安全中心"
+   ]
+   for c in candidates:
+       print({
+           "text": c.get("text"),
+           "class_name": c.get("class_name"),
+           "control_type": c.get("control_type"),
+           "automation_id": c.get("automation_id"),
+           "rectangle": c.get("rectangle"),
+           "depth": c.get("depth"),
+       })
+   ```
 
-let targetNames = ["AppName", "AnotherName"]
-for app in NSWorkspace.shared.runningApplications {
-    if targetNames.contains(where: { (app.localizedName ?? "").contains($0) }) {
-        print("\(app.localizedName ?? "?") (pid=\(app.processIdentifier))")
-    }
-}
-```
+5. Require a stable selector before clicking.
 
-### Step 2: Traverse the AX Tree to Find an Element
+   Preferred selector order:
 
-```swift
-import Cocoa
-import ApplicationServices
+   - `automation_id` exact match
+   - `control_id` only if stable across runs
+   - `text + class_name + control_type`
+   - `auto_id_contains` or `auto_id_suffix` for generated IDs
 
-let TARGET = "按钮文字"  // e.g. "日志中心"
+   If more than one candidate matches, do not click yet. Narrow by process,
+   connected window, class/control type, parent, or automation id.
 
-func findInElement(_ el: AXUIElement) -> AXUIElement? {
-    // Check all string attributes for match
-    var titleRef: CFTypeRef?
-    var valueRef: CFTypeRef?
-    var descRef: CFTypeRef?
-    
-    let title = (AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleRef) == .success) ? (titleRef as? String ?? "") : ""
-    let value = (AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success) ? (valueRef as? String ?? "") : ""
-    let desc = (AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descRef) == .success) ? (descRef as? String ?? "") : ""
-    
-    if title.contains(TARGET) || value.contains(TARGET) || desc.contains(TARGET) {
-        return el
-    }
-    
-    // Recurse into children
-    var childrenRef: CFTypeRef?
-    if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-       let children = childrenRef as? [AXUIElement] {
-        for child in children {
-            if let found = findInElement(child) { return found }
-        }
-    }
-    return nil
-}
-```
+6. Click through a semantic component action.
 
-### Step 3: Click the Element
+   Windows `click()` now prefers UIA semantic activation for interactive
+   controls. A successful component click should report `method` as
+   `uia_invoke` or `uia_toggle`, not `click_input` or `coordinate_fallback`.
 
-```swift
-// Method A: AXPress (preferred — uses system accessibility action)
-func pressAX(_ el: AXUIElement) -> Bool {
-    return AXUIElementPerformAction(el, kAXPressAction as CFString) == .success
-}
+   ```python
+   result = agent.call_tool("click", {
+       "text": "安全中心",
+       "class_name": "CheckBox",
+       "automation_id": "<exact automation_id from dump_tree>",
+       "parent_fallback": False,
+   })
+   assert result.get("method") in {"uia_invoke", "uia_toggle"}, result
+   ```
 
-// Method B: CGEvent click at element center (fallback)
-func rectFromElement(_ el: AXUIElement) -> CGRect? {
-    var posRef: CFTypeRef?
-    var sizeRef: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
-          AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
-          CFGetTypeID(posRef) == AXValueGetTypeID(),
-          CFGetTypeID(sizeRef) == AXValueGetTypeID() else { return nil }
-    var pos = CGPoint.zero
-    var size = CGSize.zero
-    guard AXValueGetValue(posRef as! AXValue, .cgPoint, &pos),
-          AXValueGetValue(sizeRef as! AXValue, .cgSize, &size) else { return nil }
-    return CGRect(origin: pos, size: size)
-}
+   macOS `click()` uses Accessibility data. Prefer `click` with a tree-derived
+   selector. Use Swift AX helpers only when the MCP macOS backend lacks the
+   needed action for that control.
 
-func clickCenter(_ el: AXUIElement) -> Bool {
-    guard let rect = rectFromElement(el) else { return false }
-    let cx = rect.midX
-    let cy = rect.midY
-    let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
-                        mouseCursorPosition: CGPoint(x: cx, y: cy), mouseButton: .left)!
-    let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
-                     mouseCursorPosition: CGPoint(x: cx, y: cy), mouseButton: .left)!
-    down.post(tap: .cghidEventTap)
-    up.post(tap: .cghidEventTap)
-    return true
-}
-```
+7. Verify the click by dumping the tree again.
 
-### Step 4: Assemble and Execute
+   ```python
+   after = agent.call_tool("dump_tree", {"max_depth": 20}, timeout=40)
+   texts = []
+   for c in after.get("controls") or []:
+       text = c.get("text") or c.get("title") or c.get("name")
+       if text and text not in texts:
+           texts.append(text)
+   print(texts)
+   ```
 
-Full working script (`/tmp/click_element.swift`):
+   Verification must use the resulting page contents, not only `"ok": true`
+   from the click call.
 
-```swift
-#!/usr/bin/env swift
-import Cocoa
-import ApplicationServices
+## HiSec "安全中心" Compliance Template
 
-let TARGET = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ""
-let APP_NAME = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : ""
-
-// Find the app
-guard let app = NSWorkspace.shared.runningApplications.first(where: {
-    ($0.localizedName ?? "").contains(APP_NAME)
-}) else {
-    print("ERROR: \(APP_NAME) not found")
-    exit(1)
-}
-
-let axApp = AXUIElementCreateApplication(app.processIdentifier)
-var windowsRef: CFTypeRef?
-guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-      let windows = windowsRef as? [AXUIElement], !windows.isEmpty else {
-    print("ERROR: No windows")
-    exit(1)
-}
-
-// Recursive search
-func findInElement(_ el: AXUIElement) -> AXUIElement? {
-    var titleRef: CFTypeRef?
-    var valueRef: CFTypeRef?
-    var descRef: CFTypeRef?
-    let title = (AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleRef) == .success) ? (titleRef as? String ?? "") : ""
-    let value = (AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success) ? (valueRef as? String ?? "") : ""
-    let desc = (AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &descRef) == .success) ? (descRef as? String ?? "") : ""
-    if title.contains(TARGET) || value.contains(TARGET) || desc.contains(TARGET) { return el }
-    var childrenRef: CFTypeRef?
-    if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-       let children = childrenRef as? [AXUIElement] {
-        for child in children { if let f = findInElement(child) { return f } }
-    }
-    return nil
-}
-
-guard let el = findInElement(windows[0]) else {
-    print("ERROR: '\(TARGET)' not found")
-    exit(1)
-}
-
-// Try AXPress, fallback to CGEvent
-if AXUIElementPerformAction(el, kAXPressAction as CFString) == .success {
-    print("AXPress succeeded")
-    exit(0)
-} else {
-    // CGEvent fallback...
-    var posRef: CFTypeRef?
-    var sizeRef: CFTypeRef?
-    if AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
-       AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success {
-        var pos = CGPoint.zero, size = CGSize.zero
-        if AXValueGetValue(posRef as! AXValue, .cgPoint, &pos),
-           AXValueGetValue(sizeRef as! AXValue, .cgSize, &size) {
-            let cx = pos.x + size.width/2, cy = pos.y + size.height/2
-            CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown,
-                    mouseCursorPosition: CGPoint(x: cx, y: cy), mouseButton: .left)?
-                .post(tap: .cghidEventTap)
-            CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp,
-                    mouseCursorPosition: CGPoint(x: cx, y: cy), mouseButton: .left)?
-                .post(tap: .cghidEventTap)
-            print("CGEvent click at (\(cx), \(cy))")
-            exit(0)
-        }
-    }
-    print("ERROR: click failed")
-    exit(1)
-}
-```
-
-Execute via SSH:
-
-```bash
-sshpass -p 'PASSWORD' scp -P 22 /tmp/click_element.swift user@host:/tmp/click_element.swift
-sshpass -p 'PASSWORD' ssh -p 22 user@host 'EDR_WD_ALLOW_REAL_CLICKS=1 swift /tmp/click_element.swift "按钮文字" "AppName"'
-```
-
----
-
-## macOS AX Attributes Reference
-
-| Attribute | CFString | Meaning |
-|-----------|----------|---------|
-| Title | `kAXTitleAttribute` | Button text, window title |
-| Value | `kAXValueAttribute` | Input field content, checkbox state |
-| Description | `kAXDescriptionAttribute` | Accessibility description |
-| Role | `kAXRoleAttribute` | Element type: `AXButton`, `AXStaticText`, `AXWindow`, etc. |
-| Position | `kAXPositionAttribute` | `CGPoint` — screen coordinates |
-| Size | `kAXSizeAttribute` | `CGSize` — element dimensions |
-| Children | `kAXChildrenAttribute` | Child elements in the AX tree |
-| Parent | `kAXParentAttribute` | Parent element |
-| RoleDescription | `kAXRoleDescriptionAttribute` | Human-readable role name |
-
-Common roles: `AXButton`, `AXStaticText`, `AXTextField`, `AXCheckBox`, `AXRadioButton`, `AXMenuItem`, `AXLink`, `AXGroup`, `AXWindow`, `AXToolbar`, `AXMenuBar`
-
----
-
-## Common AX Tree Patterns
-
-### Pattern 1: Click by Button Title
-```swift
-let TARGET = "确定"
-let el = findInElement(window, target: TARGET)
-AXUIElementPerformAction(el, kAXPressAction as CFString)
-```
-
-### Pattern 2: Click by Role + Title
-```swift
-for child in children {
-    let role = getStringAttr(child, kAXRoleAttribute)
-    let title = getStringAttr(child, kAXTitleAttribute)
-    if role == "AXButton" && title.contains("日志") {
-        AXUIElementPerformAction(child, kAXPressAction as CFString)
-    }
-}
-```
-
-### Pattern 3: Enumerate All Interactive Elements
-```swift
-func dumpRoles(_ el: AXUIElement, depth: Int = 0) {
-    let role = getStringAttr(el, kAXRoleAttribute)
-    let title = getStringAttr(el, kAXTitleAttribute)
-    let prefix = String(repeating: "  ", count: depth)
-    if role.contains("AX") {
-        print("\(prefix)\(role) | \(title)")
-    }
-    for child in getChildren(el) {
-        dumpRoles(child, depth: depth + 1)
-    }
-}
-```
-
-### Pattern 4: Click in HiSecEndpoint / EDRClient Windows
-The HiSecEndpointAgent and EDRClient windows have shallow AX trees (1-2 levels of children). Use the app name to locate:
-```swift
-let appName = "HiSecEndpoint"  // or "HiSecEndpointAgent"
-guard let app = NSWorkspace.shared.runningApplications.first(where: {
-    ($0.localizedName ?? "").contains(appName)
-}) else { exit(1) }
-```
-
----
-
-## Complete End-to-End Workflow (from agent side)
+Use this template when the task asks to click the left-side "安全中心" in
+`HisecEndpointAgent` and collect compliance data.
 
 ```python
-import subprocess
-
-# 1. Identify app name from running apps
-r = subprocess.run([
-    'sshpass', '-p', 'PASSWORD', 'ssh', '-p', '22',
-    'user@host', 'osascript -e \'tell application "System Events" to get name of every process\''
-], capture_output=True, text=True)
-print(r.stdout)
-
-# 2. Write Swift script to /tmp/
-swift_code = """
-import Cocoa
-import ApplicationServices
-// ... full script ...
-"""
-
-# 3. Copy and execute
-subprocess.run(['sshpass', '-p', 'PASSWORD', 'scp', '-P', '22',
-               '/tmp/click.swift', 'user@host:/tmp/click.swift'])
-r = subprocess.run([
-    'sshpass', '-p', 'PASSWORD', 'ssh', '-p', '22', 'user@host',
-    'EDR_WD_ALLOW_REAL_CLICKS=1 swift /tmp/click.swift'
-], capture_output=True, text=True)
-print(r.stdout, r.stderr)
-```
-
----
-
-## Windows Equivalent (for reference)
-
-On Windows targets, use the MCP tools directly — no Swift needed:
-
-```python
+import json
+from pathlib import Path
 from agent.subagent import TargetSubAgent
-agent = TargetSubAgent.from_name("win-dev")
-agent.initialize_mcp()
 
-# dump_tree + click by control_id — all via MCP
-tree = agent.call_tool("dump_tree", {"max_depth": 5})
-result = agent.call_tool("click", {"control_id": "12345"})
+agent = TargetSubAgent.from_name("win-dev")
+agent.initialize_mcp(force=True)
+
+agent.call_tool("activate_edr", {"wait": True, "timeout": 20}, timeout=30)
+agent.call_tool("connect", {
+    "process_name": "HisecEndpointAgent.exe",
+    "timeout": 10,
+}, timeout=20)
+
+tree = agent.call_tool("dump_tree", {"max_depth": 20}, timeout=40)
+controls = tree.get("controls") or []
+candidates = [
+    c for c in controls
+    if (c.get("text") or c.get("title") or c.get("name")) == "安全中心"
+    and c.get("class_name") == "CheckBox"
+]
+if len(candidates) != 1:
+    raise RuntimeError(f"Expected one 安全中心 node, got {len(candidates)}")
+
+node = candidates[0]
+click = agent.call_tool("click", {
+    "text": "安全中心",
+    "class_name": node.get("class_name"),
+    "automation_id": node.get("automation_id"),
+    "parent_fallback": False,
+}, timeout=20)
+if click.get("method") not in {"uia_invoke", "uia_toggle"}:
+    raise RuntimeError(f"Click was not semantic UIA activation: {click}")
+
+after = agent.call_tool("dump_tree", {"max_depth": 20}, timeout=40)
+texts = []
+for c in after.get("controls") or []:
+    text = c.get("text") or c.get("title") or c.get("name")
+    if text and text not in texts:
+        texts.append(text)
+
+report = {
+    "window_process": "HisecEndpointAgent.exe",
+    "clicked_node": node,
+    "click_result": click,
+    "visible_texts": texts,
+    "tree": after,
+}
+Path("/tmp/edr-wd-hisec-security-center-report.json").write_text(
+    json.dumps(report, ensure_ascii=False, indent=2),
+    encoding="utf-8",
+)
 ```
 
----
+Expected post-click evidence for the compliance page includes texts like:
 
-## Key Takeaways
+```text
+管理员未配置有效策略
+重新检查
+账号安全检查
+主机安全检查
+设备安全检查
+```
 
-1. **macOS has no pywinauto equivalent in MCP** — the backend only exposes `click_at(x, y)`
-2. **Swift + AX API = native element-level automation** — write a script, SCP it to target, run it over SSH
-3. **AXPress is preferred** — it's the semantic action (tells the system "press this button")
-4. **CGEvent is the fallback** — calculate element center and synthesize mouse events
-5. **Use `EDR_WD_ALLOW_REAL_CLICKS=1`** on the target when executing Swift scripts that produce real clicks
-6. **The AX tree is shallow for Java/Electron apps** — usually 1-3 levels of children; recursion depth of 5-10 is sufficient
-7. **The HiSecEndpointAgent window** has role=`AXWindow`, title=`华为智能终端安全系统` — it's the entry window with the "前往安全防护中心" button
-8. **The EDRClient window** has title=`华为HiSec Endpoint` (via CGWindowList) but AX title=`HiSec Endpoint` — the actual UI buttons are inside this window
+If the page still shows scan actions such as `快速扫描`, `全盘扫描`, or
+`自定义扫描` as the main content, the click likely landed on the wrong page or
+the old mouse-input path was used. Re-dump the tree and check the click method.
+
+## Windows UIA Notes
+
+- `click()` should return `uia_invoke` or `uia_toggle` for `Button`,
+  `CheckBox`, `RadioButton`, `TabItem`, `Hyperlink`, `MenuItem`, and `ListItem`
+  when those controls expose UIA patterns.
+- `click_input` is a mouse-backed action even though it starts from a component.
+  Treat it as a fallback, not as a successful component-tree click when precision
+  matters.
+- `coordinate_fallback`, `click_target`, `click_at`, and `click_window_at` are
+  coordinate paths. Use them only after documenting why semantic activation is
+  unavailable.
+- Qt controls can have broad or surprising rectangles. Never trust rectangle
+  center alone when a semantic pattern exists.
+
+## macOS AX Notes
+
+macOS uses Accessibility (AX) rather than UIA.
+
+Preferred order:
+
+1. `connect` to the target process.
+2. `dump_tree` or `find_control`.
+3. `click` with an AX tree-derived selector.
+4. Swift helper with `AXUIElementPerformAction(..., kAXPressAction)` only when
+   the MCP backend cannot express the required action.
+5. CGEvent center click only as the final fallback.
+
+When a Swift helper is needed, search by app/process plus role/title/value, then
+try `AXPress` before CGEvent.
+
+## Anti-Patterns
+
+Do not do these first:
+
+- Click by raw screen coordinate because a screenshot "looks right".
+- Click by text only when multiple windows or multiple controls can contain that
+  text.
+- Connect to `EDRClient.exe` when the requested control is in
+  `HisecEndpointAgent.exe`.
+- Treat `ok: true` from a click as proof. Always verify with a post-click
+  `dump_tree`.
+- Hide a failed semantic action by falling back silently to coordinates.
+
+## Minimal Evidence To Record
+
+For every precise UI operation, keep these in logs or the report:
+
+- Target process and top-level window title.
+- Pre-click candidate node fields: text, class name, control type,
+  automation id, depth, rectangle.
+- Click result, especially `method`.
+- Post-click visible texts or control count.
+- Output report path if a report was generated.
