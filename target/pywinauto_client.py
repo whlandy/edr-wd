@@ -686,6 +686,11 @@ class WindowsGUI:
                                 ctrl.automation_id(), parent_ctrl.automation_id())
                     ctrl = parent_ctrl
 
+            semantic_result = self._semantic_activate(ctrl)
+            if semantic_result is not None:
+                semantic_result["control_id"] = control_id
+                return semantic_result
+
             try:
                 ctrl.click_input()
                 time.sleep(0.1)
@@ -917,6 +922,60 @@ class WindowsGUI:
             return ctrl.parent()
         except Exception:
             return None
+
+    _SEMANTIC_ACTIVATION_TYPES = {
+        "Button", "CheckBox", "RadioButton", "TabItem",
+        "Hyperlink", "MenuItem", "ListItem",
+    }
+
+    def _semantic_activate(self, ctrl):
+        """
+        Activate a UIA control through its exposed pattern before using mouse input.
+
+        Qt/UIA controls can expose accurate component patterns even when their
+        screen rectangle is broad or overlaps neighbouring content. Prefer Invoke
+        or Toggle so selectors from dump_tree stay component-driven.
+        """
+        try:
+            control_type = str(ctrl.control_type() or "")
+        except Exception:
+            control_type = ""
+        try:
+            cls = ctrl.friendly_class_name() or ""
+        except Exception:
+            cls = ""
+
+        if (
+            control_type not in self._SEMANTIC_ACTIVATION_TYPES
+            and cls not in self._SEMANTIC_ACTIVATION_TYPES
+        ):
+            return None
+
+        errors = []
+        for method in ("invoke", "toggle"):
+            if not hasattr(ctrl, method):
+                continue
+            try:
+                getattr(ctrl, method)()
+                time.sleep(0.1)
+                return {
+                    "ok": True,
+                    "method": f"uia_{method}",
+                    "automation_id": getattr(ctrl, "automation_id", lambda: None)(),
+                    "control_type": control_type,
+                    "class_name": cls,
+                }
+            except Exception as exc:
+                errors.append(f"{method}: {exc}")
+
+        if errors:
+            logger.info(
+                "semantic activation unavailable for %s/%s: %s",
+                control_type,
+                cls,
+                "; ".join(errors),
+            )
+        return None
 
     def _find_control(self, control_id=None, text=None, class_name=None, parent_text=None,
                       automation_id=None, auto_id_contains=None, auto_id_suffix=None,

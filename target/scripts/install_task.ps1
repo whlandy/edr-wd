@@ -9,11 +9,10 @@ function Get-TargetRoot {
 $TaskName = 'StartEDRMCP'
 $TargetRoot = Get-TargetRoot
 $StartScript = Join-Path $PSScriptRoot 'start_server.ps1'
-$StartScriptEscaped = $StartScript -replace '\\', '\\\\'
 
 $action = New-ScheduledTaskAction `
     -Execute 'powershell.exe' `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$StartScriptEscaped`"" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$StartScript`"" `
     -WorkingDirectory $TargetRoot
 
 $principal = New-ScheduledTaskPrincipal `

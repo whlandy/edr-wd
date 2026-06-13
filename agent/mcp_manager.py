@@ -25,8 +25,10 @@ Usage:
 from __future__ import annotations
 
 import json
+import http.client
 import re
 import socket
+import urllib.parse
 import urllib.request
 import urllib.error
 from typing import Optional
@@ -68,31 +70,26 @@ def _mcp_initialize(url: str, timeout: float = MCP_INIT_TIMEOUT) -> tuple[bool, 
         "Accept": "application/json, text/event-stream",
     }
 
-    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            session = resp.headers.get("Mcp-Session-Id")
-            raw = _read_all_sse_data(resp)
+        status, resp_headers, raw = _post_sse(url, payload, headers, timeout=timeout)
+        session = resp_headers.get("mcp-session-id") or resp_headers.get("Mcp-Session-Id")
 
-            if session:
-                return (True, session, None)
-            elif resp.status == 200:
-                # Server responded without session header — still OK if we got JSON
-                # Try to extract session from SSE body
-                session_in_body = _extract_session_from_sse(raw)
-                if session_in_body:
-                    return (True, session_in_body, None)
-                return (True, None, None)
-            else:
-                return (False, None, f"status={resp.status}")
-
-    except urllib.error.HTTPError as e:
-        body = e.read(200).decode("utf-8", errors="replace")
-        session = e.headers.get("Mcp-Session-Id")
         if session:
-            return (True, session, f"HTTP {e.code}: {body[:200]}")
-        return (False, None, f"HTTP {e.code}: {body[:200]}")
+            return (True, session, None)
+        if status == 200:
+            # Server responded without session header — still OK if we got JSON
+            # Try to extract session from SSE body
+            session_in_body = _extract_session_from_sse(raw)
+            if session_in_body:
+                return (True, session_in_body, None)
+            return (True, None, None)
+        return (False, None, f"status={status}")
+
+    except _HTTPStatusError as e:
+        session = e.headers.get("mcp-session-id") or e.headers.get("Mcp-Session-Id")
+        if session:
+            return (True, session, f"HTTP {e.status}: {e.body[:200]}")
+        return (False, None, f"HTTP {e.status}: {e.body[:200]}")
 
     except (urllib.error.URLError, socket.timeout) as e:
         return (False, None, f"{type(e).__name__}: {e}")
@@ -223,15 +220,17 @@ def _mcp_jsonrpc(session_id: str, mcp_url: str, method: str, params: dict,
         "Mcp-Session-Id": session_id,
     }
 
-    req = urllib.request.Request(mcp_url, data=payload, headers=headers, method="POST")
     effective_timeout = timeout if timeout is not None else MCP_INIT_TIMEOUT
 
     try:
-        with urllib.request.urlopen(req, timeout=effective_timeout) as resp:
-            raw = _read_all_sse_data(resp)
-            return _parse_sse_response(raw, expected_id=rpc_id)
+        _status, _headers, raw = _post_sse(
+            mcp_url, payload, headers, timeout=effective_timeout,
+        )
+        return _parse_sse_response(raw, expected_id=rpc_id)
     except socket.timeout:
         return {"ok": False, "error": f"socket timeout after {effective_timeout}s waiting for JSON-RPC response"}
+    except _HTTPStatusError as e:
+        return {"ok": False, "error": f"HTTP {e.status}: {e.body[:200]}"}
     except (urllib.error.URLError, socket.timeout) as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -283,14 +282,55 @@ def _parse_sse_response(raw: str, expected_id: Optional[int] = None) -> dict:
     return {"ok": False, "error": "SSE data: lines found but none were valid JSON"}
 
 
+class _HTTPStatusError(Exception):
+    def __init__(self, status: int, headers: dict[str, str], body: str):
+        self.status = status
+        self.headers = headers
+        self.body = body
+        super().__init__(f"HTTP {status}: {body[:200]}")
+
+
+def _post_sse(url: str, payload: bytes, headers: dict[str, str], timeout: float) -> tuple[int, dict[str, str], str]:
+    """POST JSON-RPC and read one SSE event without waiting for stream EOF."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "http":
+        raise urllib.error.URLError(f"unsupported MCP URL scheme: {parsed.scheme}")
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout)
+    try:
+        conn.request("POST", path, body=payload, headers=headers)
+        resp = conn.getresponse()
+        resp_headers = {k: v for k, v in resp.getheaders()}
+        raw = _read_all_sse_data(resp)
+        if resp.status >= 400:
+            raise _HTTPStatusError(resp.status, resp_headers, raw)
+        return resp.status, resp_headers, raw
+    finally:
+        conn.close()
+
+
 def _read_all_sse_data(resp) -> str:
-    """Read the full SSE response body, handling chunked transfer if needed."""
+    """
+    Read one complete SSE event from a Streamable HTTP response.
+
+    FastMCP keeps the HTTP connection open for streaming, so waiting for EOF can
+    hang until the socket timeout even though the JSON-RPC response has already
+    arrived.  A blank line terminates one SSE event; once we have seen a data:
+    line and then the event terminator, return immediately.
+    """
     body = b""
+    saw_data = False
     while True:
-        chunk = resp.read(8192)
+        chunk = resp.read(1)
         if not chunk:
             break
         body += chunk
+        if b"data:" in body:
+            saw_data = True
+        if saw_data and (b"\r\n\r\n" in body or b"\n\n" in body):
+            break
     return body.decode("utf-8", errors="replace")
 
 

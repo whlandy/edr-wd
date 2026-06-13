@@ -109,8 +109,8 @@ if ($proc.HasExited) {
 
 $stillListening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($stillListening) {
-    Write-Host "[OK] Server PID=$($proc.Id) listening on $BindHost:$Port"
-    Write-StartLog "OK: PID=$($proc.Id) listening on $BindHost:$Port" $TargetRoot
+    Write-Host "[OK] Server PID=$($proc.Id) listening on ${BindHost}:$Port"
+    Write-StartLog "OK: PID=$($proc.Id) listening on ${BindHost}:$Port" $TargetRoot
     exit 0
 } else {
     Write-Host "[ERROR] Server PID=$($proc.Id) started but port $Port not listening"
