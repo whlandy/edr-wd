@@ -1,38 +1,68 @@
-# EDR Activation & Operation Guide
+# HiSec EDR Activation Reference
 
-## Activate EDR GUI
+Use this reference when changing `activate_edr` or debugging HiSec window-pair
+E2E failures.
 
-If the EDR window is not visible, activate it first:
+## Success Contract
+
+`activate_edr(wait=True)` succeeds only when both windows are visible:
+
+- Entry/main window:
+  - Windows: `HisecEndpointAgent.exe`
+  - macOS: `HiSecEndpointAgent`
+- Target/client window:
+  - Windows: `EDRClient.exe`
+  - macOS: `EDRClient`
+
+The returned payload should include `main.window_found == true` and
+`client.window_found == true`.
+
+## Windows Flow
+
+1. Ensure `HisecEndpointAgent.exe cmd ui` is visible.
+2. Prefer direct EDRClient launch:
 
 ```powershell
 cd "C:\Program Files\HiSec-Endpoint\core"
 .\EDRClient.exe 17 --show
 ```
 
-Or via MCP tool:
+3. If EDRClient does not appear, connect to `HisecEndpointAgent.exe` and click
+   the `edrWidget` entry card.
+4. When connecting by process, prefer a visible top-level desktop window handle.
+   Some Qt/UIA windows are enumerable through `Desktop(backend="uia").windows()`
+   but fail with `Application.connect(process=PID)`.
+
+Use the MCP tool:
 
 ```
-activate_edr()
+activate_edr(wait=True, timeout=15)
 ```
 
-On Windows, `activate_edr()` uses `EDRClient.exe 17 --show` as the primary
-method and treats the `EDRClient.exe` window as the target application. If the
-EDRClient window does not appear, it falls back to `HisecEndpointAgent.exe cmd
-ui` and clicks the `edrWidget` card in the main window as an entry path.
+## macOS Flow
 
-On macOS, `activate_edr()` uses
-`/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh` as the
-primary EDRClient startup path and only reports success after detecting the
-`EDRClient` window. `HiSecEndpointAgent` is used only for the fallback Swift
-helper click on "前往安全防护中心".
+1. Ensure `HiSecEndpointAgent` is visible.
+   - Try `open /Applications/HiSecEndpoint.app`.
+   - Fall back to
+     `/Applications/HiSecEndpoint.app/Contents/MacOS/safra/HiSecEndpointAgent cmd ui`.
+   - Do not redirect stdout/stderr; the Qt window can appear offscreen.
+2. Prefer direct EDRClient launch:
+
+```bash
+sudo -n /Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh
+```
+
+3. If EDRClient does not appear, foreground the HiSec entry window and use the
+   Swift Accessibility helper to click “前往安全防护中心”.
 
 ## Standard Operation Sequence
 
-1. **activate_edr()** — ensure EDR window is visible
-2. **connect(title_re=".*HiSec.*", auto_activate=False)** — connect to window (auto_activate=True also activates EDR on failure)
+1. **activate_edr(wait=True)** — ensure both HiSec windows are visible.
+2. **connect(process_name="EDRClient.exe" / "EDRClient")** — connect to the
+   target/client window.
 3. **dump_tree(max_depth=10)** — inspect controls
 4. **click_target(...)** or **click_window_at(x, y)** — click a control
-5. **screenshot(path="C:\\Users\\<TARGET_USER>\\verify.png")** — verify result
+5. **screenshot(...)** — verify result
 
 ## Coordinate System Reference
 

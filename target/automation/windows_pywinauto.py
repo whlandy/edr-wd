@@ -507,8 +507,9 @@ class WindowsPywinautoBackend:
         edr_widget_auto_id: Optional[str] = None,
     ) -> dict:
         """
-        Windows-specific. Launch the HiSec EDR GUI via PowerShell and wait
-        for its main window. Not part of the cross-platform protocol.
+        Windows-specific. Ensure the HiSecEndpointAgent entry window and
+        EDRClient target window are visible. Not part of the cross-platform
+        protocol.
         """
         return self._gui.activate_edr(  # type: ignore[call-overload]
             exe_path=exe_path, wait=wait, timeout=timeout,

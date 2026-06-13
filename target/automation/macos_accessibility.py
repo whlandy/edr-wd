@@ -842,7 +842,7 @@ class MacOSAccessibilityBackend:
             """
             Best-effort record of the EDRClient window as the connected target.
             This keeps later backend state aligned with the app we actually
-            activated; HiSecEndpointAgent is only a fallback entry window.
+            activated; HiSecEndpointAgent is the required entry window.
             """
             pid = self._pid_for_app("EDRClient") or getattr(self, "_connected_pid", None)
             found, title, detected_by = _edr_client_window_visible()

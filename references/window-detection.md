@@ -4,9 +4,10 @@
 
 > **Never assume a window is open. Verify it.**
 
-`activate_edr()` returning `"ok": true` means the process started,
-not that the GUI window appeared. Real success = `wait_window` finds the
-EDRClient top-level window **and** `dump_tree` returns non-empty controls.
+`activate_edr(wait=True)` returning `"ok": true` means the HiSec window-pair
+contract passed: the entry window and EDRClient window are both visible. Still
+verify with `wait_window` before acting when the next step depends on a
+specific foreground or child window.
 
 ---
 
@@ -17,7 +18,7 @@ EDRClient top-level window **and** `dump_tree` returns non-empty controls.
 | `list_windows()` | Enumerate all top-level windows on the desktop | Debug / discover window state |
 | `is_window_open(title_re, process_name, class_name)` | Check if any window matches | Quick boolean check before acting |
 | `wait_window(title_re, process_name, class_name, timeout, interval)` | Poll until match or timeout | Verify a window appeared after an action |
-| `activate_edr(wait=True, timeout=15)` | Launch EDR + wait for window | Replace the old fire-and-forget activate_edr |
+| `activate_edr(wait=True, timeout=15)` | Launch/restore HiSec entry + EDRClient windows | Use before HiSec E2E actions |
 
 ### Return Structure
 
@@ -50,19 +51,24 @@ All window-detection tools return the same shape:
 ### Before clicking any EDR control
 
 ```
-1. is_window_open(title_re=".*(HiSec|Hisec|Endpoint|EDR|华为|安全).*")
-   → if found: proceed
-   → if not found: activate_edr(wait=True, timeout=15)
+1. activate_edr(wait=True, timeout=15)
+   → if ok: proceed
+   → if not ok: screenshot + list_windows to diagnose
 
-2. connect(title_re=".*(HiSec|Hisec|Endpoint|EDR|华为|安全).*")
+2. is_window_open(title_re=".*(HiSec|Hisec|Endpoint|EDR|华为|安全).*")
+   → if found: proceed
+   → if not found: screenshot + list_windows to diagnose
+
+3. connect(process_name="EDRClient.exe")  # Windows
+   connect(process_name="EDRClient")      # macOS
    → if connect fails: screenshot + list_windows to diagnose
 
-3. dump_tree(max_depth=10)
+4. dump_tree(max_depth=10)
    → if controls is empty: screenshot + list_windows to diagnose
 
-4. click_target(...) or click_window_at(x, y)
+5. click_target(...) or click_window_at(x, y)
 
-5. (optional) wait_window(...) to verify a new window appeared
+6. (optional) wait_window(...) to verify a new window appeared
 ```
 
 ### After clicking something that should open a dialog / sub-window
@@ -77,16 +83,18 @@ All window-detection tools return the same shape:
 3. dump_tree()
 ```
 
-### After clicking HisecEndpointAgent system-tray icon
+### After opening the HiSec entry window
 
 ```
-1. is_window_open(process_name="EDRClient.exe")
-   → if found: proceed
-   → if not found within 5s: screenshot + list_windows
+1. is_window_open(process_name="HisecEndpointAgent.exe")  # Windows
+   is_window_open(process_name="HiSecEndpointAgent")      # macOS
 
-2. connect(process_name="EDRClient.exe")
+2. is_window_open(process_name="EDRClient.exe")  # Windows
+   is_window_open(process_name="EDRClient")      # macOS
 
-3. dump_tree()
+3. connect(process_name="EDRClient.exe" / "EDRClient")
+
+4. dump_tree()
 ```
 
 ---
@@ -99,7 +107,7 @@ valid for manual `is_window_open` / `wait_window` calls.
 | Pattern | Matches |
 |---------|---------|
 | `title_re` | `.*(HiSec\|Hisec\|Endpoint\|EDR\|华为\|安全).*` |
-| `process_name` | `EDRClient.exe` (preferred), `HisecEndpointAgent.exe` |
+| `process_name` | `EDRClient.exe`, `HisecEndpointAgent.exe`, `EDRClient`, `HiSecEndpointAgent` |
 | `class_name` | `SafraUIMainWindow` |
 
 **Recommendation**: always prefer `process_name` over `title_re` where
@@ -124,10 +132,11 @@ When a window doesn't appear:
 
 | Field | Meaning |
 |-------|---------|
-| `ok: true, already_open: true` | EDR GUI was already visible — no action taken |
-| `ok: true, already_open: false, found: true` | Launched and window appeared within timeout |
+| `ok: true` | HiSec entry and EDRClient windows are both visible |
+| `main.window_found` | Entry window visibility |
+| `client.window_found` | EDRClient window visibility |
 | `ok: false` | Launch failed (permissions, wrong path, etc.) |
-| `ok: true, found: false, error: "timeout"` | Launched but window didn't appear within timeout |
+| `stage` | Failure/success phase such as `done`, `main_window_not_found`, or `client_window_not_found` |
 
 ---
 

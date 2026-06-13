@@ -1,0 +1,7 @@
+interface:
+  display_name: "EDR-WD"
+  short_description: "Work on EDR-WD MCP GUI automation"
+  default_prompt: "Use $edr-wd to inspect or modify an EDR-WD target workflow, MCP tool, or HiSec E2E test."
+
+policy:
+  allow_implicit_invocation: true
