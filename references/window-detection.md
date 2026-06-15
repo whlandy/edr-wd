@@ -66,7 +66,7 @@ All window-detection tools return the same shape:
 4. dump_tree(max_depth=10)
    → if controls is empty: screenshot + list_windows to diagnose
 
-5. click_target(...) or click_window_at(x, y)
+5. click(...) with a dump_tree-derived selector
 
 6. (optional) wait_window(...) to verify a new window appeared
 ```
@@ -144,9 +144,9 @@ When a window doesn't appear:
 
 | Tool | Coordinate Type |
 |------|----------------|
-| `click_at(x, y)` | Screen absolute |
+| `click(control_id=...)` | Component semantic action when available |
+| `click_target(automation_id=...)` | Control center (rectangle fallback) |
 | `click_window_at(x, y)` | Window-relative |
-| `click_target(automation_id=...)` | Control center (rectangle-based) |
-| `click(control_id=...)` | UIA invoke |
+| `click_at(x, y)` | Screen absolute |
 
-See `references/activate-edr.md` for full coordinate reference.
+See `references/element-click.md` for the component-tree click SOP.

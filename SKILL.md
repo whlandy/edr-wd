@@ -1,6 +1,6 @@
 ---
 name: edr-wd
-description: Use this skill when working on EDR-WD, a cross-platform MCP-based GUI automation system for HiSecEndpoint/EDR targets. Use it to inspect, modify, deploy, or test Windows/macOS agent-target workflows, target lifecycle scripts, FastMCP tools, GUI automation backends, and HiSec window-pair E2E behavior.
+description: Use this skill when working on EDR-WD, a cross-platform MCP GUI automation system for HiSecEndpoint/EDR targets. Use it to inspect, modify, deploy, or test Windows/macOS agent-target workflows, target lifecycle scripts, FastMCP tools, GUI automation backends, HiSec window-pair E2E behavior, and component-tree UI actions.
 metadata:
   short-description: Work on EDR-WD MCP GUI automation
 ---
@@ -9,7 +9,8 @@ metadata:
 
 EDR-WD has two layers:
 
-- `agent/`: config, SSH/SFTP, lifecycle, and MCP session orchestration.
+- `agent/`: target config, SSH/SFTP deployment, lifecycle orchestration, and
+  per-target MCP sessions.
 - `target/`: FastMCP server, GUI automation backends, and target-local scripts.
 
 The agent OS and target OS are independent. A macOS agent can drive Windows or
@@ -24,49 +25,66 @@ SSH path are valid.
    git status --short --branch
    ```
 
-2. Read only the files needed for the task. Start with:
+2. Read only the files needed for the task. Common entry points:
 
-   - `agent/target_config.py` for target config shape and validation.
-   - `agent/subagent/` for per-target controller/session behavior.
-   - `agent/lifecycle/` for remote start/stop/install behavior.
-   - `target/server.py` for MCP tool registration.
-   - `target/automation/` for Windows/macOS GUI behavior.
-   - `test_case/` for profile-dispatched and pytest E2E coverage.
+   - `agent/target_config.py`
+   - `agent/subagent/`
+   - `agent/lifecycle/`
+   - `target/server.py`
+   - `target/automation/`
+   - `test_case/`
 
-3. Never commit real target IPs, usernames, passwords, or local target paths.
-   Runtime config belongs in `config/targets.local.json`, which must stay local.
+3. This skill is for trusted intranet use. Real target IPs, usernames, and
+   passwords may be stored in local runtime config, but must not be committed or
+   printed in responses.
+
+## Core Contracts
+
+### HiSec Window Pair
+
+`activate_edr(wait=True)` must make both windows visible:
+
+- Entry/main window: `HisecEndpointAgent.exe` on Windows or
+  `HiSecEndpointAgent` on macOS.
+- Client window: `EDRClient.exe` on Windows or `EDRClient` on macOS.
+
+Read `references/activate-edr.md` before changing activation logic or debugging
+window-pair E2E failures.
+
+### Component-Tree Clicks
+
+Precise UI actions must be component-tree driven:
+
+1. Verify and connect to the exact target window/process.
+2. `dump_tree(max_depth=...)`.
+3. Select one unique node using `automation_id`, `control_id`, or
+   `text + class_name + control_type`.
+4. Use `click()` and require a semantic component result where available
+   (`uia_invoke` / `uia_toggle` on Windows, AX action on macOS).
+5. Re-run `dump_tree()` and verify the resulting page text.
+
+Do not start with `click_at`, `click_window_at`, `click_target`, or a bare
+text-only click when a component-tree selector is available. Read
+`references/element-click.md` before implementing or debugging click behavior.
+
+### Target Scripts
+
+Target runtime scripts belong under `target/scripts/`. Root `scripts/` is for
+developer utilities only.
 
 ## Target Config
 
 Runtime targets are loaded by `agent.target_config.TargetConfig` from
-`config/targets.local.json` or `EDR_WD_CONFIG`.
+`EDR_WD_CONFIG` first, then `config/targets.local.json`. For this trusted
+intranet workflow, prefer inline username/password auth in the local config.
+`password_env` and key auth are compatibility paths, not the default path.
 
-Use inline password auth for the current trusted intranet workflow:
-
-```json
-"ssh": {
-  "host": "<TARGET_IP>",
-  "port": 22,
-  "user": "<TARGET_USER>",
-  "auth": {"type": "password", "password": "<TARGET_PASSWORD>"}
-}
-```
-
-`password_env` and key auth are compatibility paths. TODO security hardening:
-move secrets out of local JSON if this leaves the trusted intranet setup.
-
-Useful config commands:
-
-```bash
-python -m agent.target_config --init
-python -m agent.target_config --validate
-python -m agent.target_config --list
-python -m agent.target_config --guide
-```
+Read `references/target-config.md` when adding targets, changing
+`connect_mode`, or touching auth/platform validation.
 
 ## Agent Workflow
 
-Prefer target-scoped subagents for new orchestration:
+Prefer target-scoped subagents for orchestration:
 
 ```python
 from agent.subagent import TargetSubAgent
@@ -77,155 +95,49 @@ agent.initialize_mcp()
 print(agent.call_tool("status"))
 ```
 
-`TargetSubAgent` owns the selected target's lifecycle calls, MCP URL/session,
-backend status, and profile/backend validation. Keep lower-level
-`target_manager` and `mcp_manager` behavior compatible, but avoid adding new
-session state outside the subagent layer.
+`TargetSubAgent` owns one target's lifecycle, MCP URL/session, backend status,
+and profile/backend validation. Keep lower-level manager modules compatible, but
+avoid adding new session state outside the subagent layer.
 
-Convenience wrappers:
-
-```bash
-bash agent/edr-wd.sh up
-bash agent/edr-wd.sh status
-bash agent/edr-wd.sh smoke --gui
-bash agent/edr-wd.sh down
-```
-
-On Windows agents, use `agent/deploy.ps1` for the same control plane.
-
-## Target Lifecycle
-
-Windows lifecycle:
-
-- `agent/lifecycle/windows.py`
-- `target/deploy.ps1`
-- `target/scripts/start_server.ps1`
-- `target/scripts/stop_server.ps1`
-- `target/scripts/install_task.ps1`
-
-macOS lifecycle:
-
-- `agent/lifecycle/macos.py`
-- `target/scripts/macos/start_server.sh`
-- `target/scripts/macos/stop_server.sh`
-- `target/scripts/macos/install_launch_agent.sh`
-- `target/scripts/macos/com.edr-wd.target.plist.template`
-
-Target runtime scripts belong under `target/scripts/`, not root `scripts/`.
-Root `scripts/` is for developer utilities only.
+Read `references/agent-workflow.md` when changing lifecycle, deployment, or
+agent-side command flow.
 
 ## MCP And GUI Backends
 
-`target/server.py` is the FastMCP server. Backends are selected with
+`target/server.py` registers FastMCP tools. Backends are selected with
 `EDR_WD_AUTOMATION_BACKEND`:
 
 - `windows_pywinauto`
 - `macos_accessibility`
 
-Important tools:
-
-- Session/window: `connect`, `list_windows`, `is_window_open`, `wait_window`,
-  `status`
-- HiSec: `activate_edr`, `restore_edr`
-- GUI actions: `dump_tree`, `find_control`, `click`, `click_target`,
-  `click_at`, `click_window_at`, `double_click_at`, `right_click_at`,
-  `middle_click_at`, `hover_at`, `drag`, `scroll`, `type_text`, `select`,
-  `get_text`, `screenshot`
-- Safety: `lock_window`, `unlock_window`, `get_window_lock`,
-  `verify_window_lock`
-- Windows PowerShell: `run_powershell`, `start_powershell`, `get_job`,
-  `cancel_job`
-
-PowerShell tools require `EDR_WD_ENABLE_POWERSHELL=1` on the target server.
-`activate_edr` does not depend on PowerShell.
-
-## HiSec Window-Pair Contract
-
-`activate_edr(wait=True)` must make both windows visible:
-
-- Entry/main window: `HisecEndpointAgent.exe` on Windows or
-  `HiSecEndpointAgent` on macOS.
-- Target/client window: `EDRClient.exe` on Windows or `EDRClient` on macOS.
-
-Windows flow:
-
-1. Ensure `HisecEndpointAgent.exe cmd ui` is visible.
-2. Prefer `EDRClient.exe 17 --show`.
-3. Fall back to clicking `edrWidget` in the entry window.
-4. Connect by desktop window handle first; PID connection is fallback.
-
-macOS flow:
-
-1. Ensure `HiSecEndpointAgent` is visible with `open
-   /Applications/HiSecEndpoint.app`, then `HiSecEndpointAgent cmd ui`.
-2. Prefer `/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh`
-   via non-interactive `sudo -n`.
-3. Fall back to Swift Accessibility helper clicking “前往安全防护中心”.
-
-For details, read `references/activate-edr.md` only when changing activation
-logic.
-
-## Component-Tree Clicks
-
-For precise UI actions, always use the component tree before pointer
-coordinates:
-
-1. Verify and connect to the exact target window/process.
-2. `dump_tree(max_depth=...)`.
-3. Select a unique node using `automation_id`, `control_id`, or
-   `text + class_name + control_type`.
-4. Use `click()` and require a semantic component result where available
-   (`uia_invoke` / `uia_toggle` on Windows, AX action on macOS).
-5. Re-run `dump_tree()` and verify the resulting page text.
-
-Do not start with `click_at`, `click_window_at`, `click_target`, or a bare
-text-only click when a component-tree selector is available. Read
-`references/element-click.md` before implementing or debugging click behavior.
-
-macOS `click_at` is dry-run by default. Set `EDR_WD_ALLOW_REAL_CLICKS=1` on the
-target server only when real pointer actions are intended.
+Read `references/mcp-tools.md` when adding tools, debugging tool calls, or
+changing backend capabilities.
 
 ## Testing
 
-Live MCP smoke:
-
-```bash
-python target/tests/smoke_mcp_client.py --base-url http://127.0.0.1:8765/mcp
-python target/tests/smoke_mcp_client.py --base-url http://127.0.0.1:8765/mcp --gui
-```
-
-Profile-dispatched suites:
+Use profile-aware tests; do not route a macOS target into Windows HiSec tests.
 
 ```bash
 python test_case/run_tests.py --target win-dev
 python test_case/run_tests.py --target mac-dev
-```
-
-Focused local checks:
-
-```bash
-python3 target/tests/test_window_lock_contract.py
 python3 -m pytest --collect-only -q test_case/test_integration test_case/test_e2e
-python3 scripts/test_profile_resolution.py
-python3 scripts/test_target_config_platforms.py
 ```
 
-When changing GUI behavior, update or run the matching profile:
-
-- Windows HiSec: `test_case/run_windows_hisec.py` and
-  `test_case/test_e2e/test_windows_hisec_e2e.py`
-- macOS HiSec: `test_case/run_macos_hisec.py` and
-  `test_case/test_e2e/test_macos_hisec_e2e.py`
-- Generic macOS plumbing: `test_case/run_macos_generic.py`
+Read `references/testing.md` before changing test profile dispatch, adding E2E
+cases, or interpreting live target failures.
 
 ## References
 
 Load these only when relevant:
 
 - `references/activate-edr.md`: Windows/macOS HiSec activation internals.
-- `references/window-detection.md`: window verification and debugging workflow.
 - `references/element-click.md`: component-tree click SOP for Windows UIA and
-  macOS AX, including the HiSec “安全中心” compliance template.
+  macOS AX, including the HiSec "安全中心" compliance template.
+- `references/window-detection.md`: window verification and debugging workflow.
+- `references/target-config.md`: runtime target schema, auth, and connect modes.
+- `references/agent-workflow.md`: subagent, lifecycle, deployment, and wrappers.
+- `references/mcp-tools.md`: MCP tool categories and backend capability rules.
+- `references/testing.md`: profile-aware test commands and failure triage.
 - `docs/architecture/`: historical architecture notes and deeper context.
 
 ## Housekeeping
@@ -233,7 +145,3 @@ Load these only when relevant:
 Generated files are not project structure. Remove local artifacts such as
 `.venv/`, `__pycache__/`, `.pytest_cache/`, `target/logs/`, root `*.log`,
 `target/server.log`, and `.DS_Store` before packaging or publishing.
-
-Keep `SKILL.md` concise. Move detailed examples, coordinate notes, and
-platform-specific internals into `references/` instead of duplicating them in
-the skill body.

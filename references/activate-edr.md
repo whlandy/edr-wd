@@ -58,20 +58,24 @@ sudo -n /Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh
 ## Standard Operation Sequence
 
 1. **activate_edr(wait=True)** — ensure both HiSec windows are visible.
-2. **connect(process_name="EDRClient.exe" / "EDRClient")** — connect to the
-   target/client window.
-3. **dump_tree(max_depth=10)** — inspect controls
-4. **click_target(...)** or **click_window_at(x, y)** — click a control
-5. **screenshot(...)** — verify result
+2. **connect(process_name=...)** — connect to the exact window that owns the
+   requested control. Use `HisecEndpointAgent.exe` / `HiSecEndpointAgent` for
+   entry-window controls and `EDRClient.exe` / `EDRClient` for client-window
+   controls.
+3. **dump_tree(max_depth=...)** — inspect controls and select a unique node.
+4. **click(...)** — prefer semantic component activation. On Windows, a precise
+   UIA click should return `uia_invoke` or `uia_toggle` when the control exposes
+   those patterns.
+5. **dump_tree(...)** or **screenshot(...)** — verify the resulting page.
 
-## Coordinate System Reference
+## Action Reference
 
 | Tool | Coordinate Type | When to Use |
 |------|---------------|-------------|
-| `click_at(x, y)` | Screen absolute | When you have raw screen coordinates |
-| `click_window_at(x, y)` | Window-relative | When coordinates are relative to window top-left |
-| `click_target(automation_id=...)` | Control center | When targeting a specific control by its rectangle |
-| `click(control_id=...)` | UIA invoke | For standard Button/CheckBox invoke |
+| `click(...)` | Component semantic action when available | Default for tree-derived selectors |
+| `click_target(automation_id=...)` | Control center | Fallback when semantic activation is unavailable |
+| `click_window_at(x, y)` | Window-relative | Fallback for known window-relative coordinates |
+| `click_at(x, y)` | Screen absolute | Final fallback for raw screen coordinates |
 
 ## dump_tree Response
 
