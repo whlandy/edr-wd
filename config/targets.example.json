@@ -80,8 +80,8 @@
     },
 
     "win-dev-key": {
-      "_comment": "Windows target — key auth（无密码，推荐生产环境）",
-      "description": "开发环境 Windows 虚拟机（key auth）",
+      "_comment": "Windows target — key auth（兼容示例；仍由 Paramiko 执行）",
+      "description": "开发环境 Windows 虚拟机（key auth compatibility）",
 
       "platform": "windows",
       "app_profile": "windows_hisec",
@@ -152,8 +152,8 @@
     },
 
     "mac-dev-key": {
-      "_comment": "macOS target — key auth",
-      "description": "macOS 开发机（key auth，LaunchAgent）",
+      "_comment": "macOS target — key auth（兼容示例；仍由 Paramiko 执行）",
+      "description": "macOS 开发机（key auth compatibility，LaunchAgent）",
 
       "platform": "macos",
       "app_profile": "macos_generic",

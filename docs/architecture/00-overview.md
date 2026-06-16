@@ -101,11 +101,11 @@ Key rule: Agent OS only affects SSH/SFTP implementation details. Target OS deter
 
 ### Agent OS Differences
 
-**Windows agent:** Paramiko password auth by default, OpenSSH key auth compatibility, no sshpass, PowerShell local execution, Windows path handling.
+**Windows agent:** Paramiko SSH/SFTP for password and key auth, no sshpass, PowerShell local execution, Windows path handling.
 
-**macOS agent:** Paramiko password auth by default, OpenSSH key auth compatibility, Unix path handling, launchctl management for remote macOS targets.
+**macOS agent:** Paramiko SSH/SFTP for password and key auth, Unix path handling, launchctl management for remote macOS targets.
 
-**Unified:** All agents use `agent/ssh_runner.py` — caller does NOT care whether underlying transport is Paramiko or OpenSSH.
+**Unified:** All agent-target SSH command execution and file transfer uses `agent/ssh_runner.py` backed by Paramiko.
 
 ---
 
@@ -441,21 +441,22 @@ All targets use by default:
 ```
 
 For the current intranet workflow, inline password auth in ignored local config
-is preferred. `password_env` and key auth are compatibility paths only. TODO:
-harden credential storage if this leaves the trusted intranet setup.
+is preferred. `password_env` and key auth are compatibility paths only; both
+still run through Paramiko. TODO: harden credential storage if this leaves the
+trusted intranet setup.
 
 ### Agent Compatibility
 
 **Windows agent:**
 ```
 password auth → Paramiko
-key auth     → OpenSSH
+key auth      → Paramiko
 ```
 
 **macOS agent:**
 ```
 password auth → Paramiko
-key auth     → OpenSSH
+key auth      → Paramiko
 ```
 
 **Unified entry:** `agent/ssh_runner.py`
@@ -467,7 +468,7 @@ key auth     → OpenSSH
 cat targets.local.json
 git diff targets.local.json
 print(config)
-sshpass -p "<password>"
+sshpass "<password>"
 ```
 
 **ALLOWED:**

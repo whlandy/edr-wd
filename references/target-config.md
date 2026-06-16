@@ -81,11 +81,11 @@ Prefer inline password auth:
 "auth": {"type": "password", "password": "<TARGET_PASSWORD>"}
 ```
 
-`password_env` and key auth remain compatibility paths, but are not the default
-workflow. Do not print real credentials in assistant responses, logs intended
-for sharing, or docs committed to the repository. Keep real values in
-`config/targets.local.json` or the file pointed to by `EDR_WD_CONFIG`, and make
-sure those files stay local.
+All SSH command execution and file transfer goes through Paramiko. `password_env`
+and key auth remain compatibility paths, but are not the default workflow. Do
+not print real credentials in assistant responses, logs intended for sharing, or
+docs committed to the repository. Keep real values in `config/targets.local.json`
+or the file pointed to by `EDR_WD_CONFIG`, and make sure those files stay local.
 
 ## Connect Modes
 
@@ -96,8 +96,43 @@ Use only these MCP connection modes:
   localhost.
 - `tunnel`: agent uses an SSH tunnel and connects to `127.0.0.1:local_port`.
 
+For `direct`, prepare the target host firewall before testing MCP. The default
+MCP port is TCP `8765`; Windows targets need an inbound allow rule unless the
+environment already allows it. For `tunnel`, the external firewall does not need
+to expose `8765` because the agent connects to the local tunnel port.
+
 Do not hard-code one mode in code paths. Let `TargetConfig.build_mcp_url()`
 decide from the active target.
+
+## Python Runtime Preconditions
+
+The configured `windows.python_path` or `macos.python_path` must point to the
+same Python runtime that will start `target/server.py`. Before deployment or
+startup, verify that runtime can import the full target dependency set:
+
+```bash
+<REMOTE_PYTHON> -c 'import fastmcp, psutil, PIL; print("core deps ok")'
+```
+
+Windows GUI backend additionally requires:
+
+```powershell
+"<REMOTE_PYTHON>" -c "import pywinauto, pyautogui; print('windows gui deps ok')"
+```
+
+macOS GUI backend additionally requires:
+
+```bash
+'<REMOTE_PYTHON>' -c 'import pyautogui; print("mac gui deps ok")'
+```
+
+Do not treat a valid `python_path` string as sufficient. The interpreter must
+exist, import all required packages, and have the platform GUI permissions
+needed by the selected backend.
+
+The runtime dependency source of truth is `pyproject.toml`. If pytest suites are
+run from this checkout, also install `test_case/requirements_test.txt` on the
+test runner and verify `pytest`/`httpx` imports there.
 
 ## Platform/Profile Safety
 

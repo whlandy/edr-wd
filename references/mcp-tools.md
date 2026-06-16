@@ -5,8 +5,28 @@ capabilities.
 
 ## Server And Transport
 
-`target/server.py` registers the FastMCP server. Agent-side calls go through
-`agent/mcp_manager.py` and `TargetSubAgent.call_tool()`.
+`target/server.py` registers the FastMCP server. Agent-side MCP calls go
+through `agent/mcp_manager.py` and `TargetSubAgent.call_tool()`. Agent-target
+SSH command execution and file transfer go through Paramiko in
+`agent/ssh_runner.py`.
+
+Before deploying or restarting MCP, preflight the full Python runtime:
+
+```bash
+python -c 'import fastmcp, paramiko, psutil, PIL, pyautogui; print("agent deps ok")'
+<REMOTE_PYTHON> -c 'import fastmcp, psutil, PIL; print("target core deps ok")'
+```
+
+Windows targets also need `pywinauto` and `pyautogui`; macOS targets need
+`pyautogui` plus Accessibility/GUI permissions. Runtime dependencies come from
+`pyproject.toml`. Test-only dependencies come from
+`test_case/requirements_test.txt` and are not required on the target MCP runtime
+unless tests are being run there directly.
+
+If a FastMCP server is already listening on the configured MCP URL, call
+`mcp_manager.initialize(target)` and `status` before deciding to restart it.
+Do not treat "port open" as sufficient proof of GUI readiness; check MCP
+initialize and backend status.
 
 Do not call the protocol method `tools/list` through `call_tool()`. Use the
 client's tools-list path (`tools_list()` or `_do_req("tools/list", {})`) because

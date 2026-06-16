@@ -9,25 +9,16 @@
 #   smoke    Run the MCP smoke test against the local tunnel
 #
 # Environment:
-#   EDR_WD_HOST          Windows host/IP (default: <TARGET_IP>)
-#   EDR_WD_USER          Windows username (default: <TARGET_USER>)
-#   EDR_WD_SSH_PORT      SSH port (default: 22)
+#   EDR_WD_TARGET_NAME   Target name from config (default: win-dev)
 #   EDR_WD_LOCAL_PORT    Local tunnel port (default: 18765)
-#   EDR_WD_REMOTE_PORT   Windows MCP port (default: 8765)
 #   EDR_WD_TARGET_DIR    Remote repo path (default: C:/path/to/edr-wd)
-#   EDR_WD_PASSFILE      Password file for tunnel.sh (default: $HOME/.ssh/.tunnelpass)
 #   EDR_WD_START_MODE    Windows start mode: auto|process|scheduled-task (default: auto)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOST="${EDR_WD_HOST:-<TARGET_IP>}"
-USER="${EDR_WD_USER:-<TARGET_USER>}"
-SSH_PORT="${EDR_WD_SSH_PORT:-22}"
 LOCAL_PORT="${EDR_WD_LOCAL_PORT:-18765}"
-REMOTE_PORT="${EDR_WD_REMOTE_PORT:-8765}"
 EDR_WD_TARGET_DIR="${EDR_WD_TARGET_DIR:-C:/path/to/edr-wd}"
-PASSFILE="${EDR_WD_PASSFILE:-$HOME/.ssh/.tunnelpass}"
 START_MODE="${EDR_WD_START_MODE:-auto}"
 TARGET_NAME="${EDR_WD_TARGET_NAME:-win-dev}"
 
@@ -39,7 +30,7 @@ Commands:
   up       Start Windows MCP server and local SSH tunnel
   down     Stop Windows MCP server and local SSH tunnel
   status   Show status for both Windows server and tunnel
-  push     Copy files to the Windows target via scp
+  push     Copy files to the Windows target via Paramiko SFTP
   smoke    Run the MCP smoke test against the local tunnel
 EOF
 }
@@ -76,7 +67,7 @@ local_lifecycle() {
 }
 
 ensure_tunnel() {
-    bash "$SCRIPT_DIR/tunnel.sh" start "$HOST" "$USER"
+    bash "$SCRIPT_DIR/tunnel.sh" start "$TARGET_NAME"
 }
 
 do_up() {
@@ -95,7 +86,7 @@ do_down() {
     local_lifecycle stop || true
     echo ""
     echo "[2/2] Stopping local tunnel..."
-    bash "$SCRIPT_DIR/tunnel.sh" stop || true
+    bash "$SCRIPT_DIR/tunnel.sh" stop "$TARGET_NAME" || true
 }
 
 do_status() {
@@ -103,7 +94,7 @@ do_status() {
     local_lifecycle status
     echo ""
     echo "[2/2] Tunnel status..."
-    bash "$SCRIPT_DIR/tunnel.sh" status
+    bash "$SCRIPT_DIR/tunnel.sh" status "$TARGET_NAME"
 }
 
 do_push() {
@@ -131,8 +122,37 @@ do_push() {
         exit 1
     fi
 
-    echo "Copying to ${USER}@${HOST}:$remote_path"
-    scp -P "$SSH_PORT" -o StrictHostKeyChecking=no "${sources[@]}" "${USER}@${HOST}:$remote_path"
+    echo "Copying ${#sources[@]} item(s) to target ${TARGET_NAME}:$remote_path"
+    (
+        cd "$SCRIPT_DIR/.." || exit 1
+        python - "$TARGET_NAME" "$remote_path" "${sources[@]}" <<'PY'
+import sys
+from pathlib import Path
+
+from agent.ssh_runner import scp_to
+from agent.target_config import TargetConfig
+
+target_name = sys.argv[1]
+remote_path = sys.argv[2]
+sources = sys.argv[3:]
+
+tc = TargetConfig()
+ssh_cfg = tc.resolve_auth(target_name)
+
+failed = []
+for source in sources:
+    rc, msg = scp_to(ssh_cfg, Path(source), remote_path, timeout=120)
+    if rc != 0:
+        failed.append(f"{source}: {msg}")
+    else:
+        print(f"[OK] {source}: {msg}")
+
+if failed:
+    for item in failed:
+        print(f"[FAIL] {item}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+    )
 }
 
 do_smoke() {

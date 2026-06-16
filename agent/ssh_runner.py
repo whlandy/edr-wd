@@ -1,12 +1,12 @@
 """
-ssh_runner.py — Pure SSH/SCP execution for EDR-WD.
+ssh_runner.py — Paramiko-based SSH/SFTP execution for EDR-WD.
 
-Supports two auth backends:
-  - password auth → Paramiko (preferred for current intranet targets)
-  - key auth      → OpenSSH (compatibility path)
+All SSH command execution and file transfer goes through Paramiko:
+  - password auth → Paramiko password
+  - key auth      → Paramiko key_filename
 
-Password auth never appears in shell commands or logs — credentials are
-passed directly to Paramiko's SSHClient.connect().
+Passwords never appear in shell commands or logs — credentials are passed
+directly to Paramiko's SSHClient.connect().
 
 Interface:
     run_ssh(ssh_config, command, timeout=30) -> (exit_code, stdout_stderr)
@@ -45,7 +45,7 @@ import subprocess
 from pathlib import Path
 from typing import Tuple
 
-# Paramiko for password auth (pure Python, no sshpass needed on Windows)
+# Paramiko is the single SSH/SFTP transport for agent-target operations.
 try:
     import paramiko as _paramiko_mod
     paramiko = _paramiko_mod
@@ -66,7 +66,7 @@ class UnsupportedAuthType(SSHAuthError):
 
 
 class ParamikoNotAvailable(SSHAuthError):
-    """Raised when password auth is requested but Paramiko is not installed."""
+    """Raised when SSH/SFTP is requested but Paramiko is not installed."""
     pass
 
 
@@ -87,6 +87,23 @@ def _get_password(ssh_config: dict) -> str:
     raise SSHAuthError(
         "auth.type='password' but no password or password_env is configured"
     )
+
+
+def _get_optional_passphrase(ssh_config: dict) -> str | None:
+    """Extract an optional key passphrase from ssh_config."""
+    auth = ssh_config.get("auth", {})
+    passphrase = auth.get("passphrase")
+    if passphrase:
+        return passphrase
+    passphrase_env = auth.get("passphrase_env")
+    if passphrase_env:
+        value = os.environ.get(passphrase_env)
+        if not value:
+            raise SSHAuthError(
+                "auth.passphrase_env is set but the environment variable is not defined"
+            )
+        return value
+    return None
 
 
 def _resolve_key_path(key_path: str) -> Path:
@@ -138,27 +155,35 @@ def _paramiko_connect(ssh_config: dict, timeout: int = 10) -> paramiko.SSHClient
             "Paramiko is not installed. Install it with: pip install paramiko"
         )
     auth = ssh_config.get("auth", {})
-    if auth.get("type") != "password":
+    auth_type = auth.get("type")
+    if auth_type not in ("password", "key"):
         raise UnsupportedAuthType(
-            f"Paramiko backend only supports auth.type='password', "
-            f"got auth.type='{auth.get('type')}'. Use key auth for OpenSSH."
+            f"Unsupported auth.type='{auth_type}'. Supported: 'password', 'key'"
         )
-    password = _get_password(ssh_config)
+
     host = ssh_config["host"]
     port = ssh_config.get("port", 22)
     user = ssh_config.get("user", "<TARGET_USER>")
+    connect_kwargs = {
+        "hostname": host,
+        "port": port,
+        "username": user,
+        "timeout": timeout,
+        "look_for_keys": False,
+        "allow_agent": False,
+    }
+    if auth_type == "password":
+        connect_kwargs["password"] = _get_password(ssh_config)
+    else:
+        key_path = auth.get("key_path", "~/.ssh/id_rsa")
+        connect_kwargs["key_filename"] = str(_resolve_key_path(key_path))
+        passphrase = _get_optional_passphrase(ssh_config)
+        if passphrase:
+            connect_kwargs["passphrase"] = passphrase
 
     client = paramiko.SSHClient()  # type: ignore[union-attr]
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # type: ignore[union-attr]
-    client.connect(
-        hostname=host,
-        port=port,
-        username=user,
-        password=password,
-        timeout=timeout,
-        look_for_keys=False,
-        allow_agent=False,
-    )
+    client.connect(**connect_kwargs)
     return client
 
 
@@ -283,160 +308,36 @@ def _paramiko_scp_from(ssh_config: dict, remote_path: str | os.PathLike,
         client.close()
 
 
-# ─── OpenSSH helpers (key auth only) ───────────────────────────────────────
-
-def _openssh_base(ssh_config: dict) -> list:
-    """Build base ssh command for key auth. Raises if password auth requested."""
-    auth = ssh_config.get("auth", {})
-    if auth.get("type") == "password":
-        raise UnsupportedAuthType(
-            "OpenSSH backend does not support password auth. "
-            "Install Paramiko (pip install paramiko) to use password auth, "
-            "or switch to key auth."
-        )
-    if auth.get("type") != "key":
-        raise UnsupportedAuthType(
-            f"Unsupported auth.type='{auth.get('type')}'. Supported: 'password', 'key'"
-        )
-    key_path = auth.get("key_path", "~/.ssh/id_rsa")
-    resolved = _resolve_key_path(key_path)
-    host = ssh_config["host"]
-    port = ssh_config.get("port", 22)
-    user = ssh_config.get("user", "<TARGET_USER>")
-    return [
-        "ssh",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "ConnectTimeout=10",
-        "-i", str(resolved),
-        "-p", str(port),
-        f"{user}@{host}",
-    ]
-
-
-def _openssh_scp_base(ssh_config: dict) -> list:
-    """Build base scp command for key auth."""
-    auth = ssh_config.get("auth", {})
-    if auth.get("type") != "key":
-        raise UnsupportedAuthType(
-            "OpenSSH SCP backend does not support password auth. "
-            "Use Paramiko (pip install paramiko) for password auth."
-        )
-    key_path = auth.get("key_path", "~/.ssh/id_rsa")
-    resolved = _resolve_key_path(key_path)
-    host = ssh_config["host"]
-    port = ssh_config.get("port", 22)
-    user = ssh_config.get("user", "<TARGET_USER>")
-    return [
-        "scp",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", f"Port={port}",
-        "-o", "ConnectTimeout=10",
-        "-i", str(resolved),
-    ]
-
-
 # ─── Public interface ────────────────────────────────────────────────────────
 
 def run_ssh(ssh_config: dict, command: str, *, timeout: int = 30) -> Tuple[int, str]:
     """
     Run `command` on the remote host via SSH.
 
-    - password auth → Paramiko (preferred; no sshpass needed)
-    - key auth → OpenSSH subprocess
+    - password auth → Paramiko password
+    - key auth → Paramiko key_filename
 
     Returns (exit_code, combined_stdout_stderr).
     """
-    auth = ssh_config.get("auth", {})
-    auth_type = auth.get("type")
-
-    if auth_type == "password":
-        return _paramiko_run_ssh(ssh_config, command, timeout=timeout)
-
-    # key auth → OpenSSH
-    try:
-        cmd = _openssh_base(ssh_config) + [command]
-    except UnsupportedAuthType:
-        raise
-    try:
-        cp = subprocess.run(cmd, capture_output=True, timeout=timeout)
-        return cp.returncode, (cp.stdout + cp.stderr).decode("utf-8", errors="replace")
-    except subprocess.TimeoutExpired:
-        return -1, f"SSH command timed out after {timeout}s"
-    except FileNotFoundError as e:
-        missing = getattr(e, "filename", None)
-        name = Path(missing).name if missing else "unknown"
-        hint = " Ensure OpenSSH is installed and in PATH." if name in ("ssh", "scp") else ""
-        return -1, f"Command not found: {missing or e}.{hint}"
+    return _paramiko_run_ssh(ssh_config, command, timeout=timeout)
 
 
 def scp_to(ssh_config: dict, local_path: str | os.PathLike,
            remote_path: str, *, timeout: int = 30) -> Tuple[int, str]:
     """
-    Upload local_path to remote_path on the target via SFTP (password auth)
-    or SCP (key auth). Returns (exit_code, message).
+    Upload local_path to remote_path on the target via Paramiko SFTP.
+    Returns (exit_code, message).
     """
-    auth = ssh_config.get("auth", {})
-    auth_type = auth.get("type")
-
-    if auth_type == "password":
-        return _paramiko_scp_to(ssh_config, local_path, remote_path, timeout=timeout)
-
-    # key auth → OpenSSH SCP
-    try:
-        base = _openssh_scp_base(ssh_config)
-    except UnsupportedAuthType:
-        raise
-    cmd = base + [
-        str(local_path),
-        f"{ssh_config['user']}@{ssh_config['host']}:{remote_path}",
-    ]
-    try:
-        cp = subprocess.run(cmd, capture_output=True, timeout=timeout)
-        if cp.returncode != 0:
-            return cp.returncode, (cp.stdout + cp.stderr).decode("utf-8", errors="replace")
-        return 0, f"Uploaded {local_path} to {remote_path}"
-    except subprocess.TimeoutExpired:
-        return -1, f"SCP upload timed out after {timeout}s"
-    except FileNotFoundError as e:
-        missing = getattr(e, "filename", None)
-        name = Path(missing).name if missing else "unknown"
-        hint = " Ensure OpenSSH is installed and in PATH." if name in ("ssh", "scp") else ""
-        return -1, f"Command not found: {missing or e}.{hint}"
+    return _paramiko_scp_to(ssh_config, local_path, remote_path, timeout=timeout)
 
 
 def scp_from(ssh_config: dict, remote_path: str | os.PathLike,
              local_path: str | os.PathLike, *, timeout: int = 30) -> Tuple[int, str]:
     """
-    Download remote_path from the target to local_path via SFTP (password auth)
-    or SCP (key auth). Returns (exit_code, message).
+    Download remote_path from the target to local_path via Paramiko SFTP.
+    Returns (exit_code, message).
     """
-    auth = ssh_config.get("auth", {})
-    auth_type = auth.get("type")
-
-    if auth_type == "password":
-        return _paramiko_scp_from(ssh_config, remote_path, local_path, timeout=timeout)
-
-    # key auth → OpenSSH SCP
-    try:
-        base = _openssh_scp_base(ssh_config)
-    except UnsupportedAuthType:
-        raise
-    cmd = base + [
-        f"{ssh_config['user']}@{ssh_config['host']}:{remote_path}",
-        str(local_path),
-    ]
-    try:
-        cp = subprocess.run(cmd, capture_output=True, timeout=timeout)
-        if cp.returncode != 0:
-            return cp.returncode, (cp.stdout + cp.stderr).decode("utf-8", errors="replace")
-        return 0, f"Downloaded {remote_path} to {local_path}"
-    except subprocess.TimeoutExpired:
-        return -1, f"SCP download timed out after {timeout}s"
-    except FileNotFoundError as e:
-        missing = getattr(e, "filename", None)
-        name = Path(missing).name if missing else "unknown"
-        hint = " Ensure OpenSSH is installed and in PATH." if name in ("ssh", "scp") else ""
-        return -1, f"Command not found: {missing or e}.{hint}"
+    return _paramiko_scp_from(ssh_config, remote_path, local_path, timeout=timeout)
 
 
 def scp_dir_to(ssh_config: dict, local_dir: str | os.PathLike,
@@ -507,33 +408,10 @@ def scp_dir_to(ssh_config: dict, local_dir: str | os.PathLike,
         rel_within = "/".join(inner.parts[1:])  # "server.py" or "automation/base.py"
         src = repo_root / git_rel              # absolute local file
         dst = _remote_join(remote_dir, rel_within)
-        if ssh_config.get("auth", {}).get("type") == "password":
-            rc, msg = _paramiko_scp_to(ssh_config, str(src), dst, timeout=timeout)
-        else:
-            rc, msg = _scp_file_key(ssh_config, str(src), dst, timeout=timeout)
+        rc, msg = _paramiko_scp_to(ssh_config, str(src), dst, timeout=timeout)
         if rc != 0:
             failed.append(f"{git_rel} → {dst}: {msg[:80]}")
 
     if failed:
         return -1, f"Failed to upload {len(failed)} file(s): " + "; ".join(failed[:3])
     return 0, f"Uploaded {len(rel_paths)} tracked file(s) to {remote_dir}"
-
-
-def _scp_file_key(ssh_config: dict, local_path: str, remote_path: str,
-                   timeout: int = 30) -> Tuple[int, str]:
-    """Upload a single file via OpenSSH scp (key auth only)."""
-    try:
-        base = _openssh_scp_base(ssh_config)
-    except UnsupportedAuthType:
-        raise
-    cmd = base + [str(local_path), f"{ssh_config['user']}@{ssh_config['host']}:{remote_path}"]
-    try:
-        cp = subprocess.run(cmd, capture_output=True, timeout=timeout)
-        if cp.returncode != 0:
-            return cp.returncode, (cp.stdout + cp.stderr).decode("utf-8", errors="replace")
-        return 0, ""
-    except subprocess.TimeoutExpired:
-        return -1, f"SCP timed out after {timeout}s"
-    except FileNotFoundError as e:
-        missing = getattr(e, "filename", None)
-        return -1, f"scp not found: {missing or e}"

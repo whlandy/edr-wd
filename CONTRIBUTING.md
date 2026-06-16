@@ -50,9 +50,10 @@ git ls-files config/targets.local.json config/test_machines.json target/config.j
 
 如果有任何输出，禁止 push。
 
-**SSH 密码认证**：当前内网 target 优先使用 `config/targets.local.json`
-里的 `ssh.auth.type=password` + `ssh.auth.password`，由 Paramiko 登录，不使用
-密钥，也不要使用 `sshpass -p`。`password_env` / key auth 仅作为兼容路径保留。
+**SSH 认证**：当前内网 target 优先使用 `config/targets.local.json`
+里的 `ssh.auth.type=password` + `ssh.auth.password`。所有 agent-target SSH
+命令执行和文件传输统一由 Paramiko 完成，不使用 `sshpass`，也不再为 key auth
+切到 OpenSSH/scp。`password_env` / key auth 仅作为兼容路径保留。
 TODO: 后续如果脱离可信内网，再做凭据存储加固。
 
 ### 本地配置

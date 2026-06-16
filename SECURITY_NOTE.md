@@ -21,7 +21,8 @@ All remote branches (`main`, `hermes`, `mcp_auto_v1.0`, `mcp_manual`) were force
 ## Usage Rules
 
 - Never `cat` or `git diff` real config files in issues, PRs, or chat.
-- Never use `sshpass -p` with real passwords.
-- Current intranet targets may store credentials directly in `config/targets.local.json` (already in `.gitignore`); `password_env` remains a compatibility option.
+- Never use `sshpass` with real passwords.
+- Current intranet targets may store credentials directly in `config/targets.local.json` (already in `.gitignore`); Paramiko is the only SSH/SFTP transport for agent-target command execution and file transfer.
+- `password_env` and key auth remain compatibility options, but are not the default intranet workflow.
 - TODO: move credentials out of local JSON if the workflow leaves the trusted intranet setup.
 - All redacted output only — never paste real IPs, usernames, passwords, or full paths.

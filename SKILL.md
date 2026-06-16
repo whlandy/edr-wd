@@ -72,12 +72,35 @@ text-only click when a component-tree selector is available. Read
 Target runtime scripts belong under `target/scripts/`. Root `scripts/` is for
 developer utilities only.
 
+### Deployment Preflight
+
+Do not start by deploying or restarting MCP. Before `deploy_target()`,
+`ensure_running()`, or `TargetSubAgent.ensure_running()`, verify:
+
+1. Target config validates and Paramiko SSH login works.
+2. Agent Python can import the dependencies declared in `pyproject.toml`,
+   especially `paramiko` for SSH/SFTP/tunnel.
+3. Target Python path exists and can import all required runtime dependencies
+   from `pyproject.toml`, not only `fastmcp`.
+4. Backend dependencies are present (`pywinauto`/`pyautogui` on Windows,
+   `pyautogui` plus Accessibility/GUI permissions on macOS).
+5. When running tests, test-only dependencies from
+   `test_case/requirements_test.txt` are installed on the runner.
+6. Port `8765` state is known. For `connect_mode=direct`, the target firewall
+   must allow inbound TCP `8765` before the agent expects MCP to answer.
+7. If an existing FastMCP server is already responding, initialize/status it
+   before deciding to redeploy or restart.
+
+Read `references/agent-workflow.md` before changing deployment or lifecycle
+flow.
+
 ## Target Config
 
 Runtime targets are loaded by `agent.target_config.TargetConfig` from
 `EDR_WD_CONFIG` first, then `config/targets.local.json`. For this trusted
 intranet workflow, prefer inline username/password auth in the local config.
-`password_env` and key auth are compatibility paths, not the default path.
+All SSH command execution and file transfer goes through Paramiko. `password_env`
+and key auth are compatibility paths, not the default path.
 
 Read `references/target-config.md` when adding targets, changing
 `connect_mode`, or touching auth/platform validation.

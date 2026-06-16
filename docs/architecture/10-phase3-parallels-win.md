@@ -125,7 +125,8 @@ New target: `parallels-win`
 ### 4.1 Password auth policy
 
 Current intranet targets use direct username/password auth from ignored local
-config. `password_env` and key auth remain compatibility paths only.
+config. `password_env` and key auth remain compatibility paths only, and all
+agent-target SSH/SFTP operations use Paramiko.
 
 REQUIRED: `"password": "<TARGET_PASSWORD>"`
 
