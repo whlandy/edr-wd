@@ -161,6 +161,29 @@ class WindowsLifecycle:
                 details=stages,
             )
 
+        # Runtime dependencies
+        dep_cmd = (
+            f'"{python_path}" -c '
+            f'"import fastmcp, psutil, PIL, pywinauto, pyautogui; '
+            f'print(\\"windows target deps ok\\")"'
+        )
+        rc, out = run_ssh(ssh_cfg, dep_cmd, timeout=20)
+        stages["python_dependencies"] = {
+            "ok": rc == 0,
+            "requires": ["fastmcp", "psutil", "Pillow", "pywinauto", "PyAutoGUI"],
+            "output": out.strip()[:300],
+        }
+        if rc != 0:
+            return self._err(
+                "probe",
+                "python_dependencies_missing",
+                (
+                    "Target Python cannot import required EDR-WD runtime "
+                    f"dependencies: {out[:300]}"
+                ),
+                details=stages,
+            )
+
         # PowerShell
         rc, out = run_ssh(
             ssh_cfg,
@@ -177,6 +200,33 @@ class WindowsLifecycle:
             )
 
         return self._ok("probe", data=stages)
+
+    def _ensure_firewall_rule(self, cfg: dict) -> dict:
+        """Ensure inbound TCP mcp.port is allowed for direct Windows targets."""
+        ssh_cfg = cfg["ssh"]
+        mcp_cfg = cfg["mcp"]
+        port = int(mcp_cfg.get("port", 8765))
+        rule_name = f"EDR-WD MCP {port}"
+        cmd = (
+            'powershell -NoProfile -Command "'
+            f'$name = \\"{rule_name}\\"; '
+            f'$port = {port}; '
+            '$existing = Get-NetFirewallRule -DisplayName $name '
+            '-ErrorAction SilentlyContinue; '
+            'if (-not $existing) { '
+            'New-NetFirewallRule -DisplayName $name '
+            '-Direction Inbound -Action Allow -Protocol TCP '
+            '-LocalPort $port | Out-Null; '
+            'Write-Output \\"created\\" '
+            '} else { Write-Output \\"exists\\" }"'
+        )
+        rc, out = run_ssh(ssh_cfg, cmd, timeout=20)
+        return {
+            "ok": rc == 0,
+            "rule": rule_name,
+            "port": port,
+            "output": out.strip()[:200],
+        }
 
     # ── deploy ───────────────────────────────────────────────────────────────
 
@@ -303,6 +353,17 @@ class WindowsLifecycle:
             check_host = "127.0.0.1"
         check_port = mcp_cfg["port"]
 
+        firewall_result = None
+        if connect_mode == "direct":
+            firewall_result = self._ensure_firewall_rule(cfg)
+            if not firewall_result.get("ok"):
+                return self._err(
+                    "ensure",
+                    "firewall_rule_failed",
+                    "Failed to ensure Windows inbound firewall rule for MCP port",
+                    details=firewall_result,
+                )
+
         # Phase 1: TCP probe — if already running, do a full GUI readiness check
         if _is_port_listening(check_host, check_port):
             gui_check = self._check_gui_readiness(cfg)
@@ -312,6 +373,7 @@ class WindowsLifecycle:
                 "data": {
                     "status": "already_running",
                     "port": check_port,
+                    "firewall": firewall_result,
                     **gui_check,
                 },
             }
@@ -366,6 +428,7 @@ class WindowsLifecycle:
                 "status": "started",
                 "port": check_port,
                 "waited_seconds": waited,
+                "firewall": firewall_result,
                 **gui_check,
             },
         }

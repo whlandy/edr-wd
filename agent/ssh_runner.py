@@ -146,6 +146,54 @@ def _remote_join(base: str, *parts: str) -> str:
     return base
 
 
+def _remote_parent(path: str) -> str:
+    """Return the remote parent directory, preserving slash-only remote paths."""
+    normalized = path.replace("\\", "/").rstrip("/")
+    if "/" not in normalized:
+        return ""
+    return normalized.rsplit("/", 1)[0]
+
+
+_EXCLUDED_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+    "logs",
+    "screenshots",
+}
+_EXCLUDED_NAMES = {
+    ".DS_Store",
+    "config.json",
+    "targets.json",
+    "targets.local.json",
+    "test_machines.json",
+}
+_EXCLUDED_SUFFIXES = {".log", ".pyc", ".pyo", ".tmp"}
+
+
+def _is_safe_fallback_file(path: Path, root: Path) -> bool:
+    """Return whether a file is safe to upload when git metadata is unavailable."""
+    rel = path.relative_to(root)
+    if any(part in _EXCLUDED_DIRS for part in rel.parts):
+        return False
+    if path.name in _EXCLUDED_NAMES:
+        return False
+    if path.suffix.lower() in _EXCLUDED_SUFFIXES:
+        return False
+    return True
+
+
+def _fallback_rel_paths(local_dir: Path) -> list[str]:
+    """Enumerate deployable files without git, applying conservative exclusions."""
+    rel_paths: list[str] = []
+    for item in local_dir.rglob("*"):
+        if item.is_file() and _is_safe_fallback_file(item, local_dir):
+            rel_paths.append(item.relative_to(local_dir).as_posix())
+    return sorted(rel_paths)
+
+
 # ─── Paramiko SFTP helpers ───────────────────────────────────────────────────
 
 def _paramiko_connect(ssh_config: dict, timeout: int = 10) -> paramiko.SSHClient:
@@ -225,18 +273,39 @@ def _paramiko_scp_to(ssh_config: dict, local_path: str | os.PathLike,
     try:
         sftp = client.open_sftp()
 
-        # Ensure remote parent directory exists by walking up the path
-        # Use _remote_join to handle both Unix and Windows paths with slashes
-        parts = remote_path.replace("\\", "/").rstrip("/").split("/")
-        for i in range(1, len(parts) + 1):
-            remote_dir = "/".join(parts[:i])
-            try:
-                sftp.stat(remote_dir)
-            except IOError:
+        def _ensure_remote_dir(remote_dir: str) -> None:
+            remote_dir = remote_dir.replace("\\", "/").rstrip("/")
+            if not remote_dir:
+                return
+            parts = remote_dir.split("/")
+            for i in range(1, len(parts) + 1):
+                current = "/".join(parts[:i])
+                if not current:
+                    continue
                 try:
-                    sftp.mkdir(remote_dir)
-                except OSError:
-                    pass  # may already exist
+                    sftp.stat(current)
+                except IOError:
+                    try:
+                        sftp.mkdir(current)
+                    except OSError:
+                        pass  # may already exist or be a drive/root component
+
+        def _resolve_remote_file(local_file: Path, remote: str) -> str:
+            effective = remote.replace("\\", "/").rstrip("/")
+            last = effective.split("/")[-1] if effective else ""
+            if remote.endswith(("/", "\\")) or ("." not in last and "/" in effective):
+                effective = _remote_join(effective, local_file.name)
+            return effective
+
+        def _write_file(local_file: Path, remote_file: str) -> None:
+            _ensure_remote_dir(_remote_parent(remote_file))
+            if _should_strip_crlf(local_file):
+                content = local_file.read_bytes()
+                text_content = content.decode("utf-8", errors="replace").replace("\r\n", "\n")
+                with sftp.open(remote_file, "wb") as remote_f:
+                    remote_f.write(text_content.encode("utf-8"))
+            else:
+                sftp.put(str(local_file), remote_file)
 
         _TEXT_EXTS = {".sh", ".py", ".ps1", ".bat", ".txt", ".json", ".xml", ".plist", ".yaml", ".yml", ".md", ".cfg", ".ini", ".toml"}
 
@@ -244,43 +313,25 @@ def _paramiko_scp_to(ssh_config: dict, local_path: str | os.PathLike,
             return path.suffix.lower() in _TEXT_EXTS
 
         if local.is_dir():
+            _ensure_remote_dir(remote_path)
             # Upload directory recursively
             for item in local.rglob("*"):
                 rel = item.relative_to(local)
                 remote_item = _remote_join(remote_path, *rel.parts)
                 if item.is_dir():
-                    try:
-                        sftp.mkdir(remote_item)
-                    except IOError:
-                        pass
+                    _ensure_remote_dir(remote_item)
                 else:
-                    if _should_strip_crlf(item):
-                        content = item.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
-                        with sftp.open(remote_item, "wb") as remote_f:
-                            remote_f.write(content.encode("utf-8"))
-                    else:
-                        sftp.put(str(item), remote_item)
+                    _write_file(item, remote_item)
             return 0, "SFTP directory upload completed"
         else:
-            # If remote_path is a directory (last component has no ext), append filename
-            effective_remote = remote_path.rstrip("/")
-            last = effective_remote.split("/")[-1]
-            if "." not in last and "/" in effective_remote:
-                effective_remote = f"{effective_remote}/{local.name}"
-            if _should_strip_crlf(local):
-                content = local.read_bytes()
-                text_content = content.decode("utf-8", errors="replace").replace("\r\n", "\n")
-                with sftp.open(effective_remote, "wb") as remote_f:
-                    remote_f.write(text_content.encode("utf-8"))
-            else:
-                sftp.put(str(local), effective_remote)
+            effective_remote = _resolve_remote_file(local, remote_path)
+            _write_file(local, effective_remote)
             return 0, f"SFTP file uploaded to {effective_remote}"
     except Exception as e:
         # Do not leak local path details in error messages
         return -1, f"SFTP upload failed: {type(e).__name__}: {e}"
     finally:
         client.close()
-
 
 def _paramiko_scp_from(ssh_config: dict, remote_path: str | os.PathLike,
                        local_path: str | os.PathLike, timeout: int = 30) -> Tuple[int, str]:
@@ -363,6 +414,7 @@ def scp_dir_to(ssh_config: dict, local_dir: str | os.PathLike,
     """
     local_dir = Path(local_dir).resolve()
 
+    used_fallback = False
     if tracked_only:
         try:
             cp = subprocess.run(
@@ -378,14 +430,21 @@ def scp_dir_to(ssh_config: dict, local_dir: str | os.PathLike,
                     if line.strip() and not line.startswith("#")
                 ]
             else:
-                return -1, f"git ls-files failed (rc={cp.returncode}): {cp.stderr.decode()[:200]}"
+                err = cp.stderr.decode("utf-8", errors="replace")
+                if "not a git repository" in err.lower():
+                    rel_paths = _fallback_rel_paths(local_dir)
+                    used_fallback = True
+                else:
+                    return -1, f"git ls-files failed (rc={cp.returncode}): {err[:200]}"
         except subprocess.TimeoutExpired:
             return -1, "git ls-files timed out"
         except FileNotFoundError:
-            return -1, "git not found in PATH — cannot determine tracked files"
+            rel_paths = _fallback_rel_paths(local_dir)
+            used_fallback = True
 
         if not rel_paths:
-            return 0, f"No tracked files found under {local_dir}"
+            mode = "fallback files" if used_fallback else "tracked files"
+            return 0, f"No {mode} found under {local_dir}"
     else:
         # Upload everything under local_dir/
         rel_paths = []
@@ -393,25 +452,30 @@ def scp_dir_to(ssh_config: dict, local_dir: str | os.PathLike,
             if item.is_file():
                 rel_paths.append(item.relative_to(local_dir).as_posix())
 
-    # Upload each tracked file individually so one failure doesn't block others.
-    # git returns paths like "target/__init__.py"; strip the top-level component
-    # (the directory name, e.g. "target") to get the relative path within it.
+    # Upload each file individually so one failure doesn't block others.
+    # git returns paths like "target/__init__.py"; fallback paths are already
+    # relative to local_dir, e.g. "__init__.py".
     local_dir_name = local_dir.name          # e.g. "target"
     repo_root = local_dir.parent            # AGENT_ROOT
     failed = []
-    for git_rel in rel_paths:
-        # git_rel = "target/server.py"; strip the leading "target/" to get "server.py"
-        inner = Path(git_rel)
-        if inner.parts[0] != local_dir_name:
-            failed.append(f"{git_rel}: does not start with {local_dir_name}/ — skipping")
-            continue
-        rel_within = "/".join(inner.parts[1:])  # "server.py" or "automation/base.py"
-        src = repo_root / git_rel              # absolute local file
+    for rel_path in rel_paths:
+        inner = Path(rel_path)
+        if used_fallback or not tracked_only:
+            rel_within = inner.as_posix()
+            src = local_dir / inner
+        else:
+            # git_rel = "target/server.py"; strip the leading "target/".
+            if not inner.parts or inner.parts[0] != local_dir_name:
+                failed.append(f"{rel_path}: does not start with {local_dir_name}/ — skipping")
+                continue
+            rel_within = "/".join(inner.parts[1:])
+            src = repo_root / inner
         dst = _remote_join(remote_dir, rel_within)
         rc, msg = _paramiko_scp_to(ssh_config, str(src), dst, timeout=timeout)
         if rc != 0:
-            failed.append(f"{git_rel} → {dst}: {msg[:80]}")
+            failed.append(f"{rel_path} → {dst}: {msg[:80]}")
 
     if failed:
         return -1, f"Failed to upload {len(failed)} file(s): " + "; ".join(failed[:3])
-    return 0, f"Uploaded {len(rel_paths)} tracked file(s) to {remote_dir}"
+    mode = "fallback" if used_fallback else "tracked"
+    return 0, f"Uploaded {len(rel_paths)} {mode} file(s) to {remote_dir}"

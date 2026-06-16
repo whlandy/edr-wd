@@ -70,6 +70,43 @@ def _process_alive(pid: int) -> bool:
         return False
 
 
+def _read_pid(local_port: int) -> int | None:
+    pid_file = _pid_file(local_port)
+    if not pid_file.exists():
+        return None
+    try:
+        return int(pid_file.read_text(encoding="utf-8").strip())
+    except ValueError:
+        pid_file.unlink(missing_ok=True)
+        return None
+
+
+def _owned_tunnel_pid(local_port: int) -> int | None:
+    pid = _read_pid(local_port)
+    if pid and _process_alive(pid):
+        return pid
+    if pid:
+        _pid_file(local_port).unlink(missing_ok=True)
+    return None
+
+
+def _mcp_status(local_port: int) -> int:
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", local_port, timeout=5)
+        conn.request("GET", "/mcp")
+        resp = conn.getresponse()
+        return resp.status
+    except Exception:
+        return 0
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()  # type: ignore[name-defined]
+
+
+def _mcp_responding(local_port: int) -> bool:
+    return _mcp_status(local_port) in (404, 406)
+
+
 def _forward(client_sock: socket.socket, transport, remote_port: int) -> None:
     try:
         channel = transport.open_channel(
@@ -109,7 +146,6 @@ def serve(args: argparse.Namespace) -> int:
     target = _target_name(args.target)
     ssh_cfg, local_port, remote_port = _cfg(target)
     pid_file = _pid_file(local_port)
-    pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
     client = _paramiko_connect(ssh_cfg, timeout=15)
     transport = client.get_transport()
@@ -120,6 +156,8 @@ def serve(args: argparse.Namespace) -> int:
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", local_port))
     server.listen(50)
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
     print(f"Paramiko tunnel serving 127.0.0.1:{local_port} -> 127.0.0.1:{remote_port} ({target})", flush=True)
     try:
@@ -139,8 +177,21 @@ def start(args: argparse.Namespace) -> int:
     target = _target_name(args.target)
     _ssh_cfg, local_port, _remote_port = _cfg(target)
     if _port_open(local_port):
-        print(f"Tunnel already running on port {local_port}")
-        return 0
+        pid = _owned_tunnel_pid(local_port)
+        if not pid:
+            print(
+                f"Port {local_port} is already in use by a non-EDR-WD tunnel process",
+                file=sys.stderr,
+            )
+            return 1
+        if _mcp_responding(local_port):
+            print(f"Tunnel already running on port {local_port} pid={pid}")
+            return 0
+        print(
+            f"Tunnel process pid={pid} is running, but MCP is not responding on port {local_port}",
+            file=sys.stderr,
+        )
+        return 1
 
     log_file = _log_file(local_port)
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -162,7 +213,7 @@ def start(args: argparse.Namespace) -> int:
 
     deadline = time.time() + args.timeout
     while time.time() < deadline:
-        if _port_open(local_port):
+        if _owned_tunnel_pid(local_port) and _mcp_responding(local_port):
             print(f"Tunnel started on 127.0.0.1:{local_port}")
             return 0
         time.sleep(0.25)
@@ -175,13 +226,9 @@ def stop(args: argparse.Namespace) -> int:
     target = _target_name(args.target)
     _ssh_cfg, local_port, _remote_port = _cfg(target)
     pid_file = _pid_file(local_port)
-    if not pid_file.exists():
+    pid = _read_pid(local_port)
+    if not pid:
         print(f"Tunnel pid file not found for port {local_port}")
-        return 0
-    try:
-        pid = int(pid_file.read_text(encoding="utf-8").strip())
-    except ValueError:
-        pid_file.unlink(missing_ok=True)
         return 0
     if _process_alive(pid):
         os.kill(pid, signal.SIGTERM)
@@ -196,15 +243,17 @@ def stop(args: argparse.Namespace) -> int:
 def status(args: argparse.Namespace) -> int:
     target = _target_name(args.target)
     _ssh_cfg, local_port, _remote_port = _cfg(target)
-    pid_file = _pid_file(local_port)
-    pid = None
-    if pid_file.exists():
-        with contextlib.suppress(ValueError):
-            pid = int(pid_file.read_text(encoding="utf-8").strip())
+    pid = _owned_tunnel_pid(local_port)
     if _port_open(local_port):
-        detail = f" pid={pid}" if pid else ""
-        print(f"Tunnel running on 127.0.0.1:{local_port}{detail}")
-        return 0
+        if not pid:
+            print(f"Port {local_port} is open, but not owned by EDR-WD tunnel")
+            return 1
+        status_code = _mcp_status(local_port)
+        if status_code in (404, 406):
+            print(f"Tunnel running on 127.0.0.1:{local_port} pid={pid}; MCP responding HTTP {status_code}")
+            return 0
+        print(f"Tunnel pid={pid} is running on 127.0.0.1:{local_port}, but MCP returned HTTP {status_code}")
+        return 1
     print(f"Tunnel not running on 127.0.0.1:{local_port}")
     return 0
 
@@ -212,16 +261,7 @@ def status(args: argparse.Namespace) -> int:
 def test(args: argparse.Namespace) -> int:
     target = _target_name(args.target)
     _ssh_cfg, local_port, _remote_port = _cfg(target)
-    try:
-        conn = http.client.HTTPConnection("127.0.0.1", local_port, timeout=5)
-        conn.request("GET", "/mcp")
-        resp = conn.getresponse()
-        status_code = resp.status
-    except OSError:
-        status_code = 0
-    finally:
-        with contextlib.suppress(Exception):
-            conn.close()  # type: ignore[name-defined]
+    status_code = _mcp_status(local_port)
     if status_code in (404, 406):
         print(f"MCP server responding (HTTP {status_code})")
         return 0

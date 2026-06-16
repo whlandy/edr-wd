@@ -2,11 +2,11 @@
 # edr-wd.sh — Agent side control plane for Windows EDR-WD target.
 #
 # Commands:
-#   up       Start the MCP server on the Windows target and ensure tunnel is up
-#   down     Stop the MCP server on the Windows target and stop tunnel
-#   status   Show Windows server and tunnel status
+#   up       Start the MCP server and prepare connection mode if needed
+#   down     Stop the MCP server and stop tunnel if configured
+#   status   Show target server and tunnel status when configured
 #   push     Copy a file or directory to the Windows target
-#   smoke    Run the MCP smoke test against the local tunnel
+#   smoke    Run the MCP smoke test against the configured MCP URL
 #
 # Environment:
 #   EDR_WD_TARGET_NAME   Target name from config (default: win-dev)
@@ -27,19 +27,41 @@ usage() {
 Usage: bash $0 {up|down|status|push|smoke}
 
 Commands:
-  up       Start Windows MCP server and local SSH tunnel
-  down     Stop Windows MCP server and local SSH tunnel
-  status   Show status for both Windows server and tunnel
+  up       Start MCP server and prepare configured connection mode
+  down     Stop MCP server and configured tunnel if needed
+  status   Show target status and tunnel status when configured
   push     Copy files to the Windows target via Paramiko SFTP
-  smoke    Run the MCP smoke test against the local tunnel
+  smoke    Run the MCP smoke test against the configured MCP URL
 EOF
+}
+
+target_field() {
+    local field="$1"
+    (
+        cd "$SCRIPT_DIR/.." || exit 1
+        python - "$TARGET_NAME" "$field" <<'PY'
+import sys
+from agent.target_config import TargetConfig
+
+target_name = sys.argv[1]
+field = sys.argv[2]
+tc = TargetConfig()
+cfg = tc.get_target(target_name)
+if field == "connect_mode":
+    print(cfg.get("mcp", {}).get("connect_mode", "direct"))
+elif field == "mcp_url":
+    print(tc.build_mcp_url(target_name))
+else:
+    raise SystemExit(f"unknown field: {field}")
+PY
+    )
 }
 
 local_lifecycle() {
     # Call the Python lifecycle entry points locally on the agent machine.
     # target_manager is an agent-side orchestration module — it must run on
     # the agent host, not on the target.  It connects to the target via SSH
-    # internally through ssh_runner; the SSH below is only for the tunnel.
+    # internally through ssh_runner.
     local action="$1"
     local py_cmd
 
@@ -67,34 +89,52 @@ local_lifecycle() {
 }
 
 ensure_tunnel() {
-    bash "$SCRIPT_DIR/tunnel.sh" start "$TARGET_NAME"
+    local mode
+    mode="$(target_field connect_mode)"
+    if [ "$mode" = "tunnel" ]; then
+        bash "$SCRIPT_DIR/tunnel.sh" start "$TARGET_NAME"
+    else
+        echo "Connection mode is ${mode}; tunnel not required."
+    fi
 }
 
 do_up() {
-    echo "[1/2] Starting Windows MCP server..."
+    echo "[1/2] Starting MCP server..."
     local_lifecycle start
     echo ""
-    echo "[2/2] Starting local tunnel..."
+    echo "[2/2] Preparing connection mode..."
     ensure_tunnel
     echo ""
     echo "Ready:"
-    echo "  http://127.0.0.1:${LOCAL_PORT}/mcp"
+    echo "  $(target_field mcp_url)"
 }
 
 do_down() {
-    echo "[1/2] Stopping Windows MCP server..."
+    local mode
+    mode="$(target_field connect_mode)"
+    echo "[1/2] Stopping MCP server..."
     local_lifecycle stop || true
     echo ""
-    echo "[2/2] Stopping local tunnel..."
-    bash "$SCRIPT_DIR/tunnel.sh" stop "$TARGET_NAME" || true
+    if [ "$mode" = "tunnel" ]; then
+        echo "[2/2] Stopping local tunnel..."
+        bash "$SCRIPT_DIR/tunnel.sh" stop "$TARGET_NAME" || true
+    else
+        echo "[2/2] Connection mode is ${mode}; tunnel not used."
+    fi
 }
 
 do_status() {
-    echo "[1/2] Windows target status..."
+    local mode
+    mode="$(target_field connect_mode)"
+    echo "[1/2] Target status..."
     local_lifecycle status
     echo ""
-    echo "[2/2] Tunnel status..."
-    bash "$SCRIPT_DIR/tunnel.sh" status "$TARGET_NAME"
+    if [ "$mode" = "tunnel" ]; then
+        echo "[2/2] Tunnel status..."
+        bash "$SCRIPT_DIR/tunnel.sh" status "$TARGET_NAME"
+    else
+        echo "[2/2] Connection mode is ${mode}; MCP URL: $(target_field mcp_url)"
+    fi
 }
 
 do_push() {
@@ -156,8 +196,10 @@ PY
 }
 
 do_smoke() {
+    local mcp_url
+    mcp_url="$(target_field mcp_url)"
     python "$SCRIPT_DIR/../target/tests/smoke_mcp_client.py" \
-        --base-url "http://127.0.0.1:${LOCAL_PORT}/mcp" \
+        --base-url "$mcp_url" \
         "$@"
 }
 
