@@ -5,8 +5,8 @@ run_tests.py — Profile-aware test runner (no pytest required)
 Usage:
   python run_tests.py                                # use default_target, dispatch by app_profile
   python run_tests.py -v                             # verbose output
-  python run_tests.py --target win-dev               # specific target
-  EDR_WD_TARGET=mac-dev python run_tests.py          # macOS target
+  python run_tests.py --target 2.26-edr-win26-win11       # specific target
+  EDR_WD_TARGET=2.29-edr-mac29-macos14 python run_tests.py  # macOS target
   python run_tests.py --profile macos_generic        # force a profile (overrides target.app_profile)
   python run_tests.py --legacy                       # bypass profile dispatch (raw Windows E2E)
 
@@ -36,7 +36,7 @@ from agent.target_config import TargetConfig
 from agent.subagent import TargetSubAgent
 
 
-# Per-platform default profile. The legacy win-dev has no app_profile
+# Per-platform default profile. Legacy targets may have no app_profile
 # in its config; defaulting it to windows_hisec keeps the 16/16
 # behaviour bit-identical to the pre-M6 run_tests.py.
 #

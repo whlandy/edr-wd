@@ -17,7 +17,7 @@ Architecture:
 
 Usage:
   from agent.mcp_manager import initialize, get_mcp_tools, call_mcp_tool
-  result = initialize("win-dev")
+  result = initialize("2.26-edr-win26-win11")
   if result["ok"]:
       tools = get_mcp_tools(result["session_id"])
 """

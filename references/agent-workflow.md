@@ -10,7 +10,7 @@ Use `TargetSubAgent` for new orchestration:
 ```python
 from agent.subagent import TargetSubAgent
 
-agent = TargetSubAgent.from_name("win-dev")
+agent = TargetSubAgent.from_name("2.26-edr-win26-win11")
 agent.ensure_running()
 agent.initialize_mcp()
 status = agent.call_tool("status")
@@ -60,7 +60,7 @@ Required order:
 
    ```python
    from agent import target_manager
-   print(target_manager.probe_target("win-dev"))
+   print(target_manager.probe_target("2.26-edr-win26-win11"))
    ```
 
    A failed SSH probe means stop. Do not deploy until auth, host, and platform
@@ -145,8 +145,8 @@ Required order:
 
    ```python
    from agent import mcp_manager, target_manager
-   print(target_manager.check_server_health("win-dev"))
-   print(mcp_manager.initialize("win-dev"))
+   print(target_manager.check_server_health("2.26-edr-win26-win11"))
+   print(mcp_manager.initialize("2.26-edr-win26-win11"))
    ```
 
    If initialize/status works, use the existing server. Redeploy only when the

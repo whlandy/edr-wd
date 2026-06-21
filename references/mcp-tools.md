@@ -90,6 +90,8 @@ Windows backend:
 - Uses pywinauto UIA/Win32 paths.
 - Component clicks should prefer UIA semantic actions (`uia_invoke` or
   `uia_toggle`) before mouse input.
+- HiSec `click`/`click_target` calls require `expected_process_name` so
+  `HisecEndpointAgent.exe` and `EDRClient.exe` cannot be confused.
 - Use desktop window handles first for Qt/UIA windows when PID connection is
   unreliable.
 
@@ -98,6 +100,8 @@ macOS backend:
 - Uses Accessibility data.
 - Supports component discovery/click plumbing through `dump_tree`,
   `find_control`, `click`, and `click_target`.
+- HiSec `click`/`click_target` calls require `expected_process_name` so
+  `HiSecEndpointAgent` and `EDRClient` cannot be confused.
 - `click_at` is dry-run by default. Set `EDR_WD_ALLOW_REAL_CLICKS=1` on the
   target only when real pointer actions are intended.
 

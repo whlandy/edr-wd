@@ -7,7 +7,7 @@ target name. Environment variables remain as a compatibility fallback.
 Real host/user/password values are never printed.
 
 Usage:
-    python scripts/test_paramiko_login.py --target win-dev
+    python scripts/test_paramiko_login.py --target 2.26-edr-win26-win11
 
     # Or fallback env mode:
     EDR_WD_TARGET_HOST=<TARGET_IP> \

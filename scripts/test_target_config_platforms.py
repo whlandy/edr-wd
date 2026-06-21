@@ -91,7 +91,8 @@ def main() -> int:
     # ── 3. macos target: valid → no errors ──────────────────────
     macos_raw = {
         "platform": "macos",
-        "ssh": {"host": "x", "port": 22, "user": "x", "auth": {"type": "password", "password": "pw"}},
+        "identity": {"hostname": "edr-mac29", "os_version": "macos14"},
+        "ssh": {"host": "192.0.2.29", "port": 22, "user": "x", "auth": {"type": "password", "password": "pw"}},
         "mcp": {"host": "0.0.0.0", "port": 8765, "path": "/mcp", "connect_mode": "direct", "tunnel": {"enabled": False, "local_port": 18765}},
         "macos": {
             "python_path": "/opt/homebrew/bin/python3",
@@ -135,23 +136,23 @@ def main() -> int:
 
     # ── 7. get_target_platform / get_target_app_profile on file ──
     cfg_path = write_config({
-        "default_target": "mac-test",
+        "default_target": "2.29-edr-mac29-macos14",
         "targets": {
-            "mac-test": macos_raw,
+            "2.29-edr-mac29-macos14": macos_raw,
             "win-legacy": legacy_raw,  # no platform/app_profile
         },
     })
     try:
         tc = TargetConfig(cfg_path)
         check(
-            "mac-test platform is macos",
-            tc.get_target_platform("mac-test") == "macos",
-            f"got {tc.get_target_platform('mac-test')}",
+            "canonical mac target platform is macos",
+            tc.get_target_platform("2.29-edr-mac29-macos14") == "macos",
+            f"got {tc.get_target_platform('2.29-edr-mac29-macos14')}",
         )
         check(
-            "mac-test app_profile is None (not set)",
-            tc.get_target_app_profile("mac-test") is None,
-            f"got {tc.get_target_app_profile('mac-test')}",
+            "canonical mac target app_profile is None (not set)",
+            tc.get_target_app_profile("2.29-edr-mac29-macos14") is None,
+            f"got {tc.get_target_app_profile('2.29-edr-mac29-macos14')}",
         )
         check(
             "win-legacy platform is windows (default)",
@@ -174,7 +175,7 @@ def main() -> int:
             len(legacy_warnings) == 1 and "win-legacy" in legacy_warnings[0],
             f"got legacy_warnings={legacy_warnings}",
         )
-        ssh = tc.resolve_auth("mac-test")
+        ssh = tc.resolve_auth("2.29-edr-mac29-macos14")
         check(
             "resolve_auth prefers inline password",
             ssh.get("auth", {}).get("password") == "pw" and "password_env" not in ssh.get("auth", {}),
@@ -185,9 +186,9 @@ def main() -> int:
 
     # ── 8. macos with explicit app_profile round-trips ────────
     cfg_path = write_config({
-        "default_target": "mac-with-prof",
+        "default_target": "2.29-edr-mac29-macos14",
         "targets": {
-            "mac-with-prof": {
+            "2.29-edr-mac29-macos14": {
                 **macos_raw,
                 "app_profile": "macos_generic",
             },
@@ -196,9 +197,9 @@ def main() -> int:
     try:
         tc = TargetConfig(cfg_path)
         check(
-            "mac-with-prof app_profile is 'macos_generic'",
-            tc.get_target_app_profile("mac-with-prof") == "macos_generic",
-            f"got {tc.get_target_app_profile('mac-with-prof')}",
+            "canonical mac target app_profile is 'macos_generic'",
+            tc.get_target_app_profile("2.29-edr-mac29-macos14") == "macos_generic",
+            f"got {tc.get_target_app_profile('2.29-edr-mac29-macos14')}",
         )
     finally:
         os.unlink(cfg_path)

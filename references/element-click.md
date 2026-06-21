@@ -14,6 +14,19 @@ tree, select one unique node, then trigger the node through its semantic action.
 Only use coordinates as an explicitly documented fallback after semantic actions
 fail.
 
+## HiSec Click Contexts
+
+Treat the two HiSec processes as separate click scopes:
+
+| Requested UI | Windows process | macOS process |
+|---|---|---|
+| Entry window, navigation, left-side `安全中心`, `前往安全防护中心` | `HisecEndpointAgent.exe` | `HiSecEndpointAgent` |
+| EDR security-center content and client-only controls | `EDRClient.exe` | `EDRClient` |
+
+Every precise HiSec `click()` or `click_target()` call must pass
+`expected_process_name`. The backend returns `click_context_required` when it
+is omitted and `click_context_mismatch` when the connected process differs.
+
 ## Required Sequence
 
 1. Make the target window visible.
@@ -84,6 +97,7 @@ fail.
        "class_name": "CheckBox",
        "automation_id": "<exact automation_id from dump_tree>",
        "parent_fallback": False,
+       "expected_process_name": "HisecEndpointAgent.exe",
    })
    assert result.get("method") in {"uia_invoke", "uia_toggle"}, result
    ```
@@ -117,7 +131,7 @@ import json
 from pathlib import Path
 from agent.subagent import TargetSubAgent
 
-agent = TargetSubAgent.from_name("win-dev")
+agent = TargetSubAgent.from_name("2.26-edr-win26-win11")
 agent.initialize_mcp(force=True)
 
 agent.call_tool("activate_edr", {"wait": True, "timeout": 20}, timeout=30)
@@ -142,6 +156,7 @@ click = agent.call_tool("click", {
     "class_name": node.get("class_name"),
     "automation_id": node.get("automation_id"),
     "parent_fallback": False,
+    "expected_process_name": "HisecEndpointAgent.exe",
 }, timeout=20)
 if click.get("method") not in {"uia_invoke", "uia_toggle"}:
     raise RuntimeError(f"Click was not semantic UIA activation: {click}")
@@ -221,6 +236,8 @@ Do not do these first:
   `HisecEndpointAgent.exe`.
 - Treat `ok: true` from a click as proof. Always verify with a post-click
   `dump_tree`.
+- Omit `expected_process_name` in a HiSec click, allowing a selector to run
+  against whichever process was connected most recently.
 - Hide a failed semantic action by falling back silently to coordinates.
 
 ## Minimal Evidence To Record

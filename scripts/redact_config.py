@@ -54,6 +54,7 @@ SECRET_KEYS = frozenset({
 # config points at the right machine without leaking the actual one.
 STRUCTURAL_KEYS = frozenset({
     "host",
+    "hostname",
     "user",
     "root",
     "target_root",
@@ -64,6 +65,7 @@ STRUCTURAL_KEYS = frozenset({
     "key_path",  # also here, but secret takes priority
     "ssh_port",
     "port",
+    "default_target",
 })
 
 

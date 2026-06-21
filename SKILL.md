@@ -59,7 +59,8 @@ Precise UI actions must be component-tree driven:
 2. `dump_tree(max_depth=...)`.
 3. Select one unique node using `automation_id`, `control_id`, or
    `text + class_name + control_type`.
-4. Use `click()` and require a semantic component result where available
+4. Use `click(expected_process_name=<connected process>)` and require a
+   semantic component result where available
    (`uia_invoke` / `uia_toggle` on Windows, AX action on macOS).
 5. Re-run `dump_tree()` and verify the resulting page text.
 
@@ -105,6 +106,10 @@ and key auth are compatibility paths, not the default path.
 Read `references/target-config.md` when adding targets, changing
 `connect_mode`, or touching auth/platform validation.
 
+Target keys must use `<IP第3段>.<IP第4段>-<hostname>-<os版本>`. Keep only the
+major OS version (`win11`, `macos14`), not build numbers or release suffixes.
+Example: `2.26-edr-win26-win11` for the documentation-only IP `192.0.2.26`.
+
 ## Agent Workflow
 
 Prefer target-scoped subagents for orchestration:
@@ -112,7 +117,7 @@ Prefer target-scoped subagents for orchestration:
 ```python
 from agent.subagent import TargetSubAgent
 
-agent = TargetSubAgent.from_name("win-dev")
+agent = TargetSubAgent.from_name("2.26-edr-win26-win11")
 agent.ensure_running()
 agent.initialize_mcp()
 print(agent.call_tool("status"))
@@ -141,8 +146,8 @@ changing backend capabilities.
 Use profile-aware tests; do not route a macOS target into Windows HiSec tests.
 
 ```bash
-python test_case/run_tests.py --target win-dev
-python test_case/run_tests.py --target mac-dev
+python test_case/run_tests.py --target 2.26-edr-win26-win11
+python test_case/run_tests.py --target 2.29-edr-mac29-macos14
 python3 -m pytest --collect-only -q test_case/test_integration test_case/test_e2e
 ```
 

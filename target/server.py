@@ -274,7 +274,9 @@ def find_control(
         "control_id is the preferred identifier (unique within the window). "
         "New: auto_id_contains, auto_id_suffix, parent_of, control_type for flexible lookup. "
         "parent_fallback=True (default): if the found control is a Static/Text/Label/Pane leaf, "
-        "click its parent container automatically — use this for Qt 'card button' patterns."
+        "click its parent container automatically — use this for Qt 'card button' patterns. "
+        "For HiSec, always set expected_process_name to HisecEndpointAgent(.exe) or "
+        "EDRClient(.exe) so clicks cannot cross application windows."
     ),
 )
 def click(
@@ -288,11 +290,12 @@ def click(
     parent_of: str = None,
     control_type: str = None,
     parent_fallback: bool = True,
+    expected_process_name: str = None,
 ) -> str:
     result = _backend.click(
         control_id, text, class_name, parent_text, automation_id,
         auto_id_contains, auto_id_suffix, parent_of, control_type,
-        parent_fallback,
+        parent_fallback, expected_process_name,
     )
     return json.dumps(result, ensure_ascii=False)
 
@@ -305,7 +308,8 @@ def click(
         "Prefer click() for Qt UIA controls; use this only when click_input() does not "
         "trigger the UI reaction. "
         "Supports auto_id_contains, auto_id_suffix, parent_of, control_type filters "
-        "and parent_fallback=True (default, redirects Static/Text/Label/Pane to parent)."
+        "and parent_fallback=True (default, redirects Static/Text/Label/Pane to parent). "
+        "HiSec calls must set expected_process_name to distinguish the entry and client windows."
     ),
 )
 def click_target(
@@ -321,6 +325,7 @@ def click_target(
     x_offset: int = 0,
     y_offset: int = 0,
     parent_fallback: bool = True,
+    expected_process_name: str = None,
 ) -> str:
     result = _backend.click_target(
         control_id=control_id,
@@ -335,6 +340,7 @@ def click_target(
         x_offset=x_offset,
         y_offset=y_offset,
         parent_fallback=parent_fallback,
+        expected_process_name=expected_process_name,
     )
     return json.dumps(result, ensure_ascii=False)
 
@@ -346,10 +352,10 @@ def click_target(
         "Use when you have screen-space coordinates, e.g. from dump_tree window_rectangle + control rectangle center."
     ),
 )
-def click_at(x: int, y: int) -> str:
+def click_at(x: int, y: int, expected_process_name: str = None) -> str:
     if _backend is None:
         return _backend_unavailable("click_at")
-    result = _backend.click_at(x, y)
+    result = _backend.click_at(x, y, expected_process_name)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -360,10 +366,10 @@ def click_at(x: int, y: int) -> str:
         "Useful as an action-space primitive when a semantic selector is unavailable."
     ),
 )
-def double_click_at(x: int, y: int) -> str:
+def double_click_at(x: int, y: int, expected_process_name: str = None) -> str:
     if _backend is None:
         return _backend_unavailable("double_click_at")
-    result = _backend.double_click_at(x, y)
+    result = _backend.double_click_at(x, y, expected_process_name)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -374,10 +380,10 @@ def double_click_at(x: int, y: int) -> str:
         "Useful for context menus and fallback action-space automation."
     ),
 )
-def right_click_at(x: int, y: int) -> str:
+def right_click_at(x: int, y: int, expected_process_name: str = None) -> str:
     if _backend is None:
         return _backend_unavailable("right_click_at")
-    result = _backend.right_click_at(x, y)
+    result = _backend.right_click_at(x, y, expected_process_name)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -388,10 +394,10 @@ def right_click_at(x: int, y: int) -> str:
         "Useful as an action-space primitive for tabs and custom widgets."
     ),
 )
-def middle_click_at(x: int, y: int) -> str:
+def middle_click_at(x: int, y: int, expected_process_name: str = None) -> str:
     if _backend is None:
         return _backend_unavailable("middle_click_at")
-    result = _backend.middle_click_at(x, y)
+    result = _backend.middle_click_at(x, y, expected_process_name)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -445,10 +451,15 @@ def scroll(clicks: int, x: int = None, y: int = None) -> str:
         "If window_title_re is not given, uses the currently connected window."
     ),
 )
-def click_window_at(x: int, y: int, window_title_re: str = None) -> str:
+def click_window_at(
+    x: int,
+    y: int,
+    window_title_re: str = None,
+    expected_process_name: str = None,
+) -> str:
     if _backend is None:
         return _backend_unavailable("click_window_at")
-    result = _backend.click_window_at(x, y, window_title_re)
+    result = _backend.click_window_at(x, y, window_title_re, expected_process_name)
     return json.dumps(result, ensure_ascii=False)
 
 

@@ -71,12 +71,12 @@ function Write-Guide {
     Write-Host "     .\deploy.ps1 -Action config-list"
     Write-Host ""
     Write-Host "Target operations:" -ForegroundColor Gray
-    Write-Host "  .\deploy.ps1 -Action deploy -TargetName win-dev" -ForegroundColor Gray
-    Write-Host "  .\deploy.ps1 -Action install -TargetName win-dev" -ForegroundColor Gray
-    Write-Host "  .\deploy.ps1 -Action up -TargetName win-dev" -ForegroundColor Gray
-    Write-Host "  .\deploy.ps1 -Action status -TargetName win-dev" -ForegroundColor Gray
-    Write-Host "  .\deploy.ps1 -Action smoke -TargetName win-dev -Gui" -ForegroundColor Gray
-    Write-Host "  .\deploy.ps1 -Action down -TargetName win-dev" -ForegroundColor Gray
+    Write-Host "  .\deploy.ps1 -Action deploy -TargetName 2.26-edr-win26-win11" -ForegroundColor Gray
+    Write-Host "  .\deploy.ps1 -Action install -TargetName 2.26-edr-win26-win11" -ForegroundColor Gray
+    Write-Host "  .\deploy.ps1 -Action up -TargetName 2.26-edr-win26-win11" -ForegroundColor Gray
+    Write-Host "  .\deploy.ps1 -Action status -TargetName 2.26-edr-win26-win11" -ForegroundColor Gray
+    Write-Host "  .\deploy.ps1 -Action smoke -TargetName 2.26-edr-win26-win11 -Gui" -ForegroundColor Gray
+    Write-Host "  .\deploy.ps1 -Action down -TargetName 2.26-edr-win26-win11" -ForegroundColor Gray
     Write-Host ""
     Write-Host "Notes:" -ForegroundColor Gray
     Write-Host "  - Uses config/targets.local.json or EDR_WD_CONFIG." -ForegroundColor Gray

@@ -224,6 +224,36 @@ class WindowsPywinautoBackend:
             return None
         return check
 
+    def _ensure_click_process(self, expected_process_name: Optional[str]) -> Optional[dict]:
+        state = self._connected_window_state()
+        connected = state.get("process_name") if state.get("ok") else None
+        normalize = lambda value: str(value or "").lower().removesuffix(".exe")
+        connected_normalized = normalize(connected)
+        if not expected_process_name:
+            if connected_normalized in {"hisecendpointagent", "edrclient"}:
+                return {
+                    "ok": False,
+                    "code": "click_context_required",
+                    "error": (
+                        "HiSec clicks require expected_process_name to distinguish "
+                        "HisecEndpointAgent.exe from EDRClient.exe"
+                    ),
+                    "connected_process_name": connected,
+                }
+            return None
+        if normalize(connected) == normalize(expected_process_name):
+            return None
+        return {
+            "ok": False,
+            "code": "click_context_mismatch",
+            "error": (
+                f"Click requires process {expected_process_name!r}, "
+                f"but the connected process is {connected!r}"
+            ),
+            "expected_process_name": expected_process_name,
+            "connected_process_name": connected,
+        }
+
     # ── Always-available ──────────────────────────────────────────────────────
 
     def list_windows(self) -> dict:
@@ -275,32 +305,42 @@ class WindowsPywinautoBackend:
     def screenshot(self, path: Optional[str] = None) -> dict:
         return self._gui.screenshot(path)  # type: ignore[arg-type]
 
-    def click_at(self, x: int, y: int) -> dict:
+    def click_at(self, x: int, y: int, expected_process_name: Optional[str] = None) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
-        return self._gui.click_at(x, y)
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
+        result = self._gui.click_at(x, y)
+        result.setdefault("process_name", self._connected_window_state().get("process_name"))
+        return result
 
-    def double_click_at(self, x: int, y: int) -> dict:
+    def double_click_at(self, x: int, y: int, expected_process_name: Optional[str] = None) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
         try:
             pyautogui.doubleClick(x=int(x), y=int(y), button="left")
             return {"ok": True, "method": "pyautogui.doubleClick", "x": int(x), "y": int(y)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def right_click_at(self, x: int, y: int) -> dict:
+    def right_click_at(self, x: int, y: int, expected_process_name: Optional[str] = None) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
         try:
             pyautogui.rightClick(x=int(x), y=int(y))
             return {"ok": True, "method": "pyautogui.rightClick", "x": int(x), "y": int(y)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def middle_click_at(self, x: int, y: int) -> dict:
+    def middle_click_at(self, x: int, y: int, expected_process_name: Optional[str] = None) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
         try:
             pyautogui.middleClick(x=int(x), y=int(y))
             return {"ok": True, "method": "pyautogui.middleClick", "x": int(x), "y": int(y)}
@@ -427,19 +467,26 @@ class WindowsPywinautoBackend:
         parent_of: Optional[str] = None,
         control_type: Optional[str] = None,
         parent_fallback: bool = True,
+        expected_process_name: Optional[str] = None,
         timeout: float = 5.0,
     ) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
         # `timeout` is accepted for backend uniformity but WindowsGUI.click
         # does not yet take it — drop it from the positional args.
         # The WindowsGUI signatures predate PEP 604 (no Optional[]), so all
         # Optional -> non-Optional assignments are intentional. # type: ignore[call-overload]
-        return self._gui.click(  # type: ignore[call-overload]
+        result = self._gui.click(  # type: ignore[call-overload]
             control_id, text, class_name, parent_text, automation_id,
             auto_id_contains, auto_id_suffix, parent_of, control_type,
             parent_fallback,
         )
+        if isinstance(result, dict):
+            state = self._connected_window_state()
+            result.setdefault("process_name", state.get("process_name"))
+        return result
 
     def click_target(
         self,
@@ -455,21 +502,38 @@ class WindowsPywinautoBackend:
         x_offset: int = 0,
         y_offset: int = 0,
         parent_fallback: bool = True,
+        expected_process_name: Optional[str] = None,
         timeout: float = 5.0,
     ) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
         # Same — drop timeout; click_target does not take it.
-        return self._gui.click_target(  # type: ignore[call-overload]
+        result = self._gui.click_target(  # type: ignore[call-overload]
             control_id, text, class_name, parent_text, automation_id,
             auto_id_contains, auto_id_suffix, parent_of, control_type,
             x_offset, y_offset, parent_fallback,
         )
+        if isinstance(result, dict):
+            state = self._connected_window_state()
+            result.setdefault("process_name", state.get("process_name"))
+        return result
 
-    def click_window_at(self, x: int, y: int, window_title_re: Optional[str] = None) -> dict:
+    def click_window_at(
+        self,
+        x: int,
+        y: int,
+        window_title_re: Optional[str] = None,
+        expected_process_name: Optional[str] = None,
+    ) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
-        return self._gui.click_window_at(x, y, window_title_re)  # type: ignore[arg-type]
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
+        result = self._gui.click_window_at(x, y, window_title_re)  # type: ignore[arg-type]
+        result.setdefault("process_name", self._connected_window_state().get("process_name"))
+        return result
 
     def type_text(
         self,

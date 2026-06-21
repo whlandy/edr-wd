@@ -13,14 +13,14 @@ The names are intentionally symmetric: `test_<platform>_hisec_e2e.py`.
 Run the macOS HiSec E2E directly:
 
 ```bash
-EDR_WD_TARGET=mac-dev python -m pytest test_case/test_e2e/test_macos_hisec_e2e.py -v
+EDR_WD_TARGET=2.29-edr-mac29-macos14 python -m pytest test_case/test_e2e/test_macos_hisec_e2e.py -v
 ```
 
 Run all E2E tests for the active target:
 
 ```bash
-EDR_WD_TARGET=mac-dev python -m pytest test_case/test_e2e -v
-EDR_WD_TARGET=win-dev python -m pytest test_case/test_e2e -v
+EDR_WD_TARGET=2.29-edr-mac29-macos14 python -m pytest test_case/test_e2e -v
+EDR_WD_TARGET=2.26-edr-win26-win11 python -m pytest test_case/test_e2e -v
 ```
 
 Platform-specific tests guard themselves by backend, so the wrong-platform file

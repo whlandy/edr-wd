@@ -1,21 +1,20 @@
 {
-  "_comment": "EDR-WD 多目标配置示例 — 复制为 targets.local.json 并填入真实值",
-  "_comment2": "不要提交 targets.local.json 到仓库",
-  "_comment3": "auth.password 和 auth.password_env 互斥，不能同时存在",
+  "_comment": "复制为 targets.local.json；target 名格式为 <IP第3段>.<IP第4段>-<hostname>-<os版本>",
+  "_comment2": "不要提交 targets.local.json；内网 target 默认使用 Paramiko + inline password",
 
-  "default_target": "win-dev",
+  "default_target": "2.26-edr-win26-win11",
 
   "targets": {
-
-    "win-dev": {
-      "_comment": "Windows target — password inline（内网环境推荐）",
-      "description": "开发环境 Windows 虚拟机（password inline）",
-
+    "2.26-edr-win26-win11": {
+      "description": "Windows 11 HiSec target",
       "platform": "windows",
       "app_profile": "windows_hisec",
-
+      "identity": {
+        "hostname": "edr-win26",
+        "os_version": "win11"
+      },
       "ssh": {
-        "host": "<TARGET_IP>",
+        "host": "192.0.2.26",
         "port": 22,
         "user": "<TARGET_USER>",
         "auth": {
@@ -23,7 +22,6 @@
           "password": "<TARGET_PASSWORD>"
         }
       },
-
       "mcp": {
         "host": "0.0.0.0",
         "port": 8765,
@@ -34,7 +32,6 @@
           "local_port": 18765
         }
       },
-
       "windows": {
         "python_path": "C:\\Program Files\\Python313\\python.exe",
         "target_root": "C:\\Users\\<TARGET_USER>\\Desktop\\edr-wd\\target",
@@ -43,87 +40,16 @@
       }
     },
 
-    "win-dev-env": {
-      "_comment": "Windows target — password_env（环境变量方式）",
-      "description": "开发环境 Windows 虚拟机（password_env）",
-
-      "platform": "windows",
-      "app_profile": "windows_hisec",
-
-      "ssh": {
-        "host": "<TARGET_IP>",
-        "port": 22,
-        "user": "<TARGET_USER>",
-        "auth": {
-          "type": "password",
-          "password_env": "EDR_WD_WIN_DEV_PASSWORD"
-        }
-      },
-
-      "mcp": {
-        "host": "0.0.0.0",
-        "port": 8765,
-        "path": "/mcp",
-        "connect_mode": "direct",
-        "tunnel": {
-          "enabled": false,
-          "local_port": 18765
-        }
-      },
-
-      "windows": {
-        "python_path": "C:\\Program Files\\Python313\\python.exe",
-        "target_root": "C:\\Users\\<TARGET_USER>\\Desktop\\edr-wd\\target",
-        "task_name": "StartEDRMCP",
-        "run_with_highest_privileges": true
-      }
-    },
-
-    "win-dev-key": {
-      "_comment": "Windows target — key auth（兼容示例；仍由 Paramiko 执行）",
-      "description": "开发环境 Windows 虚拟机（key auth compatibility）",
-
-      "platform": "windows",
-      "app_profile": "windows_hisec",
-
-      "ssh": {
-        "host": "<TARGET_IP>",
-        "port": 22,
-        "user": "<TARGET_USER>",
-        "auth": {
-          "type": "key",
-          "key_path": "C:\\Users\\<TARGET_USER>\\.ssh\\id_edr_wd"
-        }
-      },
-
-      "mcp": {
-        "host": "0.0.0.0",
-        "port": 8765,
-        "path": "/mcp",
-        "connect_mode": "direct",
-        "tunnel": {
-          "enabled": false,
-          "local_port": 18765
-        }
-      },
-
-      "windows": {
-        "python_path": "C:\\Program Files\\Python313\\python.exe",
-        "target_root": "C:\\Users\\<TARGET_USER>\\Desktop\\edr-wd\\target",
-        "task_name": "StartEDRMCP",
-        "run_with_highest_privileges": true
-      }
-    },
-
-    "mac-dev": {
-      "_comment": "macOS target — password inline；lifecycle 走 launchd",
-      "description": "macOS 开发机（password inline，LaunchAgent）",
-
+    "2.29-edr-mac29-macos14": {
+      "description": "macOS 14 HiSec target",
       "platform": "macos",
-      "app_profile": "macos_generic",
-
+      "app_profile": "macos_hisec",
+      "identity": {
+        "hostname": "edr-mac29",
+        "os_version": "macos14"
+      },
       "ssh": {
-        "host": "<TARGET_IP>",
+        "host": "192.0.2.29",
         "port": 22,
         "user": "<TARGET_USER>",
         "auth": {
@@ -131,7 +57,6 @@
           "password": "<TARGET_PASSWORD>"
         }
       },
-
       "mcp": {
         "host": "0.0.0.0",
         "port": 8765,
@@ -142,43 +67,6 @@
           "local_port": 18765
         }
       },
-
-      "macos": {
-        "python_path": "/opt/homebrew/bin/python3",
-        "root": "/Users/<TARGET_USER>/edr-wd/target",
-        "backend": "macos_accessibility",
-        "launch_name": "com.edr-wd.target"
-      }
-    },
-
-    "mac-dev-key": {
-      "_comment": "macOS target — key auth（兼容示例；仍由 Paramiko 执行）",
-      "description": "macOS 开发机（key auth compatibility，LaunchAgent）",
-
-      "platform": "macos",
-      "app_profile": "macos_generic",
-
-      "ssh": {
-        "host": "<TARGET_IP>",
-        "port": 22,
-        "user": "<TARGET_USER>",
-        "auth": {
-          "type": "key",
-          "key_path": "/Users/<TARGET_USER>/.ssh/id_edr_wd"
-        }
-      },
-
-      "mcp": {
-        "host": "0.0.0.0",
-        "port": 8765,
-        "path": "/mcp",
-        "connect_mode": "direct",
-        "tunnel": {
-          "enabled": false,
-          "local_port": 18765
-        }
-      },
-
       "macos": {
         "python_path": "/opt/homebrew/bin/python3",
         "root": "/Users/<TARGET_USER>/edr-wd/target",

@@ -63,7 +63,8 @@ sudo -n /Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh
    entry-window controls and `EDRClient.exe` / `EDRClient` for client-window
    controls.
 3. **dump_tree(max_depth=...)** — inspect controls and select a unique node.
-4. **click(...)** — prefer semantic component activation. On Windows, a precise
+4. **click(...)** — pass the connected process as `expected_process_name` and
+   prefer semantic component activation. On Windows, a precise
    UIA click should return `uia_invoke` or `uia_toggle` when the control exposes
    those patterns.
 5. **dump_tree(...)** or **screenshot(...)** — verify the resulting page.

@@ -20,17 +20,49 @@ python -m agent.target_config --init
 python -m agent.target_config --validate
 python -m agent.target_config --list
 python -m agent.target_config --guide
+python -m agent.target_config --suggest-names
+python -m agent.target_config --rename-target <OLD_TARGET_NAME>
 ```
 
 ## Minimal Target Shape
 
+Target keys use this canonical format:
+
+```text
+<IP第3段>.<IP第4段>-<hostname>-<os版本>
+```
+
+Use only the major OS version, such as `win11` or `macos14`; do not include a
+Windows build number or release suffix. Hostname and OS version are normalized
+to lowercase letters, digits, and hyphens. For example, documentation IP `192.0.2.26`,
+hostname `EDR-WIN26`, and OS version `win11` produce
+`2.26-edr-win26-win11`.
+
+To migrate an existing local config after adding `identity`, preview and apply
+the key rename without printing credentials:
+
+```bash
+python -m agent.target_config --suggest-names
+python -m agent.target_config --rename-target <OLD_TARGET_NAME>
+```
+
+`probe_target()` reads the live hostname and OS major version through SSH and
+compares the observed canonical name with the selected config key. A mismatch
+returns `target_identity_mismatch` before deployment continues. Existing
+configs without canonical identity remain runnable but report
+`verified=false` until migrated.
+
 ```json
 {
-  "default_target": "win-dev",
+  "default_target": "2.26-edr-win26-win11",
   "targets": {
-    "win-dev": {
+    "2.26-edr-win26-win11": {
       "platform": "windows",
       "app_profile": "windows_hisec",
+      "identity": {
+        "hostname": "EDR-WIN26",
+        "os_version": "win11"
+      },
       "ssh": {
         "host": "<TARGET_IP>",
         "port": 22,
@@ -61,6 +93,10 @@ For macOS targets use:
 {
   "platform": "macos",
   "app_profile": "macos_generic",
+  "identity": {
+    "hostname": "EDR-MAC29",
+    "os_version": "macos14"
+  },
   "macos": {
     "python_path": "/opt/homebrew/bin/python3",
     "root": "<REMOTE_REPO_ROOT>",

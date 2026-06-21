@@ -9,7 +9,7 @@
 #   smoke    Run the MCP smoke test against the configured MCP URL
 #
 # Environment:
-#   EDR_WD_TARGET_NAME   Target name from config (default: win-dev)
+#   EDR_WD_TARGET_NAME   Target name from config (default: config.default_target)
 #   EDR_WD_LOCAL_PORT    Local tunnel port (default: 18765)
 #   EDR_WD_TARGET_DIR    Remote repo path (default: C:/path/to/edr-wd)
 #   EDR_WD_START_MODE    Windows start mode: auto|process|scheduled-task (default: auto)
@@ -20,7 +20,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_PORT="${EDR_WD_LOCAL_PORT:-18765}"
 EDR_WD_TARGET_DIR="${EDR_WD_TARGET_DIR:-C:/path/to/edr-wd}"
 START_MODE="${EDR_WD_START_MODE:-auto}"
-TARGET_NAME="${EDR_WD_TARGET_NAME:-win-dev}"
+TARGET_NAME="${EDR_WD_TARGET_NAME:-}"
+if [ -z "$TARGET_NAME" ]; then
+    TARGET_NAME="$({
+        cd "$SCRIPT_DIR/.." || exit 1
+        python - <<'PY'
+from agent.target_config import TargetConfig
+
+name = TargetConfig().get_default_target()
+if not name:
+    raise SystemExit("default_target is not configured")
+print(name)
+PY
+    })"
+fi
 
 usage() {
     cat <<EOF

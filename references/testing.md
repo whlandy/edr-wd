@@ -15,8 +15,8 @@ python target/tests/smoke_mcp_client.py --base-url http://127.0.0.1:8765/mcp --g
 ## Profile-Dispatched Suites
 
 ```bash
-python test_case/run_tests.py --target win-dev
-python test_case/run_tests.py --target mac-dev
+python test_case/run_tests.py --target 2.26-edr-win26-win11
+python test_case/run_tests.py --target 2.29-edr-mac29-macos14
 ```
 
 The runner dispatches by `target.app_profile` or platform default:

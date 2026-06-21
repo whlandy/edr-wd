@@ -2,7 +2,7 @@
 run_macos_hisec.py — macOS HiSecEndpoint.app E2E test suite.
 
 Target chain:
-  Mac agent → mac-dev → macOS MCP server
+  Mac agent -> 2.29-edr-mac29-macos14 -> macOS MCP server
     → macos_accessibility backend
       → /Applications/HiSecEndpoint.app
       → HiSecEndpointAgent          (main window: 华为智能终端安全系统)

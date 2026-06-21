@@ -335,6 +335,35 @@ class MacOSAccessibilityBackend:
             return None
         return check
 
+    def _ensure_click_process(self, expected_process_name: Optional[str]) -> Optional[dict]:
+        connected = self._connected_process_name()
+        normalize = lambda value: str(value or "").lower().removesuffix(".exe")
+        connected_normalized = normalize(connected)
+        if not expected_process_name:
+            if connected_normalized in {"hisecendpointagent", "edrclient"}:
+                return {
+                    "ok": False,
+                    "code": "click_context_required",
+                    "error": (
+                        "HiSec clicks require expected_process_name to distinguish "
+                        "HiSecEndpointAgent from EDRClient"
+                    ),
+                    "connected_process_name": connected,
+                }
+            return None
+        if normalize(connected) == normalize(expected_process_name):
+            return None
+        return {
+            "ok": False,
+            "code": "click_context_mismatch",
+            "error": (
+                f"Click requires process {expected_process_name!r}, "
+                f"but the connected process is {connected!r}"
+            ),
+            "expected_process_name": expected_process_name,
+            "connected_process_name": connected,
+        }
+
     # ── Always-available ──────────────────────────────────────────────────────
 
     def screenshot(self, path: Optional[str] = None) -> dict:
@@ -1219,7 +1248,7 @@ class MacOSAccessibilityBackend:
             ret["diagnostics"] = diagnostics
         return ret
 
-    def click_at(self, x: int, y: int) -> dict:
+    def click_at(self, x: int, y: int, expected_process_name: Optional[str] = None) -> dict:
         """
         Click at absolute screen coordinates (x, y).
 
@@ -1247,6 +1276,8 @@ class MacOSAccessibilityBackend:
         """
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
         import os as _os
         allow_real = _os.environ.get("EDR_WD_ALLOW_REAL_CLICKS", "0") == "1"
         if not allow_real:
@@ -1288,9 +1319,11 @@ class MacOSAccessibilityBackend:
             }
         return {"ok": True, "method": "osascript", "x": x, "y": y}
 
-    def double_click_at(self, x: int, y: int) -> dict:
+    def double_click_at(self, x: int, y: int, expected_process_name: Optional[str] = None) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
         if not _allow_real_mouse_actions():
             return {
                 "ok": True,
@@ -1305,9 +1338,11 @@ class MacOSAccessibilityBackend:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def right_click_at(self, x: int, y: int) -> dict:
+    def right_click_at(self, x: int, y: int, expected_process_name: Optional[str] = None) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
         if not _allow_real_mouse_actions():
             return {
                 "ok": True,
@@ -1322,9 +1357,11 @@ class MacOSAccessibilityBackend:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def middle_click_at(self, x: int, y: int) -> dict:
+    def middle_click_at(self, x: int, y: int, expected_process_name: Optional[str] = None) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
         if not _allow_real_mouse_actions():
             return {
                 "ok": True,
@@ -1841,7 +1878,14 @@ return outText
             "count": len(controls),
         }
 
-    def _click_control_center(self, control: dict, *, x_offset: int = 0, y_offset: int = 0) -> dict:
+    def _click_control_center(
+        self,
+        control: dict,
+        *,
+        x_offset: int = 0,
+        y_offset: int = 0,
+        expected_process_name: Optional[str] = None,
+    ) -> dict:
         rect = control.get("rectangle")
         if not isinstance(rect, dict):
             return {"ok": False, "error": "matched control has no rectangle", "control": control}
@@ -1851,7 +1895,7 @@ return outText
             return {"ok": False, "error": "matched control has an empty rectangle", "control": control}
         x = int(rect.get("x") or 0) + (w // 2) + int(x_offset)
         y = int(rect.get("y") or 0) + (h // 2) + int(y_offset)
-        click_result = self.click_at(x, y)
+        click_result = self.click_at(x, y, expected_process_name)
         click_result["matched_control"] = control
         click_result["strategy"] = "ax_center_click"
         return click_result
@@ -1868,8 +1912,11 @@ return outText
         parent_of: Optional[str] = None,
         control_type: Optional[str] = None,
         parent_fallback: bool = True,
+        expected_process_name: Optional[str] = None,
         timeout: float = 5.0,
     ) -> dict:
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
         err, control = self._find_ax_control(
             control_id=control_id,
             text=text,
@@ -1883,7 +1930,11 @@ return outText
         )
         if err:
             return err
-        return self._click_control_center(control)
+        result = self._click_control_center(
+            control, expected_process_name=expected_process_name
+        )
+        result.setdefault("process_name", self._connected_process_name())
+        return result
 
     def click_target(
         self,
@@ -1899,8 +1950,11 @@ return outText
         x_offset: int = 0,
         y_offset: int = 0,
         parent_fallback: bool = True,
+        expected_process_name: Optional[str] = None,
         timeout: float = 5.0,
     ) -> dict:
+        if (context_error := self._ensure_click_process(expected_process_name)) is not None:
+            return context_error
         err, control = self._find_ax_control(
             control_id=control_id,
             text=text,
@@ -1914,7 +1968,14 @@ return outText
         )
         if err:
             return err
-        return self._click_control_center(control, x_offset=x_offset, y_offset=y_offset)
+        result = self._click_control_center(
+            control,
+            x_offset=x_offset,
+            y_offset=y_offset,
+            expected_process_name=expected_process_name,
+        )
+        result.setdefault("process_name", self._connected_process_name())
+        return result
 
     def find_control(
         self,
@@ -1952,10 +2013,16 @@ return outText
             "error": None if matches else "No macOS AX control matched selector",
         }
 
-    def click_window_at(self, x: int, y: int, window_title_re: Optional[str] = None) -> dict:
+    def click_window_at(
+        self,
+        x: int,
+        y: int,
+        window_title_re: Optional[str] = None,
+        expected_process_name: Optional[str] = None,
+    ) -> dict:
         # No window-relative coordinates on macOS without a fuller AX bridge.
         # Forward to click_at as best-effort.
-        return self.click_at(x, y)
+        return self.click_at(x, y, expected_process_name)
 
     def type_text(
         self,

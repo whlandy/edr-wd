@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from agent.ssh_runner import run_ssh, scp_to
+from agent.target_config import verify_observed_identity
 
 AGENT_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_SCRIPTS = AGENT_ROOT / "target" / "scripts" / "macos"
@@ -104,6 +105,39 @@ class MacOSLifecycle:
         stages["ssh"] = {"ok": rc == 0, "output": out.strip()[:200]}
         if rc != 0:
             return self._err("probe", "ssh_failed", out[:300], details=stages)
+
+        rc, out = run_ssh(
+            ssh_cfg,
+            "scutil --get LocalHostName && sw_vers -productVersion",
+            timeout=15,
+        )
+        identity_lines = [line.strip() for line in out.splitlines() if line.strip()]
+        if rc != 0 or len(identity_lines) < 2:
+            return self._err(
+                "probe",
+                "target_identity_probe_failed",
+                "Could not read macOS hostname and major version",
+                details=stages,
+            )
+        try:
+            identity = verify_observed_identity(
+                cfg, "macos", identity_lines[0], identity_lines[1]
+            )
+        except ValueError as exc:
+            return self._err(
+                "probe", "target_identity_probe_failed", str(exc), details=stages
+            )
+        stages["identity"] = identity
+        if not identity["ok"]:
+            return self._err(
+                "probe",
+                "target_identity_mismatch",
+                (
+                    f"Configured target '{identity['configured_name']}' does not match "
+                    f"live target '{identity['observed_name']}'"
+                ),
+                details=stages,
+            )
 
         # Python
         rc, out = run_ssh(

@@ -12,15 +12,15 @@ Usage:
     tc = TargetConfig("config/custom.json")  # explicit path
 
     # Basic queries
-    tc.list_targets()                      # → {"win-dev": {...}, "win-prod": {...}}
-    tc.get_target("win-dev")              # → full target config dict
+    tc.list_targets()                      # → {"2.26-edr-win26-win11": {...}}
+    tc.get_target("2.26-edr-win26-win11")  # → full target config dict
     tc.get_default_target()               # → target name string
 
     # URL builder
-    tc.build_mcp_url("win-dev")          # → "http://<TARGET_IP>:8765/mcp"
+    tc.build_mcp_url("2.26-edr-win26-win11")  # → "http://<TARGET_IP>:8765/mcp"
 
     # Auth resolver (prefers inline password; password_env remains supported)
-    tc.resolve_auth("win-dev")            # → {"host": ..., "user": ..., "auth": {"type": "password", "password": "***"}}
+    tc.resolve_auth("2.26-edr-win26-win11")  # → resolved Paramiko SSH config
 
     # CLI
     python -m agent.target_config --list
@@ -31,11 +31,95 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
+
+
+def _normalize_name_part(value: str, field: str) -> str:
+    """Normalize hostname/OS metadata for use in a target config key."""
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(value).strip().lower()).strip("-")
+    if not normalized:
+        raise ValueError(f"{field} must contain at least one letter or digit")
+    return normalized
+
+
+def normalize_os_version(value: str) -> str:
+    """Return a major-only OS label such as ``win11`` or ``macos14``."""
+    compact = re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+    match = re.fullmatch(r"(?:win|windows)(\d{1,2})", compact)
+    if match:
+        return f"win{int(match.group(1))}"
+    match = re.fullmatch(r"macos(\d{1,2})", compact)
+    if match:
+        return f"macos{int(match.group(1))}"
+    raise ValueError(
+        "os_version must contain only the major OS version "
+        "(for example: win11 or macos14)"
+    )
+
+
+def normalize_observed_os_version(platform: str, value: str) -> str:
+    """Convert an OS caption/version observed on a target to the config label."""
+    if platform == "windows":
+        match = re.search(r"windows\s*(\d{1,2})", value, flags=re.IGNORECASE)
+        if match:
+            return f"win{int(match.group(1))}"
+    elif platform == "macos":
+        match = re.search(r"(\d{1,2})(?:\.\d+)*", value)
+        if match:
+            return f"macos{int(match.group(1))}"
+    raise ValueError(f"cannot determine {platform} major version from {value!r}")
+
+
+def build_target_name(ip: str, hostname: str, os_version: str) -> str:
+    """Build ``<IP3>.<IP4>-<hostname>-<os-version>`` from target identity."""
+    try:
+        address = ipaddress.ip_address(str(ip).strip())
+    except ValueError as exc:
+        raise ValueError(f"target IP must be a valid IPv4 address: {ip!r}") from exc
+    if address.version != 4:
+        raise ValueError("target naming currently requires an IPv4 address")
+
+    octets = str(address).split(".")
+    host_part = _normalize_name_part(hostname, "hostname")
+    os_part = normalize_os_version(os_version)
+    return f"{octets[2]}.{octets[3]}-{host_part}-{os_part}"
+
+
+def verify_observed_identity(
+    cfg: dict,
+    platform: str,
+    hostname: str,
+    observed_os_version: str,
+) -> dict:
+    """Compare live target identity with the configured canonical target name."""
+    configured_name = cfg.get("_target_name")
+    if not cfg.get("_canonical_name") or not configured_name:
+        return {
+            "ok": True,
+            "verified": False,
+            "reason": "canonical identity is not configured",
+        }
+
+    os_version = normalize_observed_os_version(platform, observed_os_version)
+    observed_name = build_target_name(
+        cfg.get("ssh", {}).get("host", ""),
+        hostname,
+        os_version,
+    )
+    return {
+        "ok": observed_name == configured_name,
+        "verified": True,
+        "configured_name": configured_name,
+        "observed_name": observed_name,
+        "hostname": _normalize_name_part(hostname, "hostname"),
+        "os_version": os_version,
+    }
 
 # ── Config discovery ──────────────────────────────────────────────────────────
 
@@ -85,12 +169,16 @@ def _default_config_path() -> Path:
 # ── Minimal skeleton (used by --init) ───────────────────────────────────────
 
 SKELETON = {
-    "default_target": "win-dev",
+    "default_target": "2.26-edr-win26-win11",
     "targets": {
-        "win-dev": {
+        "2.26-edr-win26-win11": {
             "description": "",
             "platform": "windows",
             "app_profile": "windows_hisec",
+            "identity": {
+                "hostname": "edr-win26",
+                "os_version": "win11",
+            },
             "ssh": {
                 "host": "",
                 "port": 22,
@@ -111,10 +199,14 @@ SKELETON = {
                 "run_with_highest_privileges": True,
             },
         },
-        "mac-dev": {
+        "2.29-edr-mac29-macos14": {
             "description": "",
             "platform": "macos",
             "app_profile": "macos_generic",
+            "identity": {
+                "hostname": "edr-mac29",
+                "os_version": "macos14",
+            },
             "ssh": {
                 "host": "",
                 "port": 22,
@@ -285,19 +377,24 @@ def _print_guide() -> None:
     print("")
     print("2. Edit config/targets.local.json with real values:")
     print("   - default_target")
+    print("   - identity.hostname / identity.os_version (major only, e.g. win11)")
     print("   - ssh.host / ssh.user / ssh.auth")
     print("   - ssh.auth.type=password with ssh.auth.password for intranet targets")
     print("   - mcp.host / mcp.port / mcp.path / mcp.connect_mode")
     print("   - windows.* for platform=windows")
     print("   - macos.* for platform=macos")
     print("")
-    print("3. Validate the file:")
+    print("3. Preview or migrate target names:")
+    print("   python -m agent.target_config --suggest-names")
+    print("   python -m agent.target_config --rename-target <OLD_TARGET_NAME>")
+    print("")
+    print("4. Validate the file:")
     print("   python -m agent.target_config --validate")
     print("")
-    print("4. Inspect targets:")
+    print("5. Inspect targets:")
     print("   python -m agent.target_config --list")
     print("")
-    print("5. Use the deployment entrypoints:")
+    print("6. Use the deployment entrypoints:")
     print("   Windows agent: agent/deploy.ps1")
     print("   Windows target: target/deploy.ps1")
     print("   macOS/Linux agent: agent/edr-wd.sh")
@@ -397,6 +494,16 @@ class TargetConfig:
         """
         t = self.get_target(name)
         return t.get("app_profile")
+
+    def get_canonical_target_name(self, name: str | None = None) -> str:
+        """Return the target name derived from its IPv4 address and identity."""
+        t = self.get_target(name)
+        identity = t.get("identity", {})
+        return build_target_name(
+            t.get("ssh", {}).get("host", ""),
+            identity.get("hostname", ""),
+            identity.get("os_version", ""),
+        )
 
     # ── MCP URL builder ───────────────────────────────────────────────────────
 
@@ -509,7 +616,37 @@ class TargetConfig:
         t = self.get_target(name)
         ssh = self.resolve_auth(name)
         mcp_url = self.build_mcp_url(name)
-        return {**t, "ssh": ssh, "_mcp_url": mcp_url}
+        try:
+            canonical_name = self.get_canonical_target_name(name)
+        except ValueError:
+            # Keep existing local configs operational while exposing that no
+            # canonical identity is available yet.
+            canonical_name = None
+        return {
+            **t,
+            "ssh": ssh,
+            "_mcp_url": mcp_url,
+            "_canonical_name": canonical_name,
+        }
+
+    def rename_target(self, old_name: str, new_name: str | None = None) -> str:
+        """Rename a target key and update default_target, then save the config."""
+        targets = self._data.get("targets", {})
+        if old_name not in targets:
+            raise KeyError(f"Target '{old_name}' not found. Available: {list(targets)}")
+        canonical_name = new_name or self.get_canonical_target_name(old_name)
+        if canonical_name != old_name and canonical_name in targets:
+            raise ConfigError(f"Target '{canonical_name}' already exists")
+
+        if canonical_name != old_name:
+            items = []
+            for name, target in targets.items():
+                items.append((canonical_name if name == old_name else name, target))
+            self._data["targets"] = dict(items)
+            if self.get_default_target() == old_name:
+                self._data["default_target"] = canonical_name
+            self.save()
+        return canonical_name
 
     # ── Init ──────────────────────────────────────────────────────────────────
 
@@ -549,8 +686,9 @@ class TargetConfig:
 
         for name, t in targets.items():
             raw = dict(t)
+            is_legacy = "server" in raw or "connection" in raw
             # Check for legacy schema and warn once during validation
-            if "server" in raw or "connection" in raw:
+            if is_legacy:
                 errors.append(
                     f"[{name}] uses legacy pre-2026 schema "
                     "(server/connection/task/paths fields). "
@@ -594,6 +732,26 @@ class TargetConfig:
                     "or 'key' (compatibility)"
                 )
 
+            identity = t.get("identity", {})
+            if not is_legacy and not identity.get("hostname"):
+                errors.append(f"[{name}] identity.hostname is required")
+            if not is_legacy and not identity.get("os_version"):
+                errors.append(f"[{name}] identity.os_version is required (for example: win11)")
+            if not is_legacy and ssh.get("host") and identity.get("hostname") and identity.get("os_version"):
+                try:
+                    canonical_name = build_target_name(
+                        ssh["host"],
+                        identity["hostname"],
+                        identity["os_version"],
+                    )
+                    if name != canonical_name:
+                        errors.append(
+                            f"[{name}] target name must be '{canonical_name}' "
+                            "(<IP3>.<IP4>-<hostname>-<os-version>)"
+                        )
+                except ValueError as exc:
+                    errors.append(f"[{name}] cannot build canonical target name: {exc}")
+
             # mcp
             mcp = t.get("mcp", {})
             port = mcp.get("port")
@@ -619,6 +777,8 @@ def main() -> None:
     group.add_argument("--validate", action="store_true", help="Validate config")
     group.add_argument("--init", action="store_true", help="Initialize skeleton config")
     group.add_argument("--guide", action="store_true", help="Show a concise config setup guide")
+    group.add_argument("--suggest-names", action="store_true", help="Show canonical target-name suggestions")
+    group.add_argument("--rename-target", metavar="NAME", help="Rename one target to its canonical name")
     parser.add_argument("--force", action="store_true", help="Overwrite existing config with --init")
     args = parser.parse_args()
 
@@ -637,6 +797,25 @@ def main() -> None:
         _print_guide()
         sys.exit(0)
 
+    if args.suggest_names:
+        failed = False
+        for name in tc.list_targets():
+            try:
+                print(f"{name} -> {tc.get_canonical_target_name(name)}")
+            except ValueError as exc:
+                failed = True
+                print(f"{name} -> ERROR: {exc}")
+        sys.exit(1 if failed else 0)
+
+    if args.rename_target:
+        try:
+            new_name = tc.rename_target(args.rename_target)
+        except (ConfigError, KeyError, ValueError) as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+        print(f"Renamed: {args.rename_target} -> {new_name}")
+        sys.exit(0)
+
     if args.list:
         targets = tc.list_targets()
         default = tc.get_default_target()
@@ -647,7 +826,14 @@ def main() -> None:
                 host = t.get("ssh", {}).get("host") or "—"
                 platform = t.get("platform", "windows")
                 profile = t.get("app_profile") or "—"
-                print(f"  {name}{marker}  platform={platform}  profile={profile}  host={host}  desc={desc}")
+                try:
+                    canonical = tc.get_canonical_target_name(name)
+                except (KeyError, ValueError):
+                    canonical = "invalid identity"
+                print(
+                    f"  {name}{marker}  platform={platform}  profile={profile} "
+                    f"host={host}  canonical={canonical}  desc={desc}"
+                )
         else:
             example = _find_example()
             if example:
