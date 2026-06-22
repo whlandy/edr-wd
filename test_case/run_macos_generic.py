@@ -19,6 +19,7 @@ Tests:
   - is_window_open no filter    (verifies error-on-empty-filter contract)
   - wait_window timeout         (verifies timeout path)
   - activate_app Finder         (verifies osascript activate path)
+  - activate_edr HiSec          (verifies HiSecEndpoint window-pair activation)
   - connect by process_name     (verifies connect/bundle_id path)
   - click_at basic              (verifies coordinate click — best-effort)
   - action primitives           (verifies double/right/middle click, drag, scroll, hover)
@@ -254,7 +255,56 @@ def run_macos_generic_tests(client, verbose: bool = False) -> tuple[int, int, in
         r.get("error", ""),
     )
 
-    # ── 9. connect by process_name ───────────────────────────────
+    # ── 9. activate_edr HiSec window pair ─────────────────────────
+    # Verify activate_edr is exposed and structurally sound.
+    # on macos_accessibility: calls HiSecEndpointAgent + clicks "前往安全防护中心"
+    # to bring up the EDRClient window pair.
+    # Soft-fail: skip if HiSecEndpoint is not installed on this machine.
+    print("\n  activate_edr HiSec window pair... ", end="", flush=True)
+    r_activate = call_tool("activate_edr", {"wait": True, "timeout": 20.0})
+    if verbose:
+        print(f"\n    {json.dumps(r_activate, ensure_ascii=False)[:600]}")
+        print("    ", end="")
+    activate_ok = r_activate.get("ok") is True
+    if not activate_ok:
+        err_lower = (r_activate.get("error") or "").lower()
+        not_installed = (
+            "not supported" in err_lower
+            or "not installed" in err_lower
+            or "no such file" in err_lower
+            or "hinesecependpoint" in err_lower
+        )
+        if not_installed:
+            record(
+                "activate_edr HiSec window pair",
+                False,
+                r_activate.get("error", ""),
+                "HiSecEndpoint not installed on this machine",
+            )
+        else:
+            # activate_edr is exposed but returned an unexpected error
+            record(
+                "activate_edr HiSec window pair",
+                False,
+                r_activate.get("error", ""),
+            )
+    else:
+        main_found = r_activate.get("main", {}).get("window_found") is True
+        client_found = r_activate.get("client", {}).get("window_found") is True
+        main_title = r_activate.get("main", {}).get("window_title", "")
+        client_title = r_activate.get("client", {}).get("window_title", "")
+        both_found = main_found and client_found
+        detail = (
+            f"main={main_title!r}(found={main_found}) "
+            f"client={client_title!r}(found={client_found})"
+        )
+        record(
+            "activate_edr HiSec window pair",
+            both_found,
+            detail,
+        )
+
+    # ── 10. connect by process_name ───────────────────────────────
     print("\n  connect by process_name... ", end="", flush=True)
     r = call_tool("connect", {"process_name": "Finder"})
     if verbose:
@@ -266,7 +316,7 @@ def run_macos_generic_tests(client, verbose: bool = False) -> tuple[int, int, in
         f"pid={r.get('pid')}",
     )
 
-    # ── 10. click_at best-effort ─────────────────────────────────
+    # ── 11. click_at best-effort ─────────────────────────────────
     # We do NOT verify the click "landed" — that requires visual
     # inspection, and the macos_accessibility backend defaults to
     # dry-run mode (no real click) for safety. EDR_WD_ALLOW_REAL_CLICKS=1
@@ -302,7 +352,7 @@ def run_macos_generic_tests(client, verbose: bool = False) -> tuple[int, int, in
             f"method={method or error[:80]}",
         )
 
-    # ── 11. action primitives ───────────────────────────────────
+    # ── 12. action primitives ───────────────────────────────────
     print("\n  action primitives... ", end="", flush=True)
     primitive_calls = [
         ("double_click_at", {"x": 100, "y": 100}),
