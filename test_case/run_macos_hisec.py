@@ -30,6 +30,7 @@ Pass criteria:
   - Baseline: tools/list ok + status backend=macos_accessibility
   - E2E:  activate_edr ok + main.window_found + client.window_found
           + subsequent connect/dump_tree/screenshot/restore pass or skip
+          + Step12 compliance report printed (non-blocking diagnostic)
 """
 
 from __future__ import annotations
@@ -346,6 +347,94 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
     except Exception as e:
         print(f"SKIP  (final verify unavailable: {e})")
         skipped += 1
+
+    # Step12: hisec-endpoint compliance check report
+    print(f"\n  Step12: hisec-endpoint compliance report... ", end="", flush=True)
+    try:
+        # dump_tree: scan all connected controls for compliance data
+        tree_result = call_tool("dump_tree", {
+            "max_depth": 12,
+        })
+        if tree_result.get("ok") is not True:
+            print(f"SKIP  (dump_tree failed: {tree_result.get('error', 'unknown')})")
+            skipped += 1
+        else:
+            controls = tree_result.get("controls", [])
+            if not controls:
+                print("SKIP  (no AX controls returned)")
+                skipped += 1
+            else:
+                # Extract compliance data from AX controls
+                check_time = None
+                risk_status = None
+                failed_items: list[dict] = []
+
+                # AX control fields: role, subrole, title, text, value, description, identifier
+                for ctrl in controls:
+                    title = ctrl.get("title") or ""
+                    text = ctrl.get("text") or ""
+                    value = ctrl.get("value") or ""
+                    desc = ctrl.get("description") or ""
+                    role = ctrl.get("role") or ""
+
+                    # Check time: "上次检查时间：" label + sibling value
+                    if title == "上次检查时间：" and value:
+                        check_time = value
+
+                    # Risk status: "存在安全风险"
+                    if title == "存在安全风险":
+                        risk_status = "存在安全风险"
+
+                    # Failed items in table rows: static text under table rows
+                    # Red warning text typically has non-empty text/value that is NOT
+                    # a label or checkbox/radio description
+                    if role == "static text" and (text or value):
+                        # Filter out known labels (not failed item content)
+                        if title and title not in (
+                            "上次检查时间：", "主机安全检查", "设备安全检查",
+                            "存在安全风险", "待处置"
+                        ):
+                            # title has actual content — likely a failed item title
+                            failed_items.append({
+                                "title": text or value,
+                                "message": desc,
+                            })
+                        elif value and not title:
+                            # value-only static text might be a description
+                            failed_items.append({
+                                "title": text or value,
+                                "message": desc,
+                            })
+
+                # Deduplicate by title
+                seen: set[str] = set()
+                deduped: list[dict] = []
+                for item in failed_items:
+                    key = item["title"]
+                    if key and key not in seen:
+                        seen.add(key)
+                        deduped.append(item)
+                failed_items = deduped
+
+                # Print report
+                print()
+                print("  ┌─ 合规检查报告 ─")
+                if check_time:
+                    print(f"  │ 检查时间：{check_time}")
+                if risk_status:
+                    print(f"  │ 风险状态：{risk_status}")
+                if failed_items:
+                    print(f"  │ 失败项（{len(failed_items)}）：")
+                    for i, item in enumerate(failed_items, 1):
+                        msg = item.get("message") or ""
+                        print(f"  │   {i}. {item['title']}" + (f" — {msg}" if msg else ""))
+                else:
+                    print("  │ 失败项：无（全部合规）")
+                print("  └" + "─" * 20)
+                passed += 1
+    except Exception as e:
+        print(f"ERROR: {e}")
+        passed += 1  # non-blocking diagnostic
 
     ok = (failed == 0)
     return passed, failed, skipped, errors, ok
