@@ -7,6 +7,12 @@ logs/
 target/logs/
 target/server.log
 target/server.pid
+/tmp/
+target/tmp/*
+!target/tmp/.gitkeep
+!target/tmp/screenshots/
+target/tmp/screenshots/*
+!target/tmp/screenshots/.gitkeep
 
 # Local config (contains real passwords / credentials)
 config/targets.local.json

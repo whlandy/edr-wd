@@ -19,6 +19,8 @@ import psutil
 from pywinauto import Application, timings
 from pywinauto import mouse
 
+from artifacts import screenshot_path
+
 logger = logging.getLogger("edr_wd.pywinauto_client")
 
 # Default HiSec entry executable path (can be overridden via EDR_WD_EDR_EXE env var)
@@ -1014,17 +1016,23 @@ class WindowsGUI:
                             "error": f"screen grab failed: imagegrab={imagegrab_error}; gdi={gdi_error}",
                         }
 
-            if path:
-                parent = os.path.dirname(path)
-                if parent:
-                    os.makedirs(parent, exist_ok=True)
-                img.save(path)
-                return {"ok": True, "saved_to": path}
+            output_path = screenshot_path(path)
+            parent = os.path.dirname(output_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            img.save(output_path)
 
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             b64 = base64.b64encode(buf.getvalue()).decode()
-            return {"ok": True, "image_b64": b64, "width": img.width, "height": img.height}
+            return {
+                "ok": True,
+                "saved_to": output_path,
+                "path": output_path,
+                "image_b64": b64,
+                "width": img.width,
+                "height": img.height,
+            }
         except Exception as e:
             logger.exception("screenshot failed")
             return {"ok": False, "error": str(e)}
