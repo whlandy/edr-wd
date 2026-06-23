@@ -1,8 +1,6 @@
 ---
 name: edr-wd
 description: Use this skill when working on EDR-WD, a cross-platform MCP GUI automation system for HiSecEndpoint/EDR targets. Use it to inspect, modify, deploy, or test Windows/macOS agent-target workflows, target lifecycle scripts, FastMCP tools, GUI automation backends, HiSec window-pair E2E behavior, and component-tree UI actions.
-metadata:
-  short-description: Work on EDR-WD MCP GUI automation
 ---
 
 # EDR-WD
@@ -57,8 +55,9 @@ Precise UI actions must be component-tree driven:
 
 1. Verify and connect to the exact target window/process.
 2. `dump_tree(max_depth=...)`.
-3. Select one unique node using `automation_id`, `control_id`, or
-   `text + class_name + control_type`.
+3. Select one unique node with the platform-native mapping: Windows UIA uses
+   `automation_id + control_type/class_name + text`; macOS AX uses
+   `identifier + role/subrole + title/description/value`.
 4. Use `click(expected_process_name=<connected process>)` and require a
    semantic component result where available
    (`uia_invoke` / `uia_toggle` on Windows, AX action on macOS).
@@ -67,6 +66,16 @@ Precise UI actions must be component-tree driven:
 Do not start with `click_at`, `click_window_at`, `click_target`, or a bare
 text-only click when a component-tree selector is available. Read
 `references/element-click.md` before implementing or debugging click behavior.
+Do not persist `control_id` or reuse native component identifiers across
+Windows and macOS.
+
+### Fixed Verification SOPs
+
+When a feature is defined as a fixed sequence of EDR window operations, read
+`sops/INDEX.md`, select an existing SOP, and follow its window ownership,
+evidence, retry, and failure contracts exactly. Use `sops/TEMPLATE.md` for a new
+verification flow. Every SOP must distinguish `HisecEndpointAgent` from
+`EDRClient` at each GUI step.
 
 ### Target Scripts
 
@@ -159,13 +168,15 @@ cases, or interpreting live target failures.
 Load these only when relevant:
 
 - `references/activate-edr.md`: Windows/macOS HiSec activation internals.
-- `references/element-click.md`: component-tree click SOP for Windows UIA and
-  macOS AX, including the HiSec "安全中心" compliance template.
+- `references/element-click.md`: reusable component-tree click rules for
+  Windows UIA and macOS AX.
 - `references/window-detection.md`: window verification and debugging workflow.
 - `references/target-config.md`: runtime target schema, auth, and connect modes.
 - `references/agent-workflow.md`: subagent, lifecycle, deployment, and wrappers.
 - `references/mcp-tools.md`: MCP tool categories and backend capability rules.
 - `references/testing.md`: profile-aware test commands and failure triage.
+- `sops/INDEX.md`: fixed functional-verification SOP design and catalog.
+- `sops/TEMPLATE.md`: required template for new EDR operation sequences.
 - `docs/architecture/`: historical architecture notes and deeper context.
 
 ## Housekeeping

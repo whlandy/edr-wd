@@ -65,9 +65,12 @@ is omitted and `click_context_mismatch` when the connected process differs.
    for c in candidates:
        print({
            "text": c.get("text"),
+           "title": c.get("title"),
            "class_name": c.get("class_name"),
            "control_type": c.get("control_type"),
            "automation_id": c.get("automation_id"),
+           "identifier": c.get("identifier"),
+           "role": c.get("role"),
            "rectangle": c.get("rectangle"),
            "depth": c.get("depth"),
        })
@@ -75,12 +78,16 @@ is omitted and `click_context_mismatch` when the connected process differs.
 
 5. Require a stable selector before clicking.
 
-   Preferred selector order:
+   Use a platform-native selector:
 
-   - `automation_id` exact match
-   - `control_id` only if stable across runs
-   - `text + class_name + control_type`
-   - `auto_id_contains` or `auto_id_suffix` for generated IDs
+   - Windows: exact `automation_id`, then `control_type/class_name` and `text`
+   - macOS: exact `identifier`, then `role/subrole` and
+     `title/description/value`
+
+   `control_id` is not a persistent selector. On macOS it is generated for the
+   current tree traversal; on Windows it may also change between runs or app
+   versions. The macOS `automation_id` compatibility field aliases
+   `identifier`; it is not a Windows UIA AutomationId.
 
    If more than one candidate matches, do not click yet. Narrow by process,
    connected window, class/control type, parent, or automation id.
@@ -121,79 +128,12 @@ is omitted and `click_context_mismatch` when the connected process differs.
    Verification must use the resulting page contents, not only `"ok": true`
    from the click call.
 
-## HiSec "安全中心" Compliance Template
+## HiSec "安全中心" Compliance SOP
 
-Use this template when the task asks to click the left-side "安全中心" in
-`HisecEndpointAgent` and collect compliance data.
-
-```python
-import json
-from pathlib import Path
-from agent.subagent import TargetSubAgent
-
-agent = TargetSubAgent.from_name("2.26-edr-win26-win11")
-agent.initialize_mcp(force=True)
-
-agent.call_tool("activate_edr", {"wait": True, "timeout": 20}, timeout=30)
-agent.call_tool("connect", {
-    "process_name": "HisecEndpointAgent.exe",
-    "timeout": 10,
-}, timeout=20)
-
-tree = agent.call_tool("dump_tree", {"max_depth": 20}, timeout=40)
-controls = tree.get("controls") or []
-candidates = [
-    c for c in controls
-    if (c.get("text") or c.get("title") or c.get("name")) == "安全中心"
-    and c.get("class_name") == "CheckBox"
-]
-if len(candidates) != 1:
-    raise RuntimeError(f"Expected one 安全中心 node, got {len(candidates)}")
-
-node = candidates[0]
-click = agent.call_tool("click", {
-    "text": "安全中心",
-    "class_name": node.get("class_name"),
-    "automation_id": node.get("automation_id"),
-    "parent_fallback": False,
-    "expected_process_name": "HisecEndpointAgent.exe",
-}, timeout=20)
-if click.get("method") not in {"uia_invoke", "uia_toggle"}:
-    raise RuntimeError(f"Click was not semantic UIA activation: {click}")
-
-after = agent.call_tool("dump_tree", {"max_depth": 20}, timeout=40)
-texts = []
-for c in after.get("controls") or []:
-    text = c.get("text") or c.get("title") or c.get("name")
-    if text and text not in texts:
-        texts.append(text)
-
-report = {
-    "window_process": "HisecEndpointAgent.exe",
-    "clicked_node": node,
-    "click_result": click,
-    "visible_texts": texts,
-    "tree": after,
-}
-Path("/tmp/edr-wd-hisec-security-center-report.json").write_text(
-    json.dumps(report, ensure_ascii=False, indent=2),
-    encoding="utf-8",
-)
-```
-
-Expected post-click evidence for the compliance page includes texts like:
-
-```text
-管理员未配置有效策略
-重新检查
-账号安全检查
-主机安全检查
-设备安全检查
-```
-
-If the page still shows scan actions such as `快速扫描`, `全盘扫描`, or
-`自定义扫描` as the main content, the click likely landed on the wrong page or
-the old mouse-input path was used. Re-dump the tree and check the click method.
+For the fixed sequence that clicks the left-side `安全中心` in
+`HisecEndpointAgent` and collects compliance evidence, follow
+`sops/hisec-security-center-compliance.md`. Keep selector, evidence, retry, and
+report changes in that SOP rather than duplicating the workflow here.
 
 ## Windows UIA Notes
 
@@ -212,6 +152,9 @@ the old mouse-input path was used. Re-dump the tree and check the click method.
 ## macOS AX Notes
 
 macOS uses Accessibility (AX) rather than UIA.
+
+Do not copy selectors from Windows. Resolve the SOP's logical selector ID to a
+macOS mapping built from `identifier`, `role/subrole`, and visible AX values.
 
 Preferred order:
 

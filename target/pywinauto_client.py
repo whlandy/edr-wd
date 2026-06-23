@@ -98,7 +98,8 @@ class WindowsGUI:
             matches = []
             for p in psutil.process_iter(["pid", "name", "exe", "username", "create_time"]):
                 try:
-                    if p.info["name"] and p.info["name"].lower() == process_name.lower():
+                    name = p.info.get("name", "") or ""
+                    if isinstance(name, str) and name.lower() == process_name.lower():
                         matches.append(p.info)
                 except psutil.Error:
                     pass
@@ -351,6 +352,82 @@ class WindowsGUI:
     # EDR Activation
     # ------------------------------------------------------------------
 
+    def _hisec_current_left_tab(self) -> dict:
+        """Identify the active HiSec left tab from structural UIA content."""
+        try:
+            if not hasattr(self, "app") or self.app is None:
+                return {"ok": False, "tab": None, "error": "no app connection"}
+
+            win = self.app.window(title_re="华为.*")
+            try:
+                win.wait("visible", timeout=3)
+            except Exception:
+                pass
+
+            tree = self.dump_tree(max_depth=999)
+            if not tree.get("ok"):
+                return {"ok": False, "tab": None, "error": tree.get("error", "dump_tree failed")}
+
+            # The active tab exposes a distinctive content Dialog:
+            #   安全防护:    ...EdrUIMainWindow
+            #   安全中心:    ...BaselineUIMainWindow
+            # Do not fall back to coordinates here; ambiguous tree state must be
+            # surfaced so activate_edr does not click the wrong page.
+            has_edr_dialog = False
+            has_baseline_dialog = False
+
+            for ctrl in tree.get("controls", []):
+                aid = ctrl.get("automation_id", "")
+                cls = ctrl.get("class_name", "")
+                if cls == "Dialog":
+                    if aid.endswith("EdrUIMainWindow"):
+                        has_edr_dialog = True
+                    elif aid.endswith("BaselineUIMainWindow"):
+                        has_baseline_dialog = True
+
+            if has_edr_dialog and not has_baseline_dialog:
+                return {"ok": True, "tab": "安全防护"}
+            if has_baseline_dialog and not has_edr_dialog:
+                return {"ok": True, "tab": "安全中心"}
+
+            return {
+                "ok": False,
+                "tab": None,
+                "error": (
+                    "ambiguous tab state: "
+                    f"edr={has_edr_dialog}, baseline={has_baseline_dialog}"
+                ),
+            }
+        except Exception as e:
+            return {"ok": False, "tab": None, "error": str(e)}
+
+    def _ensure_security_protection_tab(self) -> dict:
+        """Ensure HiSecEndpointAgent is on the left-side 安全防护 tab."""
+        before = self._hisec_current_left_tab()
+        if before.get("ok") and before.get("tab") == "安全防护":
+            return {"ok": True, "already": True, "before": before, "after": before}
+
+        click_result = self.click(auto_id_suffix=".SafraUI.EdrUI", control_type="CheckBox")
+        if not click_result.get("ok"):
+            return {
+                "ok": False,
+                "already": False,
+                "before": before,
+                "click": click_result,
+                "error": click_result.get("error", "failed to click 安全防护 tab"),
+            }
+
+        time.sleep(0.3)
+        after = self._hisec_current_left_tab()
+        return {
+            "ok": after.get("ok") and after.get("tab") == "安全防护",
+            "already": False,
+            "before": before,
+            "after": after,
+            "click": click_result,
+            "error": None if after.get("tab") == "安全防护" else after.get("error", "tab did not switch to 安全防护"),
+        }
+
     def activate_edr(self, exe_path: str = None, wait: bool = True,
                      timeout: float = 15.0,
                      edr_widget_auto_id: str = None) -> dict:
@@ -442,6 +519,7 @@ class WindowsGUI:
 
         # ── Step 3: fallback click from HisecEndpointAgent ──────────────
         click_result = {"ok": None, "skipped": True}
+        tab_check = {"ok": True, "skipped": True}
         if not edr_client.get("found"):
             conn = self.connect_by_process("HisecEndpointAgent.exe", timeout=10)
             if not conn.get("ok"):
@@ -449,6 +527,22 @@ class WindowsGUI:
                     "ok": False,
                     "error": f"Cannot connect to HisecEndpointAgent: {conn.get('error')}",
                     "stage": "fallback_connect_hisec",
+                    "main": {"window_found": bool(hisec_win.get("found")), "window": hisec_win},
+                    "client": {"window_found": False, "window": edr_client},
+                    "primary_launch": primary_launch,
+                    "tab_check": tab_check,
+                }
+
+            # The fallback edrWidget only exists on the left-side 安全防护 page.
+            # If HisecEndpointAgent is currently on 安全中心, switch back first;
+            # if the page cannot be identified, fail instead of guessing.
+            tab_check = self._ensure_security_protection_tab()
+            if not tab_check.get("ok"):
+                return {
+                    "ok": False,
+                    "error": tab_check.get("error", "could not switch to 安全防护 tab"),
+                    "stage": "security_protection_tab_required",
+                    "tab_check": tab_check,
                     "main": {"window_found": bool(hisec_win.get("found")), "window": hisec_win},
                     "client": {"window_found": False, "window": edr_client},
                     "primary_launch": primary_launch,
@@ -473,6 +567,7 @@ class WindowsGUI:
                     "exe_path": exe,
                     "client_exe_path": client_exe,
                     "primary_launch": primary_launch,
+                    "tab_check": tab_check,
                 }
 
         if not wait:
@@ -486,6 +581,7 @@ class WindowsGUI:
                 "client_exe_path": client_exe,
                 "primary_launch": primary_launch,
                 "fallback_click": click_result,
+                "tab_check": tab_check,
             }
 
         # Step 7: connect EDRClient only when caller explicitly asked for it
@@ -502,6 +598,7 @@ class WindowsGUI:
             "client_exe_path": client_exe,
             "primary_launch": primary_launch,
             "fallback_click": click_result,
+            "tab_check": tab_check,
         }
 
     def _window_rect(self, window_title_re: str = None) -> dict:
