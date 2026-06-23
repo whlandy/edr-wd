@@ -979,12 +979,45 @@ class WindowsGUI:
             else:
                 return {"ok": False, "error": "No window connected"}
 
-            img = win.capture_as_image()
+            capture_error = None
+            try:
+                img = win.capture_as_image()
+            except Exception as exc:
+                capture_error = str(exc)
+                img = None
+
             if img is None:
-                return {"ok": False, "error": "capture_as_image returned None"}
+                try:
+                    from PIL import ImageGrab
+
+                    rect = win.rectangle()
+                    bbox = (rect.left, rect.top, rect.right, rect.bottom)
+                    img = ImageGrab.grab(bbox=bbox)
+                except Exception as exc:
+                    imagegrab_error = str(exc)
+                    try:
+                        img = self._capture_window_with_gdi(win)
+                    except Exception as gdi_exc:
+                        gdi_error = str(gdi_exc)
+                        if capture_error:
+                            return {
+                                "ok": False,
+                                "error": (
+                                    "screen grab failed: "
+                                    f"capture_as_image={capture_error}; "
+                                    f"imagegrab={imagegrab_error}; "
+                                    f"gdi={gdi_error}"
+                                ),
+                            }
+                        return {
+                            "ok": False,
+                            "error": f"screen grab failed: imagegrab={imagegrab_error}; gdi={gdi_error}",
+                        }
 
             if path:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
+                parent = os.path.dirname(path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
                 img.save(path)
                 return {"ok": True, "saved_to": path}
 
@@ -995,6 +1028,91 @@ class WindowsGUI:
         except Exception as e:
             logger.exception("screenshot failed")
             return {"ok": False, "error": str(e)}
+
+    def _capture_window_with_gdi(self, win):
+        """Capture a window image with Win32 GDI when pywinauto/Pillow grabs fail."""
+        import ctypes
+        from ctypes import wintypes
+        from PIL import Image
+
+        hwnd = self._wrapper_handle(win)
+        if not hwnd:
+            raise RuntimeError("window handle unavailable")
+
+        rect = win.rectangle()
+        width = int(rect.width())
+        height = int(rect.height())
+        if width <= 0 or height <= 0:
+            raise RuntimeError(f"invalid window rectangle: {rect}")
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        screen_dc = user32.GetDC(0)
+        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
+        old_obj = gdi32.SelectObject(mem_dc, bitmap)
+
+        try:
+            # Try rendering the window itself first. If the app refuses
+            # PrintWindow, fall back to copying the visible screen rectangle.
+            rendered = user32.PrintWindow(hwnd, mem_dc, 2)
+            if not rendered:
+                SRCCOPY = 0x00CC0020
+                copied = gdi32.BitBlt(mem_dc, 0, 0, width, height, screen_dc, rect.left, rect.top, SRCCOPY)
+                if not copied:
+                    raise RuntimeError("PrintWindow and BitBlt both failed")
+
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", wintypes.DWORD),
+                    ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD),
+                ]
+
+            class BITMAPINFO(ctypes.Structure):
+                _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+
+            bmi = BITMAPINFO()
+            bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth = width
+            bmi.bmiHeader.biHeight = -height
+            bmi.bmiHeader.biPlanes = 1
+            bmi.bmiHeader.biBitCount = 32
+            bmi.bmiHeader.biCompression = 0  # BI_RGB
+            bmi.bmiHeader.biSizeImage = width * height * 4
+
+            buffer = ctypes.create_string_buffer(width * height * 4)
+            lines = gdi32.GetDIBits(
+                mem_dc,
+                bitmap,
+                0,
+                height,
+                buffer,
+                ctypes.byref(bmi),
+                0,
+            )
+            if lines != height:
+                raise RuntimeError(f"GetDIBits returned {lines}/{height} lines")
+
+            return Image.frombuffer("RGB", (width, height), buffer, "raw", "BGRX", 0, 1).copy()
+        finally:
+            if old_obj:
+                gdi32.SelectObject(mem_dc, old_obj)
+            if bitmap:
+                gdi32.DeleteObject(bitmap)
+            if mem_dc:
+                gdi32.DeleteDC(mem_dc)
+            if screen_dc:
+                user32.ReleaseDC(0, screen_dc)
 
     # ------------------------------------------------------------------
     # Helpers

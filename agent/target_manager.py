@@ -371,11 +371,15 @@ def ensure_server_running(name: Optional[str] = None) -> dict:
         connect_mode = mcp_cfg["connect_mode"]
         if connect_mode == "direct":
             check_host = ssh_cfg["host"]
+            check_port = mcp_cfg["port"]
         elif connect_mode == "local":
             check_host = "127.0.0.1"
-        else:
+            check_port = mcp_cfg["port"]
+        elif connect_mode == "tunnel":
             check_host = "127.0.0.1"
-        check_port = mcp_cfg["port"]
+            check_port = mcp_cfg["tunnel"]["local_port"]
+        else:
+            raise ValueError(f"Unsupported mcp.connect_mode={connect_mode!r}")
         mcp_path = mcp_cfg["path"]
 
         port_open = _is_port_listening(check_host, check_port)
@@ -383,19 +387,22 @@ def ensure_server_running(name: Optional[str] = None) -> dict:
         if port_open:
             # Phase 1: server already running — still need GUI readiness check
             gui_data = health_detail(target_name)
-            result = _ok(tn, "ensure", {
-                "status": "already_running",
-                "port": check_port,
-                "mcp_url": tc.build_mcp_url(target_name),
-                "ready_level": gui_data.get("ready_level", "tcp_only"),
-                "server_gui_ready": gui_data.get("server_gui_ready", False),
-                "list_windows_count": gui_data.get("list_windows_count", 0),
-                "backend": gui_data.get("backend"),
-            })
-            # If GUI is not ready, tell the user what to do
-            if not gui_data.get("server_gui_ready"):
-                result["next_action"] = _gui_recovery_action(gui_data)
-            return result
+            if gui_data.get("ready_level") == "unreachable":
+                port_open = False
+            else:
+                result = _ok(tn, "ensure", {
+                    "status": "already_running",
+                    "port": check_port,
+                    "mcp_url": tc.build_mcp_url(target_name),
+                    "ready_level": gui_data.get("ready_level", "tcp_only"),
+                    "server_gui_ready": gui_data.get("server_gui_ready", False),
+                    "list_windows_count": gui_data.get("list_windows_count", 0),
+                    "backend": gui_data.get("backend"),
+                })
+                # If GUI is not ready, tell the user what to do
+                if not gui_data.get("server_gui_ready"):
+                    result["next_action"] = _gui_recovery_action(gui_data)
+                return result
 
         # Phase 2: port closed — start via lifecycle
         cfg = tc.get_resolved_target(target_name)
@@ -411,7 +418,7 @@ def ensure_server_running(name: Optional[str] = None) -> dict:
             gui_data = health_detail(target_name)
             result.setdefault("data", {})["mcp_url"] = _build_mcp_url(cfg)
             for key in ("ready_level", "server_gui_ready", "list_windows_count", "backend"):
-                if key in gui_data and key not in result["data"]:
+                if key in gui_data:
                     result["data"][key] = gui_data[key]
             if not gui_data.get("server_gui_ready"):
                 result["next_action"] = _gui_recovery_action(gui_data)

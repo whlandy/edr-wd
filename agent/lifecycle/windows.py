@@ -388,6 +388,20 @@ class WindowsLifecycle:
             check_host = "127.0.0.1"
         check_port = mcp_cfg["port"]
 
+        def _target_port_listening() -> bool:
+            rc, out = run_ssh(
+                ssh_cfg,
+                (
+                    'powershell -NoProfile -Command "'
+                    f'$conn = Get-NetTCPConnection -LocalPort {check_port} '
+                    '-State Listen -ErrorAction SilentlyContinue; '
+                    'if ($conn) { Write-Output \\"open\\"; exit 0 } '
+                    'else { Write-Output \\"closed\\"; exit 1 }"'
+                ),
+                timeout=10,
+            )
+            return rc == 0 and "open" in (out or "").lower()
+
         firewall_result = None
         if connect_mode == "direct":
             firewall_result = self._ensure_firewall_rule(cfg)
@@ -400,7 +414,7 @@ class WindowsLifecycle:
                 )
 
         # Phase 1: TCP probe — if already running, do a full GUI readiness check
-        if _is_port_listening(check_host, check_port):
+        if _target_port_listening():
             gui_check = self._check_gui_readiness(cfg)
             return {
                 "ok": True,
@@ -417,8 +431,9 @@ class WindowsLifecycle:
         stop_cmd = (
             f'powershell -NoProfile -Command "'
             f'Get-NetTCPConnection -LocalPort {check_port} -State Listen '
-            f"-ErrorAction SilentlyContinue | Stop-Process -Force "
-            f"-ErrorAction SilentlyContinue; exit 0\""
+            f'-ErrorAction SilentlyContinue | '
+            f'ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}; '
+            f'exit 0"'
         )
         run_ssh(ssh_cfg, stop_cmd, timeout=15)
 
@@ -441,7 +456,7 @@ class WindowsLifecycle:
         max_wait = 20
         waited = 0
         while waited < max_wait:
-            if _is_port_listening(check_host, check_port):
+            if _target_port_listening():
                 break
             time.sleep(1)
             waited += 1
@@ -542,7 +557,7 @@ class WindowsLifecycle:
             scp_to(ssh_cfg, str(stop_script), _remote_scripts_path(target_root))
             rc, out = run_ssh(
                 ssh_cfg,
-                f"powershell -NoProfile -ExecutionPolicy Bypass -File '{remote_stop}' -Port {port}",
+                f'powershell -NoProfile -ExecutionPolicy Bypass -File "{remote_stop}" -Port {port}',
                 timeout=20,
             )
         else:
@@ -550,12 +565,37 @@ class WindowsLifecycle:
                 ssh_cfg,
                 f'powershell -NoProfile -Command "'
                 f'Get-NetTCPConnection -LocalPort {port} '
-                f"-ErrorAction SilentlyContinue | Stop-Process -Force "
-                f"-ErrorAction SilentlyContinue; exit 0\"",
+                f'-State Listen -ErrorAction SilentlyContinue | '
+                f'ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}; '
+                f'exit 0"',
                 timeout=20,
             )
 
-        port_still_open = _is_port_listening(ssh_cfg["host"], port)
+        rc_check, out_check = run_ssh(
+            ssh_cfg,
+            (
+                'powershell -NoProfile -Command "'
+                f'$conn = Get-NetTCPConnection -LocalPort {port} '
+                '-State Listen -ErrorAction SilentlyContinue; '
+                'if ($conn) { Write-Output \\"open\\"; exit 1 } '
+                'else { Write-Output \\"closed\\"; exit 0 }"'
+            ),
+            timeout=10,
+        )
+        port_still_open = rc_check != 0 or "open" in (out_check or "").lower()
+        if rc != 0 or port_still_open:
+            return self._err(
+                "stop",
+                "server_stop_failed",
+                "MCP server port is still listening after stop attempt",
+                details={
+                    "port": port,
+                    "stop_rc": rc,
+                    "stop_output": (out or "").strip()[:300],
+                    "check_rc": rc_check,
+                    "check_output": (out_check or "").strip()[:300],
+                },
+            )
         return self._ok("stop", data={
             "port_killed": not port_still_open,
             "output": (out or "").strip()[:300],
