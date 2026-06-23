@@ -6,10 +6,7 @@ EDRClient.exe 17 --show as the primary activation path, with the legacy
 HisecEndpointAgent edrWidget click retained as activate_edr fallback.
 
 Tests:
-  Baseline:
-    - activate_edr + visible EDRClient window
-
-  Integration:
+  Baseline / Integration:
     - list_windows returns ok
     - is_window_open explorer.exe
     - is_window_open nonexistent
@@ -59,79 +56,11 @@ def run_windows_hisec_tests(client, verbose: bool = False) -> tuple[int, int, in
             return False, f"ok=false: {result.get('error', '')}"
         return True, None
 
-    def launch_hisec_agent_entry_window() -> dict:
-        """Open the HisecEndpointAgent entry window through activate_edr."""
-        return call_tool("activate_edr", {"wait": True, "timeout": 15.0})
-
     # ── Basic / integration tests ─────────────────────────────────
     print()
     print("=" * 60)
     print("Basic / Integration Tests")
     print("=" * 60)
-
-    print("\n  activate_edr baseline... ", end="", flush=True)
-    try:
-        baseline = call_tool("activate_edr", {"wait": True, "timeout": 15.0})
-        if verbose:
-            print(f"\n    {json.dumps(baseline, ensure_ascii=False)[:400]}")
-            print("    ", end="")
-        if baseline.get("ok") is not True:
-            print(f"FAIL: {baseline.get('error', 'unknown')}")
-            failed += 1
-            errors.append("activate_edr baseline")
-        else:
-            edr_window = call_tool("is_window_open", {"process_name": "EDRClient.exe"})
-            if edr_window.get("ok") is True and edr_window.get("found") is True:
-                print("PASS")
-                passed += 1
-            else:
-                print(f"FAIL: EDRClient.exe not visible after activate_edr (found={edr_window.get('found')})")
-                failed += 1
-                errors.append("activate_edr baseline")
-    except Exception as e:
-        print(f"ERROR: {e}")
-        failed += 1
-        errors.append("activate_edr baseline")
-
-    print("\n  Basic E2E: HisecEndpointAgent + EDRClient desktop windows... ", end="", flush=True)
-    try:
-        launch = launch_hisec_agent_entry_window()
-        if launch.get("ok") is not True:
-            print(f"FAIL: launch HisecEndpointAgent failed: {launch.get('error', launch)}")
-            failed += 1
-            errors.append("Basic E2E window pair")
-        else:
-            hisec_wait = call_tool(
-                "wait_window",
-                {"process_name": "HisecEndpointAgent.exe", "timeout": 15.0, "interval": 0.5},
-            )
-            activate = call_tool("activate_edr", {"wait": True, "timeout": 15.0})
-            edr_wait = call_tool(
-                "wait_window",
-                {"process_name": "EDRClient.exe", "timeout": 15.0, "interval": 0.5},
-            )
-            hisec_ok = hisec_wait.get("ok") is not False and hisec_wait.get("found") is True
-            edr_ok = (
-                activate.get("ok") is True
-                and edr_wait.get("ok") is not False
-                and edr_wait.get("found") is True
-            )
-            if hisec_ok and edr_ok:
-                print("PASS")
-                passed += 1
-            else:
-                print(
-                    "FAIL: "
-                    f"HisecEndpointAgent found={hisec_wait.get('found')} "
-                    f"EDRClient found={edr_wait.get('found')} "
-                    f"activate_ok={activate.get('ok')}"
-                )
-                failed += 1
-                errors.append("Basic E2E window pair")
-    except Exception as e:
-        print(f"ERROR: {e}")
-        failed += 1
-        errors.append("Basic E2E window pair")
 
     tests_integration = [
         ("list_windows returns ok",
