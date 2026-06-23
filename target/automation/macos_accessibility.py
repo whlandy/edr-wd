@@ -44,7 +44,10 @@ from typing import Optional, Any
 
 import pyautogui
 
-from artifacts import screenshot_path
+try:
+    from artifacts import screenshot_path
+except ImportError:
+    from target.artifacts import screenshot_path
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

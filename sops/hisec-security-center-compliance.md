@@ -22,7 +22,8 @@ content rather than scan-page content.
 - `hisec.window-pair-visible` passes.
 - Required tools: `connect`, `lock_window`, `dump_tree`, `click`,
   `verify_window_lock`, `screenshot`.
-- Windows semantic click must return `uia_invoke` or `uia_toggle`.
+- Windows left-navigation activation must use a real component click, because
+  UIA `toggle` can change tab state without switching the Qt content page.
 - macOS real clicks require target permission/configuration; `dry_run` cannot
   satisfy this SOP.
 
@@ -97,7 +98,7 @@ because both windows are visible.
 - Required result:
   - `ok=true`;
   - returned process equals `hisec_agent`;
-  - Windows method is `uia_invoke` or `uia_toggle`;
+  - Windows method is `click_input` for HiSec left-navigation CheckBox tabs;
   - macOS method is not `dry_run`.
 - On failure: abort; do not silently click coordinates.
 

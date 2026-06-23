@@ -94,9 +94,11 @@ is omitted and `click_context_mismatch` when the connected process differs.
 
 6. Click through a semantic component action.
 
-   Windows `click()` now prefers UIA semantic activation for interactive
-   controls. A successful component click should report `method` as
-   `uia_invoke` or `uia_toggle`, not `click_input` or `coordinate_fallback`.
+   Windows `click()` prefers UIA semantic activation for ordinary interactive
+   controls. HiSec left-navigation tabs such as `安全中心` are an exception:
+   they are exposed as `CheckBox`, but UIA `toggle` can change state without
+   switching the Qt page. For these tab-like controls, require `click_input`
+   followed by page-content verification.
 
    ```python
    result = agent.call_tool("click", {
@@ -106,7 +108,7 @@ is omitted and `click_context_mismatch` when the connected process differs.
        "parent_fallback": False,
        "expected_process_name": "HisecEndpointAgent.exe",
    })
-   assert result.get("method") in {"uia_invoke", "uia_toggle"}, result
+   assert result.get("method") == "click_input", result
    ```
 
    macOS `click()` uses Accessibility data. Prefer `click` with a tree-derived
@@ -137,9 +139,12 @@ report changes in that SOP rather than duplicating the workflow here.
 
 ## Windows UIA Notes
 
-- `click()` should return `uia_invoke` or `uia_toggle` for `Button`,
+- `click()` should return `uia_invoke` or `uia_toggle` for ordinary `Button`,
   `CheckBox`, `RadioButton`, `TabItem`, `Hyperlink`, `MenuItem`, and `ListItem`
-  when those controls expose UIA patterns.
+  controls when those controls expose UIA patterns.
+- HiSec left-navigation `CheckBox` tabs are special: use `click_input` and
+  verify the resulting page tree, because `toggle` alone may not change the Qt
+  content page.
 - `click_input` is a mouse-backed action even though it starts from a component.
   Treat it as a fallback, not as a successful component-tree click when precision
   matters.

@@ -86,3 +86,15 @@ def test_all_click_mcp_tools_expose_process_context():
         "middle_click_at",
     ):
         assert "expected_process_name" in functions[tool_name]
+
+
+def test_windows_hisec_left_nav_tabs_bypass_uia_toggle():
+    client_path = Path(__file__).resolve().parents[1] / "pywinauto_client.py"
+    source = client_path.read_text(encoding="utf-8")
+
+    guard_pos = source.index("if self._is_hisec_left_nav_tab")
+    semantic_pos = source.index("control_type not in self._SEMANTIC_ACTIVATION_TYPES")
+
+    assert guard_pos < semantic_pos
+    assert 'aid.endswith(".SafraUI.EdrUI")' in source
+    assert 'aid.endswith(".SafraUI.BaselineUI")' in source

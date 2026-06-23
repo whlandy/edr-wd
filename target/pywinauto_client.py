@@ -19,7 +19,10 @@ import psutil
 from pywinauto import Application, timings
 from pywinauto import mouse
 
-from artifacts import screenshot_path
+try:
+    from artifacts import screenshot_path
+except ImportError:
+    from target.artifacts import screenshot_path
 
 logger = logging.getLogger("edr_wd.pywinauto_client")
 
@@ -1168,6 +1171,12 @@ class WindowsGUI:
         except Exception:
             cls = ""
 
+        # HiSec's left navigation tabs are exposed as UIA CheckBox controls.
+        # toggle() can update UIA state without switching the Qt content page, so
+        # these tab-like controls must be activated by a real component click.
+        if self._is_hisec_left_nav_tab(ctrl, control_type, cls):
+            return None
+
         if (
             control_type not in self._SEMANTIC_ACTIVATION_TYPES
             and cls not in self._SEMANTIC_ACTIVATION_TYPES
@@ -1199,6 +1208,16 @@ class WindowsGUI:
                 "; ".join(errors),
             )
         return None
+
+    def _is_hisec_left_nav_tab(self, ctrl, control_type: str, cls: str) -> bool:
+        """Return True for HiSec left navigation controls that require click_input."""
+        if control_type != "CheckBox" and cls != "CheckBox":
+            return False
+        try:
+            aid = ctrl.automation_id() or ""
+        except Exception:
+            return False
+        return aid.endswith(".SafraUI.EdrUI") or aid.endswith(".SafraUI.BaselineUI")
 
     def _find_control(self, control_id=None, text=None, class_name=None, parent_text=None,
                       automation_id=None, auto_id_contains=None, auto_id_suffix=None,
