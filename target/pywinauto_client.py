@@ -19,6 +19,11 @@ import psutil
 from pywinauto import Application, timings
 from pywinauto import mouse
 
+try:
+    from artifacts import screenshot_path
+except ImportError:
+    from target.artifacts import screenshot_path
+
 logger = logging.getLogger("edr_wd.pywinauto_client")
 
 # Default HiSec entry executable path (can be overridden via EDR_WD_EDR_EXE env var)
@@ -98,7 +103,8 @@ class WindowsGUI:
             matches = []
             for p in psutil.process_iter(["pid", "name", "exe", "username", "create_time"]):
                 try:
-                    if p.info["name"] and p.info["name"].lower() == process_name.lower():
+                    name = p.info.get("name", "") or ""
+                    if isinstance(name, str) and name.lower() == process_name.lower():
                         matches.append(p.info)
                 except psutil.Error:
                     pass
@@ -351,6 +357,82 @@ class WindowsGUI:
     # EDR Activation
     # ------------------------------------------------------------------
 
+    def _hisec_current_left_tab(self) -> dict:
+        """Identify the active HiSec left tab from structural UIA content."""
+        try:
+            if not hasattr(self, "app") or self.app is None:
+                return {"ok": False, "tab": None, "error": "no app connection"}
+
+            win = self.app.window(title_re="华为.*")
+            try:
+                win.wait("visible", timeout=3)
+            except Exception:
+                pass
+
+            tree = self.dump_tree(max_depth=999)
+            if not tree.get("ok"):
+                return {"ok": False, "tab": None, "error": tree.get("error", "dump_tree failed")}
+
+            # The active tab exposes a distinctive content Dialog:
+            #   安全防护:    ...EdrUIMainWindow
+            #   安全中心:    ...BaselineUIMainWindow
+            # Do not fall back to coordinates here; ambiguous tree state must be
+            # surfaced so activate_edr does not click the wrong page.
+            has_edr_dialog = False
+            has_baseline_dialog = False
+
+            for ctrl in tree.get("controls", []):
+                aid = ctrl.get("automation_id", "")
+                cls = ctrl.get("class_name", "")
+                if cls == "Dialog":
+                    if aid.endswith("EdrUIMainWindow"):
+                        has_edr_dialog = True
+                    elif aid.endswith("BaselineUIMainWindow"):
+                        has_baseline_dialog = True
+
+            if has_edr_dialog and not has_baseline_dialog:
+                return {"ok": True, "tab": "安全防护"}
+            if has_baseline_dialog and not has_edr_dialog:
+                return {"ok": True, "tab": "安全中心"}
+
+            return {
+                "ok": False,
+                "tab": None,
+                "error": (
+                    "ambiguous tab state: "
+                    f"edr={has_edr_dialog}, baseline={has_baseline_dialog}"
+                ),
+            }
+        except Exception as e:
+            return {"ok": False, "tab": None, "error": str(e)}
+
+    def _ensure_security_protection_tab(self) -> dict:
+        """Ensure HiSecEndpointAgent is on the left-side 安全防护 tab."""
+        before = self._hisec_current_left_tab()
+        if before.get("ok") and before.get("tab") == "安全防护":
+            return {"ok": True, "already": True, "before": before, "after": before}
+
+        click_result = self.click(auto_id_suffix=".SafraUI.EdrUI", control_type="CheckBox")
+        if not click_result.get("ok"):
+            return {
+                "ok": False,
+                "already": False,
+                "before": before,
+                "click": click_result,
+                "error": click_result.get("error", "failed to click 安全防护 tab"),
+            }
+
+        time.sleep(0.3)
+        after = self._hisec_current_left_tab()
+        return {
+            "ok": after.get("ok") and after.get("tab") == "安全防护",
+            "already": False,
+            "before": before,
+            "after": after,
+            "click": click_result,
+            "error": None if after.get("tab") == "安全防护" else after.get("error", "tab did not switch to 安全防护"),
+        }
+
     def activate_edr(self, exe_path: str = None, wait: bool = True,
                      timeout: float = 15.0,
                      edr_widget_auto_id: str = None) -> dict:
@@ -442,6 +524,7 @@ class WindowsGUI:
 
         # ── Step 3: fallback click from HisecEndpointAgent ──────────────
         click_result = {"ok": None, "skipped": True}
+        tab_check = {"ok": True, "skipped": True}
         if not edr_client.get("found"):
             conn = self.connect_by_process("HisecEndpointAgent.exe", timeout=10)
             if not conn.get("ok"):
@@ -449,6 +532,22 @@ class WindowsGUI:
                     "ok": False,
                     "error": f"Cannot connect to HisecEndpointAgent: {conn.get('error')}",
                     "stage": "fallback_connect_hisec",
+                    "main": {"window_found": bool(hisec_win.get("found")), "window": hisec_win},
+                    "client": {"window_found": False, "window": edr_client},
+                    "primary_launch": primary_launch,
+                    "tab_check": tab_check,
+                }
+
+            # The fallback edrWidget only exists on the left-side 安全防护 page.
+            # If HisecEndpointAgent is currently on 安全中心, switch back first;
+            # if the page cannot be identified, fail instead of guessing.
+            tab_check = self._ensure_security_protection_tab()
+            if not tab_check.get("ok"):
+                return {
+                    "ok": False,
+                    "error": tab_check.get("error", "could not switch to 安全防护 tab"),
+                    "stage": "security_protection_tab_required",
+                    "tab_check": tab_check,
                     "main": {"window_found": bool(hisec_win.get("found")), "window": hisec_win},
                     "client": {"window_found": False, "window": edr_client},
                     "primary_launch": primary_launch,
@@ -473,6 +572,7 @@ class WindowsGUI:
                     "exe_path": exe,
                     "client_exe_path": client_exe,
                     "primary_launch": primary_launch,
+                    "tab_check": tab_check,
                 }
 
         if not wait:
@@ -486,6 +586,7 @@ class WindowsGUI:
                 "client_exe_path": client_exe,
                 "primary_launch": primary_launch,
                 "fallback_click": click_result,
+                "tab_check": tab_check,
             }
 
         # Step 7: connect EDRClient only when caller explicitly asked for it
@@ -502,6 +603,7 @@ class WindowsGUI:
             "client_exe_path": client_exe,
             "primary_launch": primary_launch,
             "fallback_click": click_result,
+            "tab_check": tab_check,
         }
 
     def _window_rect(self, window_title_re: str = None) -> dict:
@@ -882,22 +984,146 @@ class WindowsGUI:
             else:
                 return {"ok": False, "error": "No window connected"}
 
-            img = win.capture_as_image()
-            if img is None:
-                return {"ok": False, "error": "capture_as_image returned None"}
+            capture_error = None
+            try:
+                img = win.capture_as_image()
+            except Exception as exc:
+                capture_error = str(exc)
+                img = None
 
-            if path:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                img.save(path)
-                return {"ok": True, "saved_to": path}
+            if img is None:
+                try:
+                    from PIL import ImageGrab
+
+                    rect = win.rectangle()
+                    bbox = (rect.left, rect.top, rect.right, rect.bottom)
+                    img = ImageGrab.grab(bbox=bbox)
+                except Exception as exc:
+                    imagegrab_error = str(exc)
+                    try:
+                        img = self._capture_window_with_gdi(win)
+                    except Exception as gdi_exc:
+                        gdi_error = str(gdi_exc)
+                        if capture_error:
+                            return {
+                                "ok": False,
+                                "error": (
+                                    "screen grab failed: "
+                                    f"capture_as_image={capture_error}; "
+                                    f"imagegrab={imagegrab_error}; "
+                                    f"gdi={gdi_error}"
+                                ),
+                            }
+                        return {
+                            "ok": False,
+                            "error": f"screen grab failed: imagegrab={imagegrab_error}; gdi={gdi_error}",
+                        }
+
+            output_path = screenshot_path(path)
+            parent = os.path.dirname(output_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            img.save(output_path)
 
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             b64 = base64.b64encode(buf.getvalue()).decode()
-            return {"ok": True, "image_b64": b64, "width": img.width, "height": img.height}
+            return {
+                "ok": True,
+                "saved_to": output_path,
+                "path": output_path,
+                "image_b64": b64,
+                "width": img.width,
+                "height": img.height,
+            }
         except Exception as e:
             logger.exception("screenshot failed")
             return {"ok": False, "error": str(e)}
+
+    def _capture_window_with_gdi(self, win):
+        """Capture a window image with Win32 GDI when pywinauto/Pillow grabs fail."""
+        import ctypes
+        from ctypes import wintypes
+        from PIL import Image
+
+        hwnd = self._wrapper_handle(win)
+        if not hwnd:
+            raise RuntimeError("window handle unavailable")
+
+        rect = win.rectangle()
+        width = int(rect.width())
+        height = int(rect.height())
+        if width <= 0 or height <= 0:
+            raise RuntimeError(f"invalid window rectangle: {rect}")
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        screen_dc = user32.GetDC(0)
+        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
+        old_obj = gdi32.SelectObject(mem_dc, bitmap)
+
+        try:
+            # Try rendering the window itself first. If the app refuses
+            # PrintWindow, fall back to copying the visible screen rectangle.
+            rendered = user32.PrintWindow(hwnd, mem_dc, 2)
+            if not rendered:
+                SRCCOPY = 0x00CC0020
+                copied = gdi32.BitBlt(mem_dc, 0, 0, width, height, screen_dc, rect.left, rect.top, SRCCOPY)
+                if not copied:
+                    raise RuntimeError("PrintWindow and BitBlt both failed")
+
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", wintypes.DWORD),
+                    ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD),
+                ]
+
+            class BITMAPINFO(ctypes.Structure):
+                _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+
+            bmi = BITMAPINFO()
+            bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth = width
+            bmi.bmiHeader.biHeight = -height
+            bmi.bmiHeader.biPlanes = 1
+            bmi.bmiHeader.biBitCount = 32
+            bmi.bmiHeader.biCompression = 0  # BI_RGB
+            bmi.bmiHeader.biSizeImage = width * height * 4
+
+            buffer = ctypes.create_string_buffer(width * height * 4)
+            lines = gdi32.GetDIBits(
+                mem_dc,
+                bitmap,
+                0,
+                height,
+                buffer,
+                ctypes.byref(bmi),
+                0,
+            )
+            if lines != height:
+                raise RuntimeError(f"GetDIBits returned {lines}/{height} lines")
+
+            return Image.frombuffer("RGB", (width, height), buffer, "raw", "BGRX", 0, 1).copy()
+        finally:
+            if old_obj:
+                gdi32.SelectObject(mem_dc, old_obj)
+            if bitmap:
+                gdi32.DeleteObject(bitmap)
+            if mem_dc:
+                gdi32.DeleteDC(mem_dc)
+            if screen_dc:
+                user32.ReleaseDC(0, screen_dc)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -945,6 +1171,12 @@ class WindowsGUI:
         except Exception:
             cls = ""
 
+        # HiSec's left navigation tabs are exposed as UIA CheckBox controls.
+        # toggle() can update UIA state without switching the Qt content page, so
+        # these tab-like controls must be activated by a real component click.
+        if self._is_hisec_left_nav_tab(ctrl, control_type, cls):
+            return None
+
         if (
             control_type not in self._SEMANTIC_ACTIVATION_TYPES
             and cls not in self._SEMANTIC_ACTIVATION_TYPES
@@ -976,6 +1208,16 @@ class WindowsGUI:
                 "; ".join(errors),
             )
         return None
+
+    def _is_hisec_left_nav_tab(self, ctrl, control_type: str, cls: str) -> bool:
+        """Return True for HiSec left navigation controls that require click_input."""
+        if control_type != "CheckBox" and cls != "CheckBox":
+            return False
+        try:
+            aid = ctrl.automation_id() or ""
+        except Exception:
+            return False
+        return aid.endswith(".SafraUI.EdrUI") or aid.endswith(".SafraUI.BaselineUI")
 
     def _find_control(self, control_id=None, text=None, class_name=None, parent_text=None,
                       automation_id=None, auto_id_contains=None, auto_id_suffix=None,

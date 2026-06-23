@@ -44,6 +44,11 @@ from typing import Optional, Any
 
 import pyautogui
 
+try:
+    from artifacts import screenshot_path
+except ImportError:
+    from target.artifacts import screenshot_path
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -370,12 +375,10 @@ class MacOSAccessibilityBackend:
         """
         Capture the full screen to `path` (or a default location).
 
-        Default location: $TMPDIR/edr-wd-screenshot-<timestamp>.png
+        Default location: <target cwd>/tmp/screenshots/edr-wd-screenshot-<timestamp>.png
         """
         if not path:
-            ts = time.strftime("%Y%m%d-%H%M%S")
-            tmp = os.environ.get("TMPDIR", "/tmp")
-            path = f"{tmp.rstrip('/')}/edr-wd-screenshot-{ts}.png"
+            path = screenshot_path()
         # `-x` = no sound; `-t <format>` = format
         rc, out = _run(["screencapture", "-x", path], timeout=15)
         if rc != 0:

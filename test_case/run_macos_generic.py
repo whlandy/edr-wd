@@ -1,10 +1,10 @@
 """
 run_macos_generic.py — Minimal v1 test suite for macOS target.
 
-Verifies only capabilities that the macos_accessibility backend supports
-in v1. Anything HiSec-EDR-specific (activate_edr, click by automation_id,
-EDRClient/HisecEndpoint windows, screenshot to a Windows desktop path,
-etc.) is explicitly out of scope for this profile.
+Verifies only baseline capabilities that the macos_accessibility backend
+supports in v1. Anything HiSec-EDR-specific (activate_edr, click by
+automation_id, EDRClient/HisecEndpoint windows, EDR business-page content,
+etc.) is explicitly out of scope for this profile and belongs in E2E.
 
 Tests:
   - tools/list                  (verifies MCP handshake is healthy)

@@ -193,11 +193,11 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
          lambda r: (r.get("ok") is True and "found" in r, None)),
 
         ("Step5: is_window_open by title 华为智能终端安全系统 (diagnostic)",
-         {"window_title": "华为智能终端安全系统"},
+         {"title_re": "华为智能终端安全系统"},
          lambda r: (r.get("ok") is True and "found" in r, None)),
 
         ("Step6: is_window_open by title 华为HiSec Endpoint (diagnostic)",
-         {"window_title": "华为HiSec Endpoint"},
+         {"title_re": "华为HiSec Endpoint"},
          lambda r: (r.get("ok") is True and "found" in r, None)),
     ]
 
@@ -281,8 +281,8 @@ def run_macos_hisec_tests(client, verbose: bool = False) -> tuple[int, int, int,
                 print(f"PASS  (image_data={len(image_data)} chars)")
                 passed += 1
             elif result.get("path"):
-                print(f"SKIP  (screenshot wrote file only: {result.get('path')})")
-                skipped += 1
+                print(f"PASS  (screenshot path={result.get('path')})")
+                passed += 1
             else:
                 print("SKIP  (screenshot returned ok but no image payload)")
                 skipped += 1

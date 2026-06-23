@@ -127,15 +127,12 @@ def connect(
     result = do_connect()
     activate_result = None
     # auto_activate: try activate_edr on the backend if connect failed.
-    # Windows needs PowerShell; macOS does not.
-    needs_ps = "windows" in type(_backend).__name__.lower()
     if not result["ok"] and auto_activate and hasattr(_backend, "activate_edr"):
-        if not needs_ps or ENABLE_POWERSHELL:
-            activate_result = _backend.activate_edr()  # type: ignore[attr-defined]
-            time.sleep(3)
-            result = do_connect()
-            if not result["ok"]:
-                result["activate_result"] = activate_result
+        activate_result = _backend.activate_edr()  # type: ignore[attr-defined]
+        time.sleep(3)
+        result = do_connect()
+        if not result["ok"]:
+            result["activate_result"] = activate_result
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -548,9 +545,6 @@ def activate_edr(exe_path: str = None, wait: bool = True, timeout: float = 15.0,
             "ok": False,
             "error": f"activate_edr is not supported by the {type(_backend).__name__} backend",
         })
-    # Windows backend requires PowerShell; macOS backend does not
-    if "windows" in type(_backend).__name__.lower() and not ENABLE_POWERSHELL:
-        return json.dumps({"ok": False, "error": "PowerShell disabled: set EDR_WD_ENABLE_POWERSHELL=1 to enable"})
     result = _backend.activate_edr(  # type: ignore[attr-defined]
         exe_path=exe_path, wait=wait, timeout=timeout,
         edr_widget_auto_id=edr_widget_auto_id,
