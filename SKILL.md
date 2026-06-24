@@ -182,7 +182,8 @@ Load these only when relevant:
 - `references/testing.md`: profile-aware test commands and failure triage.
 - `sops/INDEX.md`: fixed functional-verification SOP design and catalog.
 - `sops/TEMPLATE.md`: required template for new EDR operation sequences.
-- `docs/architecture/`: historical architecture notes and deeper context.
+- `docs/README.md`: documentation map and cleanup rules.
+- `docs/architecture/00-overview.md`: current architecture overview.
 
 ## Housekeeping
 
