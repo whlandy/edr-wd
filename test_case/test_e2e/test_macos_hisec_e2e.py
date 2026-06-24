@@ -99,19 +99,28 @@ class TestMacosHisecE2E:
     def test_2_activate_edr(self, macos_hisec_ready):
         """Step 2: 激活 HiSecEndpoint（弹出主窗口 + EDRClient 子窗口）"""
         result = macos_hisec_ready
+        main = result.get("main", {})
+        edr_client = result.get("client", {})
+        root_start_client = edr_client.get("root_start_client", {})
         print(f"\n[Step2 activate_edr] ok={result.get('ok')}")
-        print(f"  main window_found={result.get('main', {}).get('window_found')}")
-        print(f"  client window_found={result.get('client', {}).get('window_found')}")
+        print(f"  already_open={result.get('already_open')}")
+        print(f"  main window_found={main.get('window_found')}")
+        print(f"  main activated_by={main.get('activated_by')}")
+        print(f"  client window_found={edr_client.get('window_found')}")
+        print(f"  client detected_by={edr_client.get('detected_by')}")
+        print(f"  client clicked={edr_client.get('clicked')}")
+        print(f"  client successful_click_method={edr_client.get('successful_click_method')}")
+        print(f"  root_start_client attempted={root_start_client.get('attempted')} ok={root_start_client.get('ok')}")
         print(f"  stage={result.get('stage')}")
-        if result.get("main", {}).get("window_title"):
-            print(f"  main title={result.get('main', {}).get('window_title')!r}")
-        if result.get("client", {}).get("window_title"):
-            print(f"  client title={result.get('client', {}).get('window_title')!r}")
+        if main.get("window_title"):
+            print(f"  main title={main.get('window_title')!r}")
+        if edr_client.get("window_title"):
+            print(f"  client title={edr_client.get('window_title')!r}")
 
         assert result.get("ok") is True, f"activate_edr failed: {result}"
-        assert result.get("main", {}).get("window_found") is True, \
+        assert main.get("window_found") is True, \
             f"HiSecEndpointAgent main window not found: {result}"
-        assert result.get("client", {}).get("window_found") is True, \
+        assert edr_client.get("window_found") is True, \
             f"EDRClient sub-window not found: {result}"
 
     def test_3_verify_hisec_agent_window(self, client, macos_hisec_ready):
@@ -137,3 +146,28 @@ class TestMacosHisecE2E:
         assert result.get("ok") is True, f"is_window_open failed: {result}"
         assert result.get("found") is True, \
             f"EDRClient sub-window not on desktop: {result}"
+
+    def test_5_activate_edr_client_foreground(self, client, macos_hisec_ready):
+        """Step 5: 显式前置 EDRClient 窗口，避免只验证 already_open"""
+        attempts = []
+        activated = None
+        # macOS exposes the EDRClient window through the HiSecEndpoint app owner.
+        for app_name in ["HiSecEndpoint", "EDRClient"]:
+            result = client.call_tool("activate_app", {"app_name": app_name})
+            attempts.append({"app_name": app_name, "result": result})
+            if result.get("ok") is True:
+                activated = {"app_name": app_name, "result": result}
+                break
+
+        print(f"\n[Step5 activate EDRClient foreground] attempts={attempts}")
+        assert activated is not None, f"activate_app failed for EDRClient aliases: {attempts}"
+
+        verify = client.call_tool("is_window_open", {
+            "title_re": EDR_CLIENT_TITLE_RE,
+        })
+        print(f"  activated_by_app={activated.get('app_name')}")
+        print(f"  verify found={verify.get('found')}")
+        print(f"  windows: {verify.get('windows', [])}")
+        assert verify.get("ok") is True, f"is_window_open failed after activate_app: {verify}"
+        assert verify.get("found") is True, \
+            f"EDRClient window not visible after foreground activation: {verify}"
