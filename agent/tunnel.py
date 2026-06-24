@@ -124,19 +124,22 @@ def _forward(client_sock: socket.socket, transport, remote_port: int) -> None:
     sockets = [client_sock, channel]
     try:
         while True:
-            readable, _, _ = select.select(sockets, [], [], 60)
-            if not readable:
-                continue
-            if client_sock in readable:
-                data = client_sock.recv(32768)
-                if not data:
-                    break
-                channel.sendall(data)
-            if channel in readable:
-                data = channel.recv(32768)
-                if not data:
-                    break
-                client_sock.sendall(data)
+            try:
+                readable, _, _ = select.select(sockets, [], [], 60)
+                if not readable:
+                    continue
+                if client_sock in readable:
+                    data = client_sock.recv(32768)
+                    if not data:
+                        break
+                    channel.sendall(data)
+                if channel in readable:
+                    data = channel.recv(32768)
+                    if not data:
+                        break
+                    client_sock.sendall(data)
+            except OSError:
+                break
     finally:
         channel.close()
         client_sock.close()

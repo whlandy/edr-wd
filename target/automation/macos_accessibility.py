@@ -6,6 +6,7 @@ Drives the macOS GUI via shell tools that ship with macOS:
   - screencapture  — full screen capture
   - osascript      — AppleScript bridge (System Events for app/window enumeration)
   - system_profiler — JSON metadata for app bundle ids
+  - swift/CoreGraphics — fallback window enumeration for Qt/HiSec windows
   - cliclick       — optional, for click_at() if available
   - python ctypes  — Quartz.CGEvent for click_at() when cliclick is not present
 
@@ -464,7 +465,101 @@ class MacOSAccessibilityBackend:
                 "enabled": True,
             })
 
+        seen = {(w.get("pid"), w.get("window_title"), w.get("app_name")) for w in windows}
+        for w in self._list_windows_cg():
+            key = (w.get("pid"), w.get("window_title"), w.get("app_name"))
+            if key not in seen:
+                windows.append(w)
+                seen.add(key)
+
         return {"ok": True, "windows": windows, "count": len(windows)}
+
+    def _list_windows_cg(self) -> list[dict]:
+        """Best-effort visible window enumeration through CGWindowList.
+
+        System Events can miss Qt windows from HiSecEndpoint/EDRClient even when
+        they are visible. Use the system Swift runtime instead of Python Quartz
+        so this fallback does not add a pyobjc dependency.
+        """
+        script = r'''
+import Foundation
+import CoreGraphics
+
+let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+guard let info = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+    print("[]")
+    exit(0)
+}
+
+let windows = info.compactMap { item -> [String: Any]? in
+    guard let owner = item[kCGWindowOwnerName as String] as? String, !owner.isEmpty else {
+        return nil
+    }
+    let title = item[kCGWindowName as String] as? String ?? ""
+    let pid = item[kCGWindowOwnerPID as String] as? Int ?? 0
+    let bounds = item[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    return [
+        "owner": owner,
+        "title": title,
+        "pid": pid,
+        "bounds": bounds,
+    ]
+}
+
+let data = try JSONSerialization.data(withJSONObject: windows, options: [])
+print(String(data: data, encoding: .utf8) ?? "[]")
+'''
+        try:
+            cp = subprocess.run(
+                ["/usr/bin/swift", "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return []
+        if cp.returncode != 0:
+            return []
+
+        try:
+            raw_windows = json.loads(cp.stdout or "[]")
+        except json.JSONDecodeError:
+            return []
+
+        windows: list[dict] = []
+        for item in raw_windows or []:
+            try:
+                owner = str(item.get("owner") or "")
+                title = str(item.get("title") or "")
+                pid = item.get("pid")
+                if not owner:
+                    continue
+                bounds = item.get("bounds") or {}
+                rectangle = None
+                if bounds:
+                    rectangle = {
+                        "x": int(bounds.get("X", 0)),
+                        "y": int(bounds.get("Y", 0)),
+                        "w": int(bounds.get("Width", 0)),
+                        "h": int(bounds.get("Height", 0)),
+                    }
+                windows.append({
+                    "app_name": owner,
+                    "bundle_id": None,
+                    "window_title": title,
+                    "pid": int(pid) if pid is not None else None,
+                    "title": title,
+                    "class_name": owner,
+                    "process_id": int(pid) if pid is not None else None,
+                    "rectangle": rectangle,
+                    "visible": True,
+                    "enabled": True,
+                    "source": "cgwindowlist",
+                })
+            except Exception:
+                continue
+        return windows
 
     def is_window_open(
         self,

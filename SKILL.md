@@ -87,6 +87,11 @@ developer utilities only.
 Do not start by deploying or restarting MCP. Before `deploy_target()`,
 `ensure_running()`, or `TargetSubAgent.ensure_running()`, verify:
 
+0. Run the executable dependency preflight when available:
+   `python scripts/check_dependencies.py --target <TARGET_NAME> --scope all --platform auto`
+   or, from PowerShell, `.\agent\check-deps.ps1 -TargetName <TARGET_NAME>`.
+   Use `--platform windows` or `--platform macos` when checking a specific
+   target dependency profile.
 1. Target config validates and Paramiko SSH login works.
 2. Agent Python can import the dependencies declared in `pyproject.toml`,
    especially `paramiko` for SSH/SFTP/tunnel.

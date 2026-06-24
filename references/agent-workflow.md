@@ -49,6 +49,7 @@ Required order:
 1. Validate local config.
 
    ```bash
+   python scripts/check_dependencies.py --scope agent --include-test
    python -m agent.target_config --validate
    python -c "import fastmcp, paramiko, psutil, PIL, pyautogui; print('agent deps ok')"
    ```
@@ -68,6 +69,21 @@ Required order:
 
 3. Verify the complete target Python runtime before uploading or starting MCP.
 
+   Preferred executable check:
+
+   ```bash
+   python scripts/check_dependencies.py --target <TARGET_NAME> --scope target --platform auto
+   python scripts/check_dependencies.py --target <TARGET_NAME> --scope target --platform windows
+   python scripts/check_dependencies.py --target <TARGET_NAME> --scope target --platform macos
+   ```
+
+   Windows PowerShell wrapper:
+
+   ```powershell
+   .\agent\check-deps.ps1 -TargetName <TARGET_NAME> -Scope all -Platform windows -IncludeTest
+   .\agent\deploy.ps1 -Action check-deps -TargetName <TARGET_NAME> -Platform windows -IncludeTest
+   ```
+
    Core target runtime imports:
 
    ```bash
@@ -77,6 +93,7 @@ Required order:
    Windows:
 
    ```powershell
+   python scripts/check_dependencies.py --target <WINDOWS_TARGET> --scope target --platform windows
    "<REMOTE_PYTHON>" -c "import sys; print(sys.executable); print(sys.version)"
    "<REMOTE_PYTHON>" -c "import fastmcp, psutil, PIL; print('core deps ok')"
    "<REMOTE_PYTHON>" -c "import pywinauto, pyautogui; print('windows gui deps ok')"
@@ -85,6 +102,7 @@ Required order:
    macOS:
 
    ```bash
+   python scripts/check_dependencies.py --target <MACOS_TARGET> --scope target --platform macos
    '<REMOTE_PYTHON>' -c 'import sys; print(sys.executable); print(sys.version)'
    '<REMOTE_PYTHON>' -c 'import fastmcp, psutil, PIL; print("core deps ok")'
    '<REMOTE_PYTHON>' -c 'import pyautogui; print("mac gui deps ok")'

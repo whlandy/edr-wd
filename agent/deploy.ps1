@@ -5,6 +5,7 @@ param(
         'config-init',
         'config-validate',
         'config-list',
+        'check-deps',
         'deploy',
         'install',
         'up',
@@ -15,9 +16,13 @@ param(
     )]
     [string]$Action = 'guide',
     [string]$TargetName,
+    [ValidateSet('auto', 'windows', 'macos')]
+    [string]$Platform = 'auto',
     [string[]]$Source,
     [string]$To,
     [switch]$Gui,
+    [switch]$IncludeTest,
+    [switch]$Json,
     [string]$BaseUrl
 )
 
@@ -75,6 +80,7 @@ function Write-Guide {
     Write-Host "  .\deploy.ps1 -Action install -TargetName 2.26-edr-win26-win11" -ForegroundColor Gray
     Write-Host "  .\deploy.ps1 -Action up -TargetName 2.26-edr-win26-win11" -ForegroundColor Gray
     Write-Host "  .\deploy.ps1 -Action status -TargetName 2.26-edr-win26-win11" -ForegroundColor Gray
+    Write-Host "  .\deploy.ps1 -Action check-deps -TargetName 2.26-edr-win26-win11" -ForegroundColor Gray
     Write-Host "  .\deploy.ps1 -Action smoke -TargetName 2.26-edr-win26-win11 -Gui" -ForegroundColor Gray
     Write-Host "  .\deploy.ps1 -Action down -TargetName 2.26-edr-win26-win11" -ForegroundColor Gray
     Write-Host ""
@@ -127,6 +133,14 @@ sys.argv = ["agent.target_config", "--list"]
 main()
 '@
         exit 0
+    }
+    'check-deps' {
+        $checkArgs = @('--scope', 'all', '--platform', $Platform)
+        if ($TargetName) { $checkArgs += @('--target', $TargetName) }
+        if ($IncludeTest) { $checkArgs += '--include-test' }
+        if ($Json) { $checkArgs += '--json' }
+        & (Get-PythonExe) (Join-Path $RepoRoot 'scripts/check_dependencies.py') @checkArgs
+        exit $LASTEXITCODE
     }
     'deploy' {
         Invoke-PythonSnippet @'
