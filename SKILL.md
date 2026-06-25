@@ -82,6 +82,22 @@ verification flow. Every SOP must distinguish `HisecEndpointAgent` from
 Target runtime scripts belong under `target/scripts/`. Root `scripts/` is for
 developer utilities only.
 
+### Target File Contract
+
+A new target should become usable by syncing the repository's existing
+`target/` tree to the configured target root and starting MCP from that tree.
+Do not create ad hoc scripts, config files, test files, or helper programs on
+the target to make a workflow pass. If a target-side helper is needed, add it to
+the repository under `target/scripts/` or `target/automation/`, review it, and
+deploy it as part of `target/`.
+
+Allowed target-side writes are limited to runtime artifacts created by existing
+tracked code: `logs/`, PID files, screenshots/artifacts under the configured
+artifact directory, LaunchAgent plist installation on macOS, and Windows
+scheduled-task registration. Dependency checks must be read-only; they may run
+remote Python/PowerShell commands but must not write probe scripts to the
+target.
+
 ### Deployment Preflight
 
 Do not start by deploying or restarting MCP. Before `deploy_target()`,

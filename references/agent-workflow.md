@@ -44,6 +44,42 @@ Keep these lower-level modules backward compatible where practical.
 Do not start a session by deploying or restarting the target MCP server. Run
 preflight first, then choose the lightest action that is actually needed.
 
+## Target File Contract
+
+Remote targets should not accumulate one-off files during onboarding. The
+deployable unit is the repository's tracked `target/` tree:
+
+```text
+local repo target/  ->  configured target root
+```
+
+After that tree is present, MCP should start through existing tracked lifecycle
+scripts and be controlled through MCP tools. Do not write temporary scripts,
+throwaway config files, copied test snippets, or helper programs onto the target
+to make a new target work. If a helper is genuinely required, add it to the repo
+under `target/scripts/`, `target/scripts/macos/`, or `target/automation/`, then
+deploy it with the normal `target/` sync.
+
+Allowed target-side writes:
+
+- `logs/` and PID files created by tracked startup scripts.
+- screenshot/artifact files under `EDR_WD_ARTIFACT_DIR` or the default target
+  artifact directory.
+- macOS LaunchAgent plist installation generated from the tracked template.
+- Windows scheduled-task registration using tracked scripts.
+- application/runtime state created by HiSec/EDR itself.
+
+Disallowed target-side writes:
+
+- ad hoc `.py`, `.ps1`, `.sh`, `.bat`, or `.json` files for probing.
+- copied one-off smoke tests outside the deployed `target/` tree.
+- generated target config containing credentials.
+- permanent helper scripts created only on one target machine.
+
+Dependency preflight is read-only. Use Paramiko to run inline commands such as
+`python -c ...`, PowerShell built-ins, and MCP `status`; do not upload probe
+files to perform these checks.
+
 Required order:
 
 1. Validate local config.

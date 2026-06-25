@@ -83,6 +83,14 @@ Windows PowerShell:
 PowerShell tools require `EDR_WD_ENABLE_POWERSHELL=1` on the target server.
 `activate_edr` must not depend on PowerShell availability.
 
+PowerShell smoke/health checks must be target-local or intranet-local. Do not
+use public connectivity probes such as `8.8.8.8`, public DNS, `google.com`,
+`Test-NetConnection` against Internet hosts, or external `Invoke-WebRequest`
+checks. In isolated intranet deployments, those checks create false failures
+even when MCP and the target desktop are healthy. Prefer commands such as
+`Write-Output`, `$PSVersionTable`, `Get-ComputerInfo`, `hostname`,
+`Get-Process`, local port checks, or checks against the configured MCP target.
+
 ## Backend Capability Rules
 
 Windows backend:
