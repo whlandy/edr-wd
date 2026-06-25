@@ -68,6 +68,11 @@ Windows agents can use:
 .\agent\check-deps.ps1 -TargetName <target> -Scope all -Platform auto -IncludeTest
 ```
 
+New target onboarding should not generate ad hoc files on the target. The
+normal path is to sync the tracked `target/` tree, install the tracked lifecycle
+hook when needed, and start MCP from that directory. Any new target-side helper
+belongs in the repository before deployment, not as a per-machine scratch file.
+
 ## Automation Backends
 
 `windows_pywinauto` provides Windows UIA window detection, control-tree dumps,

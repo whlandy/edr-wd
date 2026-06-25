@@ -67,3 +67,9 @@ For window failures:
 
 For tool-call failures, confirm the call path first. `tools/list` is a protocol
 method, not a tool name for `call_tool()`.
+
+PowerShell tests must not depend on public Internet reachability. Never use
+`8.8.8.8`, public DNS, `google.com`, or external `Test-NetConnection` /
+`Invoke-WebRequest` probes as a pass condition. Use target-local commands
+(`Write-Output`, `$PSVersionTable`, `hostname`, local port checks) or the
+configured intranet target endpoint.
