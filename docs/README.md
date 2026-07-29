@@ -10,6 +10,22 @@ completed design plans after their rules are represented in code, tests,
   cross-platform agent/target architecture, connection modes, backend split,
   and HiSec window-pair contract.
 
+## Todo Designs
+
+- [`todo/target-sync-without-ad-hoc-scripts.md`](todo/target-sync-without-ad-hoc-scripts.md):
+  lifecycle cleanup record for making normal connect/test/SOP flows avoid
+  implicit target-side script uploads after the tracked `target/` payload is
+  deployed.
+
+## Packaging
+
+- [`../packaging/README.md`](../packaging/README.md): packaging directory
+  contract for future `mcp.exe` / PyInstaller work.
+- [`../packaging/DESIGN.md`](../packaging/DESIGN.md): review and migration
+  design for preserving packaging/PyInstaller work while preventing relay,
+  auto-ensure, or generated workflow scripts from weakening the target-control
+  contract.
+
 ## Operational References
 
 - [`../references/activate-edr.md`](../references/activate-edr.md): Windows and
@@ -26,6 +42,14 @@ completed design plans after their rules are represented in code, tests,
   component-tree click rules.
 - [`../references/window-detection.md`](../references/window-detection.md):
   window verification workflow.
+
+## Documentation Assets
+
+- [`assets/diagrams/`](assets/diagrams/): curated diagrams that are useful for
+  reports or architecture explanations.
+
+Local render outputs, scratch PPT exports, screenshots, and generated reports
+belong in ignored `artifacts/` or `outputs/`, not in the repository root.
 
 ## SOPs
 
