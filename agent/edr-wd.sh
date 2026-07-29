@@ -7,6 +7,7 @@
 #   status   Show target server and tunnel status when configured
 #   push     Copy a file or directory to the Windows target
 #   smoke    Run the MCP smoke test against the configured MCP URL
+#   repair   Sync-deploy target/ and restart the MCP server (force recovery)
 #
 # Environment:
 #   EDR_WD_TARGET_NAME   Target name from config (default: config.default_target)
@@ -37,7 +38,7 @@ fi
 
 usage() {
     cat <<EOF
-Usage: bash $0 {up|down|status|push|smoke}
+Usage: bash $0 {up|down|status|push|smoke|repair}
 
 Commands:
   up       Start MCP server and prepare configured connection mode
@@ -45,6 +46,7 @@ Commands:
   status   Show target status and tunnel status when configured
   push     Copy files to the Windows target via Paramiko SFTP
   smoke    Run the MCP smoke test against the configured MCP URL
+  repair   Sync-deploy target/ and restart MCP server (force recovery)
 EOF
 }
 
@@ -216,6 +218,16 @@ do_smoke() {
         "$@"
 }
 
+do_repair() {
+    echo "[1/1] Repairing target — syncing deploy and restarting MCP server..."
+    (
+        cd "$SCRIPT_DIR/.." || exit 1
+        python -c "from agent.target_manager import repair_target; print(repair_target('${TARGET_NAME}', repair=True))"
+    )
+    echo ""
+    echo "Done."
+}
+
 case "${1:-}" in
     up)
         do_up
@@ -233,6 +245,9 @@ case "${1:-}" in
     smoke)
         shift
         do_smoke "$@"
+        ;;
+    repair)
+        do_repair
         ;;
     *)
         usage

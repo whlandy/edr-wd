@@ -2,9 +2,27 @@
 
 ## Status
 
-Implemented for the normal lifecycle paths. Keep this document until the
-behavior has been exercised on live Windows and macOS targets and the remaining
-optional cleanup items are either completed or intentionally dropped.
+Design todo. The target filesystem contract is agreed, but the current code is
+not fully compliant yet.
+
+Observed current gaps in `hermes`:
+
+- `WindowsLifecycle.ensure_server_running()` still uploads
+  `target/scripts/start_server.ps1` before starting the scheduled task.
+- `WindowsLifecycle.stop_server()` still uploads
+  `target/scripts/stop_server.ps1` before executing it.
+- `MacOSLifecycle.ensure_server_running()` still uploads
+  `target/scripts/macos/start_server.sh` before kickstarting LaunchAgent.
+- `MacOSLifecycle.stop_server()` still uploads
+  `target/scripts/macos/stop_server.sh` before executing it.
+- `MacOSLifecycle.deploy()` still uses generic `scp_to()` for the whole
+  `target/` directory instead of tracked-only `scp_dir_to()`.
+- `TargetSubAgent.ensure_running()` and `target_manager.ensure_server_running()`
+  do not yet expose a `repair=False` / `repair=True` mode.
+- The documented regression file
+  `test_case/test_lifecycle_no_implicit_uploads.py` does not exist yet.
+
+This document is the detailed implementation design for closing those gaps.
 
 ## Goal
 
@@ -14,246 +32,925 @@ EDR-WD should have one deployable target payload:
 repo target/  ->  configured target root
 ```
 
-Once that payload is present, the agent should connect to the target MCP server,
-initialize MCP, check `status`, and run baseline/E2E/SOP operations without
-writing additional helper scripts to the target. Any required target-side helper
-must be committed under `target/scripts/`, `target/scripts/macos/`, or
-`target/automation/`, then delivered by the normal target sync.
+After that payload is present on the target, normal operations must connect to
+the target MCP server, initialize MCP, call `status`, and run
+baseline/E2E/SOP operations without writing helper scripts, config files, test
+files, or generated programs to the target.
 
-The installation path is still agent-driven. The agent uses Paramiko over
-SSH/SFTP/SCP to copy the tracked install payload to the target and invoke the
-reviewed lifecycle installer. That explicit deploy/install phase is allowed to
-write target files; the normal post-install connect/test/E2E/SOP phases are not.
+Target-side code is allowed only when it is reviewed and committed under one of
+these repository paths:
 
-This keeps the target filesystem predictable, makes test failures easier to
-reason about, and prevents AI-agent drift where each troubleshooting session
-creates a new one-off `.py`, `.ps1`, `.sh`, `.bat`, or `.json` file on the
-target.
+- `target/scripts/`
+- `target/scripts/macos/`
+- `target/automation/`
+- `target/server.py`
+- target package/runtime files already tracked by git
 
-## Current Behavior To Fix
+The explicit deploy/install phase may write files because its purpose is to
+deliver the reviewed target payload. Normal post-install phases must not write
+lifecycle scripts.
 
-The original issue was that the code mostly avoided ad hoc generated scripts,
-but several connection paths still performed implicit writes.
+## Non-Goals
 
-Original Windows lifecycle issues:
+- Do not add MCP-to-MCP as part of this cleanup.
+- Do not make normal `connect`, `status`, tests, E2E, or SOP flows repair the
+  target automatically.
+- Do not generate target-local `.py`, `.ps1`, `.sh`, `.bat`, `.json`, or
+  temporary probe files to make a single target pass.
+- Do not install Python packages automatically during read-only preflight.
+- Do not copy `config/targets.local.json`, credentials, logs, screenshots,
+  caches, or local-only files to the target.
 
-- `WindowsLifecycle.ensure_server_running()` checks required target files and,
-  if they are missing, automatically calls `deploy()` and `install()`.
-- `WindowsLifecycle.ensure_server_running()` uploads `start_server.ps1` before
-  triggering the scheduled task.
-- `WindowsLifecycle.stop_server()` uploads `stop_server.ps1` before executing
-  it.
+## User-Facing Workflow
 
-Original macOS lifecycle issues:
+### First-Time Or Explicit Repair Flow
 
-- `MacOSLifecycle.ensure_server_running()` uploads `start_server.sh` before
-  kickstarting LaunchAgent.
-- `MacOSLifecycle.stop_server()` uploads `stop_server.sh` before executing it.
-- `MacOSLifecycle.deploy()` currently uses the generic upload path for the
-  `target/` directory instead of the tracked-only directory sync used by
-  Windows deploy. That can copy untracked cache/log/screenshot files.
+Use this when the target has no payload, scripts are missing, scheduled task or
+LaunchAgent is missing, or a previous deploy is stale.
 
-Manual debug paths:
+```bash
+python scripts/check_dependencies.py --target <TARGET_NAME> --scope all --platform auto
+python -m agent.target_config --validate
+python - <<'PY'
+from agent import target_manager
 
-- `agent/edr-wd.sh push` and `agent/deploy.ps1 -Action push` can upload
-  arbitrary files to the target `incoming/` directory. This is useful for manual
-  debugging, but it must not be used by normal connect/test/SOP flows.
+target = "<TARGET_NAME>"
+print(target_manager.probe_target(target))
+print(target_manager.deploy_target(target))
+print(target_manager.install_target_task(target))
+print(target_manager.ensure_server_running(target, repair=False))
+PY
+```
 
-Current implemented behavior:
+Expected behavior:
 
-- normal `ensure_server_running(..., repair=False)` does not deploy/install or
-  upload lifecycle scripts.
-- Windows missing payload returns `target_payload_incomplete`.
-- Windows invalid scheduled task returns `scheduled_task_invalid`.
-- Windows start/stop use already-present target scripts/task definitions.
-- macOS start/stop use already-present target scripts/LaunchAgent definitions.
-- macOS deploy uses tracked-only target sync.
-- wrapper help now marks `push` as manual/debug-only.
+- `probe_target()` performs read-only SSH/runtime checks.
+- `deploy_target()` syncs tracked `target/` files.
+- `install_target_task()` registers Task Scheduler on Windows or LaunchAgent on
+  macOS using the already synced scripts.
+- `ensure_server_running(..., repair=False)` starts only through the already
+  installed lifecycle hook and performs no upload.
 
-## Desired Lifecycle Contract
+### Normal Connect Flow
 
-Use explicit phases instead of hidden repair.
+Use this after explicit deploy/install has completed.
+
+```python
+from agent.subagent import TargetSubAgent
+
+agent = TargetSubAgent.from_name("<TARGET_NAME>")
+running = agent.ensure_running(repair=False)
+if not running["ok"]:
+    raise RuntimeError(running)
+
+session = agent.initialize_mcp()
+if not session["ok"]:
+    raise RuntimeError(session)
+
+print(agent.call_tool("status"))
+print(agent.call_tool("list_windows"))
+```
+
+Expected behavior:
+
+- no `scp_to()`
+- no `scp_dir_to()`
+- no deploy/install
+- no target file writes except runtime artifacts created by an already running
+  target MCP server
+
+### Baseline Test Flow
+
+```bash
+EDR_WD_TARGET=<TARGET_NAME> python test_case/run_tests.py --profile macos_generic -v
+EDR_WD_TARGET=<TARGET_NAME> python test_case/run_tests.py --profile windows_hisec -v
+```
+
+Test fixtures must call `ensure_server_running(repair=False)` by default. If
+the target payload is missing, tests should fail with a structured lifecycle
+error that tells the operator to run explicit deploy/install first.
+
+### E2E/SOP Flow
+
+```python
+from agent.subagent import TargetSubAgent
+
+agent = TargetSubAgent.from_name("<TARGET_NAME>")
+agent.ensure_running(repair=False)
+agent.initialize_mcp()
+result = agent.call_tool("activate_edr", {"wait": True, "timeout": 20.0})
+print(result)
+```
+
+Allowed target-side effects:
+
+- EDR/HiSec application process start.
+- screenshots/evidence under the configured artifact directory.
+- normal MCP runtime logs.
+
+Forbidden target-side effects:
+
+- uploading lifecycle scripts.
+- generating helper scripts.
+- installing dependencies.
+- re-registering scheduled tasks or LaunchAgents.
+
+### Manual Debug Push
+
+`agent/edr-wd.sh push` and `agent/deploy.ps1 -Action push` are manual/debug
+tools only. They must not be called from normal connect, tests, E2E, SOP, or
+relay flows.
+
+If retained, CLI help should label them as `debug-push` or
+`manual/debug-only`.
+
+## Lifecycle Phases
 
 ### Phase 1: Preflight
 
-Read-only checks only:
+Read-only.
+
+Responsibilities:
 
 - validate target config.
-- verify Paramiko SSH login when the target is remote.
+- verify Paramiko SSH login for remote targets.
 - verify agent dependencies.
-- verify target Python and backend dependencies through inline commands.
-- check MCP port/tunnel state.
-- never upload probe scripts.
+- verify target Python and backend dependencies with inline commands.
+- inspect MCP port/tunnel state.
+- check whether required target files and lifecycle hooks exist.
+
+Must not:
+
+- upload probe scripts.
+- create files on the target.
+- install Python packages.
+- register lifecycle hooks.
 
 ### Phase 2: Deploy
 
-Explicitly requested operation only:
+Write-capable and explicit.
 
-- sync tracked `target/` files to the configured target root.
-- transfer install payloads from the agent to the target using Paramiko
-  SSH/SFTP/SCP, based on the target config credentials.
-- do not sync untracked files, logs, screenshots, caches, local config, or
-  generated artifacts.
-- for Windows, register the tracked scheduled-task script.
-- for macOS, register the tracked LaunchAgent script/template.
+Responsibilities:
 
-### Phase 3: Connect
+- sync only git-tracked `target/` files to the configured target root.
+- exclude logs, screenshots, caches, local config, generated reports, and
+  untracked debug files.
+- preserve remote runtime directories such as `logs/` and artifact directories
+  unless an explicit cleanup operation is requested.
 
-No file writes:
+### Phase 3: Install
 
-- if `connect_mode=tunnel`, repair only the local tunnel.
-- MCP initialize.
-- call `status`.
-- use the existing server if the backend is loaded.
-- do not deploy or upload scripts just because EDR windows are not open.
+Write-capable and explicit.
+
+Responsibilities:
+
+- Windows: register the reviewed scheduled task using tracked
+  `target/scripts/install_task.ps1`.
+- macOS: register the reviewed LaunchAgent using tracked
+  `target/scripts/macos/install_launch_agent.sh` and plist template.
+- do not perform unrelated deploy or dependency installation.
 
 ### Phase 4: Start/Stop
 
-No upload during start/stop:
+No upload.
 
-- start/stop should invoke scripts already present in the target root.
-- if a required script is missing, return a structured error such as
-  `target_payload_incomplete`.
-- the error should suggest running the explicit deploy/install action, not do it
-  implicitly.
+Responsibilities:
 
-### Phase 5: E2E/SOP
+- Windows start: run the already installed scheduled task with
+  `schtasks /Run /TN <task> /I`.
+- Windows stop: execute the already present
+  `<target_root>/scripts/stop_server.ps1`, or return
+  `target_payload_incomplete` if it is missing.
+- macOS start: kickstart the already installed LaunchAgent.
+- macOS stop: execute the already present
+  `<target_root>/scripts/macos/stop_server.sh`, or return
+  `target_payload_incomplete` if it is missing.
 
-No lifecycle writes:
+### Phase 5: Connect
+
+No upload.
+
+Responsibilities:
+
+- repair only local tunnel state when `connect_mode=tunnel`.
+- initialize MCP.
+- call `status`.
+- use existing target MCP server if healthy.
+- report structured errors for missing payload, missing lifecycle hook, stale
+  listener, disconnected desktop session, or backend mismatch.
+
+### Phase 6: Test/E2E/SOP
+
+No lifecycle writes.
+
+Responsibilities:
 
 - use MCP tools only.
-- `activate_edr(wait=True)` may start EDR/HiSec applications, but it must not
-  create helper scripts.
-- evidence artifacts are allowed only under the configured artifact directory.
+- run profile-aware test suites.
+- collect allowed evidence artifacts under configured artifact directories.
 
-## Proposed Code Changes
+## Public API Design
 
-1. Add a lifecycle option or mode for repair:
+### `agent.target_manager.probe_target(name=None) -> dict`
 
-   ```python
-   ensure_server_running(target, repair=False)
-   TargetSubAgent.ensure_running(repair=False)
-   ```
+Read-only target capability check.
 
-   Default `repair=False` for tests and normal connect flows. Explicit
-   `deploy`/`install` remain the normal repair path; a dedicated `repair`
-   wrapper can be added later if needed.
+Responsibilities:
 
-2. Change Windows `ensure_server_running()`:
+- resolve config.
+- SSH command execution through Paramiko.
+- platform identity check.
+- Python/runtime/backend dependency import checks.
 
-   - keep `_target_integrity()` and `_task_integrity()` as read-only checks.
-   - if integrity fails and `repair=False`, return
-     `target_payload_incomplete` or `scheduled_task_invalid`.
-   - if `repair=True`, allow deploy/install.
-   - remove the unconditional `start_server.ps1` upload from the start path.
-   - start only through the already-installed scheduled task.
+Must not:
 
-3. Change Windows `stop_server()`:
+- call `deploy_target()`.
+- call `install_target_task()`.
+- call `scp_to()` or `scp_dir_to()`.
 
-   - execute the already-present remote `scripts/stop_server.ps1`.
-   - if missing, return a read-only error plus explicit repair suggestion.
-   - do not upload `stop_server.ps1` inside stop.
+Result shape:
 
-4. Change macOS `ensure_server_running()`:
-
-   - do not upload `start_server.sh`.
-   - verify that the LaunchAgent and tracked script are already present.
-   - if missing, return a structured error with the explicit install/deploy
-     command.
-
-5. Change macOS `stop_server()`:
-
-   - execute the already-present `scripts/macos/stop_server.sh`.
-   - do not upload the script during stop.
-
-6. Change macOS `deploy()`:
-
-   - replace the generic directory upload with tracked-only `scp_dir_to()`.
-   - keep conservative fallback filtering if git metadata is unavailable.
-
-7. Restrict debug push paths:
-
-   - document `push` as manual/debug only.
-   - do not call `push` from connect, test, E2E, or SOP code.
-   - consider renaming CLI help to `debug-push` in a later cleanup if the
-     current name keeps causing misuse.
-
-8. Add regression tests:
-
-   - Windows ensure with missing target file and `repair=False` returns a
-     structured error and does not call deploy/install.
-   - Windows ensure with invalid task and `repair=False` does not call install.
-   - macOS deploy uses tracked-only sync.
-   - start/stop paths do not call `scp_to()` for lifecycle scripts.
-   - test runner and pytest fixtures use non-repair connect by default.
-
-## Should The Agent Run A Local MCP And Connect MCP-To-MCP?
-
-Short answer: not for this cleanup.
-
-Running a local MCP on the agent side and having it call the target MCP would add
-another protocol boundary, another session lifecycle, and another failure mode,
-but it would not remove the real cause of script writes. The writes come from
-lifecycle code choosing to upload/repair target files during connect/start/stop.
-That should be fixed directly in the lifecycle contract.
-
-The better model is:
-
-```text
-Agent Python orchestration
-  -> Paramiko for lifecycle and explicit deploy/install
-  -> MCP client for target GUI tools
-  -> one target MCP server in the target desktop session
+```python
+{
+    "ok": True,
+    "target": "<TARGET_NAME>",
+    "stage": "probe",
+    "data": {
+        "ssh": {"ok": True},
+        "python": {"ok": True},
+        "python_dependencies": {"ok": True},
+        "identity": {"ok": True},
+    },
+}
 ```
 
-Use a local MCP only if EDR-WD later needs to expose agent-side capabilities to
-another external orchestrator. In that case it should be an optional facade over
-the existing Python APIs, not an MCP-to-MCP proxy required for normal target
-control.
+### `agent.target_manager.deploy_target(name=None) -> dict`
 
-Reasons not to add MCP-to-MCP now:
+Explicit write operation.
 
-- it complicates debugging because failures can happen in either MCP session.
-- it does not improve target filesystem hygiene.
-- it risks hiding lifecycle side effects behind a second tool abstraction.
-- it makes tests slower and harder to isolate.
-- the existing `TargetSubAgent` already gives the right target-scoped ownership
-  model without adding a second server.
+Responsibilities:
+
+- call platform lifecycle `deploy(cfg)`.
+- sync tracked target payload to target root.
+- verify key files landed at the correct level.
+
+Windows implementation:
+
+```python
+scp_dir_to(ssh_cfg, str(LOCAL_TARGET), target_root, tracked_only=True)
+```
+
+macOS implementation should match Windows:
+
+```python
+scp_dir_to(ssh_cfg, str(LOCAL_TARGET), macos_root, tracked_only=True)
+```
+
+Must not:
+
+- copy untracked files.
+- copy local config/secrets.
+- install scheduled tasks or LaunchAgents.
+
+### `agent.target_manager.install_target_task(name=None) -> dict`
+
+Explicit write operation.
+
+Responsibilities:
+
+- upload tracked lifecycle installer scripts if deploy did not already sync
+  them, or verify that already synced scripts exist.
+- register the OS lifecycle hook.
+
+Windows:
+
+- required remote files:
+  - `<target_root>/scripts/install_task.ps1`
+  - `<target_root>/scripts/start_server.ps1`
+  - `<target_root>/scripts/stop_server.ps1`
+- registers `windows.task_name`, default `StartEDRMCP`.
+- uses interactive logon for GUI desktop context.
+
+macOS:
+
+- required remote files:
+  - `<target_root>/scripts/macos/install_launch_agent.sh`
+  - `<target_root>/scripts/macos/start_server.sh`
+  - `<target_root>/scripts/macos/stop_server.sh`
+  - `<target_root>/scripts/macos/com.edr-wd.target.plist.template`
+- registers `macos.launch_name`.
+- runs inside the user GUI session.
+
+### `agent.target_manager.ensure_server_running(name=None, repair=False) -> dict`
+
+Default no-write operation.
+
+Proposed signature:
+
+```python
+def ensure_server_running(name: Optional[str] = None, *, repair: bool = False) -> dict:
+    ...
+```
+
+Responsibilities when `repair=False`:
+
+- inspect existing port state.
+- inspect target payload integrity.
+- inspect scheduled task or LaunchAgent integrity.
+- start through existing lifecycle hook when needed.
+- perform GUI readiness checks.
+- return structured errors with `next_action` hints.
+
+Responsibilities when `repair=True`:
+
+- may call `deploy_target()` and `install_target_task()` if integrity checks
+  fail.
+- must report every write operation in `data.repair_actions`.
+- should be used only by explicit repair commands, not by tests or normal
+  connect flows.
+
+Forbidden when `repair=False`:
+
+- `deploy_target()`
+- `install_target_task()`
+- `scp_to()`
+- `scp_dir_to()`
+- writing any target helper file
+
+### `agent.target_manager.stop_server(name=None, repair=False) -> dict`
+
+Default no-upload operation.
+
+Proposed signature:
+
+```python
+def stop_server(name: Optional[str] = None, *, repair: bool = False) -> dict:
+    ...
+```
+
+Responsibilities:
+
+- execute already present remote stop script.
+- verify port is closed.
+- if script is missing and `repair=False`, return
+  `target_payload_incomplete`.
+- if script is missing and `repair=True`, explicit repair may deploy/install
+  first, then stop.
+
+### `agent.target_manager.restart_server(name=None, repair=False) -> dict`
+
+Equivalent to:
+
+```python
+stop_server(name, repair=repair)
+ensure_server_running(name, repair=repair)
+```
+
+Default `repair=False`.
+
+### `agent.subagent.TargetSubAgent.ensure_running(repair=False) -> dict`
+
+Target-scoped wrapper over `target_manager.ensure_server_running()`.
+
+Proposed signature:
+
+```python
+def ensure_running(self, *, repair: bool = False) -> dict:
+    ...
+```
+
+State updates:
+
+- set `state.server_running` from result.
+- set `state.mcp_url` when available.
+- set `state.ready_level`.
+- set `state.backend_kind`.
+- set `state.health`.
+- set `state.last_error` on failure.
+
+Must not hide lifecycle errors. If the result is
+`target_payload_incomplete`, the subagent should return that error unchanged.
+
+### `agent.subagent.TargetSubAgent.ensure_ready(repair=False) -> dict`
+
+Proposed signature:
+
+```python
+def ensure_ready(self, *, repair: bool = False) -> dict:
+    running = self.ensure_running(repair=repair)
+    if not running.get("ok"):
+        return running
+    return self.initialize_mcp()
+```
+
+Default `repair=False`.
+
+### `agent.mcp_manager.initialize(name=None) -> dict`
+
+MCP-only operation.
+
+Responsibilities:
+
+- build MCP URL.
+- perform Streamable HTTP initialize handshake.
+- return session ID and URL.
+
+Must not:
+
+- start target server.
+- deploy files.
+- install lifecycle hooks.
+
+### `agent.mcp_manager.call_mcp_tool(...) -> dict`
+
+MCP-only operation.
+
+Responsibilities:
+
+- forward JSON-RPC `tools/call`.
+- parse SSE response.
+- return structured result.
+
+Must not:
+
+- call lifecycle APIs.
+- repair target state.
+
+## Platform Lifecycle Design
+
+### Windows Target Integrity
+
+Add a read-only helper:
+
+```python
+def _target_integrity(self, cfg: dict) -> dict:
+    ...
+```
+
+Checks:
+
+- `<target_root>/server.py`
+- `<target_root>/automation/__init__.py`
+- `<target_root>/scripts/start_server.ps1`
+- `<target_root>/scripts/stop_server.ps1`
+- `<target_root>/scripts/install_task.ps1`
+
+Result:
+
+```python
+{
+    "ok": True,
+    "missing": [],
+    "target_root": "<redacted or structured path>",
+}
+```
+
+If missing and `repair=False`, return:
+
+```python
+{
+    "ok": False,
+    "stage": "ensure",
+    "code": "target_payload_incomplete",
+    "error": "Target payload is incomplete; run explicit deploy/install.",
+    "details": {"missing": ["scripts/start_server.ps1"]},
+    "next_action": "Run deploy_target() then install_target_task().",
+}
+```
+
+### Windows Task Integrity
+
+Add a read-only helper:
+
+```python
+def _task_integrity(self, cfg: dict) -> dict:
+    ...
+```
+
+Checks:
+
+- scheduled task exists.
+- task action points to the target root start script.
+- principal logon type is interactive.
+- run level is highest when configured.
+
+If invalid and `repair=False`, return:
+
+```python
+{
+    "ok": False,
+    "stage": "ensure",
+    "code": "scheduled_task_invalid",
+    "error": "Scheduled task is missing or does not point to target payload.",
+    "next_action": "Run install_target_task().",
+}
+```
+
+### Windows Start
+
+No upload path:
+
+```python
+task_name = win_cfg.get("task_name", "StartEDRMCP")
+run_ssh(ssh_cfg, f'schtasks /Run /TN "{task_name}" /I')
+```
+
+After start:
+
+- wait for port.
+- verify process session is not 0.
+- verify RDP/desktop session is active.
+- initialize MCP through `mcp_manager.health_detail()`.
+- check `list_windows_count > 0`.
+
+### Windows Stop
+
+No upload path:
+
+```python
+remote_stop = f"{target_root}/scripts/stop_server.ps1"
+run_ssh(
+    ssh_cfg,
+    f'powershell -NoProfile -ExecutionPolicy Bypass -File "{remote_stop}" -Port {port}',
+)
+```
+
+If `remote_stop` missing, return `target_payload_incomplete`.
+
+### macOS Target Integrity
+
+Add a read-only helper:
+
+```python
+def _target_integrity(self, cfg: dict) -> dict:
+    ...
+```
+
+Checks:
+
+- `<root>/server.py`
+- `<root>/automation/__init__.py`
+- `<root>/scripts/macos/start_server.sh`
+- `<root>/scripts/macos/stop_server.sh`
+- `<root>/scripts/macos/install_launch_agent.sh`
+- `<root>/scripts/macos/com.edr-wd.target.plist.template`
+
+### macOS LaunchAgent Integrity
+
+Add a read-only helper:
+
+```python
+def _launchagent_integrity(self, cfg: dict) -> dict:
+    ...
+```
+
+Checks:
+
+- plist exists in `~/Library/LaunchAgents/<launch_name>.plist`.
+- plist program path references the target root start script.
+- label matches `macos.launch_name`.
+
+If missing and `repair=False`, return `launchagent_invalid`.
+
+### macOS Deploy
+
+Use tracked-only sync:
+
+```python
+from agent.ssh_runner import scp_dir_to
+
+scp_dir_to(ssh_cfg, str(LOCAL_TARGET), macos_root, timeout=60, tracked_only=True)
+```
+
+This mirrors Windows and prevents copying untracked caches/logs/screenshots.
+
+### macOS Start
+
+No upload path:
+
+```bash
+launchctl kickstart -k "gui/${UID}/${launch_name}"
+```
+
+After start:
+
+- wait for MCP port.
+- verify listener is managed by current target root.
+- initialize MCP through `mcp_manager.health_detail()`.
+- verify backend/list windows.
+
+### macOS Stop
+
+No upload path:
+
+```bash
+bash '<target_root>/scripts/macos/stop_server.sh' --port <port>
+```
+
+If missing, return `target_payload_incomplete`.
+
+## Dependencies
+
+### Agent Runtime Dependencies
+
+Declared in `pyproject.toml`:
+
+- `paramiko`: SSH/SFTP/SCP transport.
+- `fastmcp`: MCP client/server compatibility and local development.
+- `psutil`: local process/port checks where applicable.
+- `Pillow`: image/screenshot handling.
+- `PyAutoGUI`: local or target GUI automation dependency.
+- `pywinauto`: Windows GUI automation dependency when the agent is also a
+  Windows target or when imports are validated.
+
+Required external tools on the agent:
+
+- `git`: tracked-only payload enumeration via `git ls-files`.
+- Python 3.9 or newer.
+
+### Target Common Dependencies
+
+- Python 3.9 or newer.
+- `fastmcp`
+- `psutil`
+- `Pillow`
+- `PyAutoGUI`
+
+### Windows Target Dependencies
+
+- `pywinauto`
+- PowerShell
+- OpenSSH server or another Paramiko-compatible SSH endpoint
+- Task Scheduler
+- active RDP/local desktop session
+- inbound firewall rule for MCP port when `connect_mode=direct`
+
+Important environment variables used by target scripts:
+
+- `EDR_WD_ENABLE_PYWINAUTO=1`
+- `EDR_WD_ENABLE_POWERSHELL=1`
+- `EDR_WD_AUTOMATION_BACKEND=windows_pywinauto`
+- `EDR_WD_TARGET_ROOT=<target_root>`
+- `EDR_WD_MCP_HOST=<bind_host>` optional
+- `EDR_WD_MCP_PORT=<port>` optional
+- `EDR_WD_PYTHON=<python.exe>` optional
+
+### macOS Target Dependencies
+
+- Accessibility permission for the terminal/launch context running MCP.
+- Screen Recording permission for screenshots.
+- `launchctl`
+- `osascript`
+- `screencapture`
+- `lsof`
+- active local/RDP/VNC desktop session.
+
+Important environment variables:
+
+- `EDR_WD_AUTOMATION_BACKEND=macos_accessibility`
+- `EDR_WD_TARGET_ROOT=<target_root>`
+- `EDR_WD_ARTIFACT_DIR=<artifact_dir>` optional
+- `EDR_WD_MCP_HOST=<bind_host>` optional
+- `EDR_WD_MCP_PORT=<port>` optional
+
+## Target File Contract
+
+Allowed tracked payload:
+
+```text
+target/
+  server.py
+  artifacts.py
+  pywinauto_client.py
+  automation/
+  scripts/
+  scripts/macos/
+  tests/
+  tmp/.gitkeep
+  tmp/screenshots/.gitkeep
+```
+
+Allowed target runtime writes:
+
+- `logs/`
+- PID files.
+- screenshots/evidence under configured artifact directory.
+- Windows scheduled task registration during explicit install.
+- macOS LaunchAgent plist during explicit install.
+
+Forbidden normal-flow writes:
+
+- ad hoc `.py`, `.ps1`, `.sh`, `.bat`, `.json` helper files.
+- generated probe scripts.
+- local target config copied from the agent.
+- untracked debug scripts.
+- dependency installation side effects during preflight/connect/test.
+
+## Structured Error Codes
+
+Add or preserve these codes:
+
+- `target_payload_incomplete`: required tracked target file is missing.
+- `scheduled_task_invalid`: Windows scheduled task missing or wrong.
+- `launchagent_invalid`: macOS LaunchAgent missing or wrong.
+- `server_start_failed`: lifecycle hook failed to start.
+- `server_start_timeout`: MCP port did not open.
+- `stale_listener`: port is occupied by unmanaged process.
+- `desktop_session_disconnected`: GUI session is disconnected.
+- `session0_or_desktop_unavailable`: Windows process is in Session 0 or cannot
+  access desktop.
+- `gui_not_ready`: MCP is reachable but windows/backend are not ready.
+- `backend_mismatch`: live backend does not match selected profile.
+- `script_upload_failed`: allowed only in explicit deploy/install/repair.
+
+Every no-write error should include:
+
+```python
+{
+    "ok": False,
+    "stage": "...",
+    "code": "...",
+    "error": "...",
+    "details": {...},
+    "next_action": "Run deploy_target() then install_target_task().",
+}
+```
+
+## Implementation Plan
+
+1. Add `repair=False` plumbing:
+
+   - `target_manager.ensure_server_running(name=None, *, repair=False)`
+   - `target_manager.stop_server(name=None, *, repair=False)`
+   - `target_manager.restart_server(name=None, *, repair=False)`
+   - `TargetSubAgent.ensure_running(repair=False)`
+   - `TargetSubAgent.ensure_ready(repair=False)`
+   - test fixtures call non-repair mode.
+
+2. Add read-only integrity helpers:
+
+   - Windows `_target_integrity()`
+   - Windows `_task_integrity()`
+   - macOS `_target_integrity()`
+   - macOS `_launchagent_integrity()`
+
+3. Remove implicit uploads from Windows normal paths:
+
+   - no `scp_to(start_server.ps1)` in `ensure_server_running()`.
+   - no `scp_to(stop_server.ps1)` in `stop_server()`.
+   - if script/task missing and `repair=False`, return structured error.
+
+4. Remove implicit uploads from macOS normal paths:
+
+   - no `scp_to(start_server.sh)` in `ensure_server_running()`.
+   - no `scp_to(stop_server.sh)` in `stop_server()`.
+   - if script/LaunchAgent missing and `repair=False`, return structured error.
+
+5. Make macOS deploy tracked-only:
+
+   - replace `scp_to(LOCAL_TARGET, macos_root)` with
+     `scp_dir_to(..., tracked_only=True)`.
+
+6. Add explicit repair path:
+
+   - either `ensure_server_running(..., repair=True)` or a wrapper
+     `repair_target(name)`.
+   - repair path may deploy/install and must report `repair_actions`.
+
+7. Update wrappers and docs:
+
+   - `agent/edr-wd.sh`
+   - `agent/deploy.ps1`
+   - `SKILL.md`
+   - `references/agent-workflow.md`
+
+8. Add regression tests.
+
+## Regression Test Plan
+
+Add `test_case/test_lifecycle_no_implicit_uploads.py`.
+
+Required tests:
+
+- Windows ensure with missing payload and `repair=False`:
+  - returns `target_payload_incomplete`.
+  - does not call `deploy()`.
+  - does not call `install()`.
+  - does not call `scp_to()`.
+
+- Windows ensure with invalid scheduled task and `repair=False`:
+  - returns `scheduled_task_invalid`.
+  - does not call `install()`.
+  - does not call `scp_to()`.
+
+- Windows stop with missing stop script and `repair=False`:
+  - returns `target_payload_incomplete`.
+  - does not upload `stop_server.ps1`.
+
+- macOS deploy:
+  - calls `scp_dir_to(..., tracked_only=True)`.
+  - does not call generic directory `scp_to()`.
+
+- macOS ensure with missing LaunchAgent and `repair=False`:
+  - returns `launchagent_invalid`.
+  - does not upload `start_server.sh`.
+
+- macOS stop with missing stop script and `repair=False`:
+  - returns `target_payload_incomplete`.
+  - does not upload `stop_server.sh`.
+
+- `TargetSubAgent.ensure_running()`:
+  - forwards `repair=False` by default.
+  - preserves structured lifecycle errors.
+
+- test fixtures:
+  - use non-repair ensure.
+  - do not call deploy/install implicitly.
+
+Suggested monkeypatch targets:
+
+- `agent.lifecycle.windows.scp_to`
+- `agent.lifecycle.windows.scp_dir_to`
+- `agent.lifecycle.macos.scp_to`
+- `agent.lifecycle.macos.scp_dir_to`
+- `WindowsLifecycle.deploy`
+- `WindowsLifecycle.install`
+- `MacOSLifecycle.deploy`
+- `MacOSLifecycle.install`
+- `agent.target_manager.health_detail`
+- `agent.ssh_runner.run_ssh`
+
+## Live Validation Plan
+
+Windows target:
+
+```bash
+python scripts/check_dependencies.py --target <WINDOWS_TARGET> --scope all --platform windows
+python - <<'PY'
+from agent import target_manager
+t = "<WINDOWS_TARGET>"
+print(target_manager.deploy_target(t))
+print(target_manager.install_target_task(t))
+print(target_manager.ensure_server_running(t, repair=False))
+PY
+```
+
+Then verify no upload during normal connect:
+
+```python
+from agent.subagent import TargetSubAgent
+
+agent = TargetSubAgent.from_name("<WINDOWS_TARGET>")
+print(agent.ensure_running(repair=False))
+print(agent.initialize_mcp())
+print(agent.call_tool("status"))
+print(agent.call_tool("list_windows"))
+```
+
+macOS target:
+
+```bash
+python scripts/check_dependencies.py --target <MACOS_TARGET> --scope all --platform macos
+python - <<'PY'
+from agent import target_manager
+t = "<MACOS_TARGET>"
+print(target_manager.deploy_target(t))
+print(target_manager.install_target_task(t))
+print(target_manager.ensure_server_running(t, repair=False))
+PY
+```
+
+Then run:
+
+```bash
+EDR_WD_TARGET=<MACOS_TARGET> python test_case/run_tests.py --profile macos_generic -v
+```
 
 ## Acceptance Criteria
 
 The cleanup is complete when:
 
 - connecting to an existing target performs no remote file upload.
+- starting an installed target performs no remote file upload.
+- stopping an installed target performs no remote file upload.
 - running baseline tests performs no remote file upload.
 - running HiSec E2E/SOP performs no remote lifecycle file upload.
 - explicit deploy/install/repair commands are the only operations that sync
   tracked target files or install lifecycle hooks.
-- macOS and Windows deploy both use tracked-only target sync.
-- missing target files produce actionable errors instead of hidden repair.
-- documentation states that `push` is manual/debug only.
+- Windows and macOS deploy both use tracked-only target sync.
+- missing target files produce actionable structured errors instead of hidden
+  repair.
+- `push` is documented as manual/debug only and is not used by automated flows.
+- regression tests fail if `scp_to()` is reintroduced into normal start/stop
+  paths.
 
-Implemented regression coverage:
+## Open Questions
 
-- `test_case/test_lifecycle_no_implicit_uploads.py`
-
-Remaining optional cleanup:
-
-- consider adding an explicit `repair` wrapper that runs deploy/install in one
-  reviewed command.
-- consider renaming `push` to `debug-push` in a breaking CLI cleanup.
-- run live Windows and macOS target tests to confirm the no-upload lifecycle
-  paths behave as expected outside unit tests.
-
-## Suggested Implementation Order
-
-1. Add `repair=False` plumbing through `TargetSubAgent` and
-   `target_manager.ensure_server_running()`.
-2. Update Windows lifecycle to return structured errors instead of hidden
-   deploy/install by default.
-3. Remove start/stop script uploads from Windows lifecycle normal paths.
-4. Update macOS lifecycle to match the same no-upload start/stop behavior.
-5. Fix macOS deploy to use tracked-only sync.
-6. Add regression tests around no-upload connect/start/stop behavior.
-7. Update `SKILL.md` and `references/agent-workflow.md` after code behavior and
-   tests match this design.
+- Should `repair=True` live on `ensure_server_running()` or be exposed only as
+  a separate `repair_target()` command?
+- Should `install_target_task()` trust `deploy_target()` to sync scripts, or
+  continue uploading installer scripts as an explicit install-side write?
+- Should `push` be renamed to `debug-push` now, or only documented as
+  debug-only for compatibility?
+- Should target integrity errors redact full target paths, or include them for
+  trusted intranet debugging?

@@ -104,6 +104,34 @@ def _is_port_listening(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+def _kill_ports_on_target(cfg: dict, ports: list[int]) -> None:
+    """Kill processes listening on the given TCP ports on the remote target.
+
+    This is a best-effort operation — SSH errors are logged but not raised.
+    """
+    from agent.ssh_runner import run_ssh
+
+    ssh_cfg = cfg.get("ssh", {})
+    if not ssh_cfg.get("host"):
+        return
+
+    for p in ports:
+        cmd = (
+            f'powershell -Command "'
+            f'Get-NetTCPConnection -LocalPort {p} -ErrorAction SilentlyContinue '
+            f'| Select-Object -ExpandProperty OwningProcess '
+            f'| ForEach-Object {{ Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }}'
+            f'"'
+        )
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            run_ssh(ssh_cfg, cmd, timeout=30)
+        except Exception as exc:
+            logger.warning("Failed to kill port %d on %s: %s", p, ssh_cfg.get("host"), exc)
+    time.sleep(1)
+
+
 # ── Script discovery ───────────────────────────────────────────────────────────
 
 def _local_script(name: str) -> Path | None:
@@ -346,7 +374,41 @@ def install_target_task(name: Optional[str] = None) -> dict:
     return _catch(tn, "install", _do)
 
 
-def ensure_server_running(name: Optional[str] = None) -> dict:
+def repair_target(name: Optional[str] = None, repair: bool = False,
+                  kill_ports: Optional[list[int]] = None) -> dict:
+    """
+    Repair a target by sync-deploying and restarting the MCP server.
+
+    When repair=True, performs a full deploy (upload target/ directory) first,
+    then ensures the server is running. When repair=False, just probes and reports
+    status without making changes.
+
+    kill_ports: if set, kill these ports before starting the server (force
+    recovery from stuck processes).
+
+    Returns {"ok": True, "target": str, "stage": "repair", "data": {...}} or
+            {"ok": False, "target": str, "stage": "repair", "error": ...,
+             "code": ..., "details": {...}}.
+    """
+    tn = name or "?"
+    def _do() -> dict:
+        tc = TargetConfig()
+        target_name = name or tc.get_default_target()
+
+        if repair:
+            # Phase 1: deploy target/ directory to the remote
+            deploy_result = deploy_target(target_name)
+            if not deploy_result.get("ok"):
+                return deploy_result
+
+        # Phase 2: ensure server is running with optional kill_ports
+        return ensure_server_running(target_name, repair_target=kill_ports)
+
+    return _catch(tn, "repair", _do)
+
+
+def ensure_server_running(name: Optional[str] = None,
+                          repair_target: Optional[list[int]] = None) -> dict:
     """
     Ensure the MCP server is running and GUI-ready on the target.
 
@@ -354,6 +416,9 @@ def ensure_server_running(name: Optional[str] = None) -> dict:
       and return immediately (no restart).
     Phase 2: if port closed, dispatch to platform lifecycle to start the server,
       then wait for the port and check GUI readiness.
+
+    repair_target: optional list of ports to kill before ensuring the server
+      starts (force recovery from stuck processes).
 
     Returns {"ok": True, "target": str, "stage": "ensure", "data": {...}} or
             {"ok": False, "target": str, "stage": "ensure", "error": ...,
@@ -404,7 +469,11 @@ def ensure_server_running(name: Optional[str] = None) -> dict:
                     result["next_action"] = _gui_recovery_action(gui_data)
                 return result
 
-        # Phase 2: port closed — start via lifecycle
+        # Phase 2: if repair_target (kill_ports) is set, kill those ports first
+        if repair_target:
+            _kill_ports_on_target(cfg_light, repair_target)
+
+        # Phase 3: port closed — start via lifecycle
         cfg = tc.get_resolved_target(target_name)
         cfg["_target_name"] = target_name
         lifecycle, err = _dispatch_lifecycle(cfg)
