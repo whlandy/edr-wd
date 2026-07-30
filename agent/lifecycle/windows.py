@@ -113,6 +113,36 @@ def _remote_scripts_path(target_root: str) -> str:
     return f"{root}/scripts"
 
 
+def _ps_quote(value: str) -> str:
+    """
+    Escape a value for safe interpolation into a PowerShell single-quoted
+    string literal.  PowerShell single-quoted strings escape a single quote
+    by doubling it: ' → ''.
+
+    Required because `Test-Path -LiteralPath`, `Get-ScheduledTask`, and
+    similar cmdlets receive user-controlled target_root values that may
+    legitimately contain a single quote (e.g. `C:\\Users\\O'Brien\\edr-wd`).
+    Without this escape, an unescaped quote would terminate the string and
+    cause a parse error (or, worse, inject a PowerShell command).
+    """
+    return value.replace("'", "''")
+
+
+# Task Scheduler 2.0 LogonType element values that can present user context
+# to the desktop.  Read from <LogonType> in the task XML — these are string
+# enums, NOT numbers (install_task.ps1 sets `Interactive`).
+#
+# Rejected values:  None, Group, ServiceAccount, Batch — none of them give
+# the scheduled task a desktop session usable by EDR-WD GUI automation.
+# Unknown / empty values are also rejected (fail closed).
+ACCEPTED_LOGON_TYPES: frozenset[str] = frozenset({
+    "Password",
+    "S4U",
+    "Interactive",
+    "InteractiveToken",
+})
+
+
 # ─── Script discovery ───────────────────────────────────────────────────────────
 
 def _local_script(name: str) -> Path | None:
@@ -313,6 +343,244 @@ class WindowsLifecycle:
             "target_root": target_root,
             "uploaded": "target/ contents",
         })
+
+    # ── integrity helpers (Phase 1, read-only) ───────────────────────────────
+
+    def _target_integrity(self, cfg: dict) -> dict:
+        """
+        Read-only check: are required tracked target payload files present
+        on the target?  Does not upload or modify anything.
+
+        Required files (per docs/todo/target-sync-without-ad-hoc-scripts.md):
+          <target_root>/server.py
+          <target_root>/automation/__init__.py
+          <target_root>/scripts/start_server.ps1
+          <target_root>/scripts/stop_server.ps1
+          <target_root>/scripts/install_task.ps1
+
+        Returns:
+          ok=True:  {"ok": True, "stage": "integrity",
+                     "data": {"missing": [], "target_root": target_root}}
+          ok=False: {"ok": False, "stage": "integrity",
+                     "code": "target_payload_incomplete",
+                     "error": "...",
+                     "data": {"missing": [...], "target_root": target_root},
+                     "next_action": "Run deploy_target() then install_target_task()."}
+        SSH failure is reported as code="target_integrity_check_failed" with
+        the underlying (rc, output) tail in data so callers can distinguish
+        "payload missing" from "cannot reach target".
+        """
+        ssh_cfg = cfg["ssh"]
+        win_cfg = cfg["windows"]
+        target_root = win_cfg["target_root"]
+
+        required = [
+            "server.py",
+            "automation/__init__.py",
+            "scripts/start_server.ps1",
+            "scripts/stop_server.ps1",
+            "scripts/install_task.ps1",
+        ]
+
+        missing: list[str] = []
+        ssh_failures: list[dict] = []
+        for fname in required:
+            remote = _remote_join(target_root, fname)
+            ps_cmd = (
+                'powershell -NoProfile -Command "'
+                f'if (Test-Path -LiteralPath \'{_ps_quote(remote)}\' '
+                '-PathType Leaf) { '
+                'Write-Output \'found\' '
+                '} else { '
+                'Write-Output \'missing\' '
+                '}}"'
+            )
+            try:
+                rc, out = run_ssh(ssh_cfg, ps_cmd, timeout=10)
+            except Exception as exc:
+                ssh_failures.append({"file": fname, "error": str(exc)[:200]})
+                continue
+            if rc != 0:
+                ssh_failures.append({
+                    "file": fname,
+                    "rc": rc,
+                    "output": (out or "")[:200],
+                })
+                continue
+            out_clean = (out or "").strip().lower()
+            if out_clean != "found":
+                missing.append(fname)
+
+        if ssh_failures:
+            return {
+                "ok": False,
+                "stage": "integrity",
+                "code": "target_integrity_check_failed",
+                "error": (
+                    f"SSH probe failed for {len(ssh_failures)} file(s); "
+                    "cannot confirm target payload state."
+                ),
+                "data": {
+                    "target_root": target_root,
+                    "platform": self.platform,
+                    "ssh_failures": ssh_failures,
+                },
+                "next_action": (
+                    "Verify SSH connectivity (auth, network, host) to "
+                    "the target, then retry."
+                ),
+            }
+
+        if missing:
+            return {
+                "ok": False,
+                "stage": "integrity",
+                "code": "target_payload_incomplete",
+                "error": (
+                    "Target payload is incomplete; run explicit "
+                    "deploy_target() then install_target_task()."
+                ),
+                "data": {
+                    "missing": missing,
+                    "target_root": target_root,
+                    "platform": self.platform,
+                },
+                "next_action": "Run deploy_target() then install_target_task().",
+            }
+        return self._ok(
+            "integrity",
+            data={"missing": [], "target_root": target_root, "platform": self.platform},
+        )
+
+    def _task_integrity(self, cfg: dict) -> dict:
+        """
+        Read-only check: is the Windows scheduled task present, registered
+        with a usable logon type, and pointing at our tracked target_root
+        start_server.ps1?
+
+        Does not upload or modify anything.
+
+        LogonType values come from the Task Scheduler 2.0 schema as STRING
+        enums (not numbers) — install_task.ps1 sets `Interactive`.  We
+        accept anything in ACCEPTED_LOGON_TYPES (Password / S4U /
+        Interactive / InteractiveToken) and reject None, Group,
+        ServiceAccount, Batch, or any unknown / empty value (fail closed).
+
+        Returns:
+          ok=True:  task exists, command references <target_root>/scripts/start_server.ps1,
+                    LogonType is in ACCEPTED_LOGON_TYPES.
+          ok=False: code="scheduled_task_invalid" with details, or
+                    code="target_task_check_failed" for SSH errors.
+        """
+        ssh_cfg = cfg["ssh"]
+        win_cfg = cfg["windows"]
+        target_root = win_cfg["target_root"]
+        task_name = win_cfg.get("task_name", "StartEDRMCP")
+        expected_script = f"{target_root}\\scripts\\start_server.ps1".lower()
+
+        ps_cmd = (
+            'powershell -NoProfile -Command "'
+            f'$t = Get-ScheduledTask -TaskName \'{_ps_quote(task_name)}\' '
+            '-ErrorAction SilentlyContinue; '
+            'if ($null -eq $t) { '
+            'Write-Output \'task_missing\' '
+            '} else { '
+            '$xml = ([xml]$t.Xml).Task; '
+            '$cmd = $xml.Actions.Exec.Command; '
+            '$logonType = [string]$xml.Principals.Principal.LogonType; '
+            'Write-Output (\'cmd=\' + $cmd) '
+            'Write-Output (\'logonType=\' + $logonType) '
+            '}}"'
+        )
+        try:
+            rc, out = run_ssh(ssh_cfg, ps_cmd, timeout=15)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "stage": "task",
+                "code": "target_task_check_failed",
+                "error": f"SSH probe failed: {str(exc)[:200]}",
+                "data": {"task_name": task_name, "platform": self.platform},
+                "next_action": "Verify SSH connectivity, then retry.",
+            }
+        if rc != 0:
+            return {
+                "ok": False,
+                "stage": "task",
+                "code": "target_task_check_failed",
+                "error": f"Get-ScheduledTask exited rc={rc}: {(out or '')[:200]}",
+                "data": {
+                    "task_name": task_name,
+                    "rc": rc,
+                    "output": (out or "")[:200],
+                    "platform": self.platform,
+                },
+                "next_action": "Verify SSH connectivity, then retry.",
+            }
+        raw = (out or "").strip()
+
+        if "task_missing" in raw:
+            return {
+                "ok": False,
+                "stage": "task",
+                "code": "scheduled_task_invalid",
+                "error": f"Scheduled task '{task_name}' is not registered.",
+                "data": {"task_name": task_name, "platform": self.platform},
+                "next_action": "Run install_target_task().",
+            }
+
+        # Parse key=value lines from PowerShell output
+        info: dict[str, str] = {}
+        for line in raw.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                info[k.strip()] = v.strip()
+
+        cmd = info.get("cmd", "")
+        logon_type = info.get("logonType", "")
+
+        failures: list[str] = []
+        if expected_script not in cmd.lower():
+            failures.append(
+                f"Action.Command does not reference '{expected_script}'"
+            )
+        # LogonType is a string enum; check membership in the allow list.
+        # Empty / unknown / None / Group / ServiceAccount / Batch all fail.
+        if logon_type not in ACCEPTED_LOGON_TYPES:
+            failures.append(
+                f"Principal LogonType='{logon_type}' is not in the "
+                f"accepted set {sorted(ACCEPTED_LOGON_TYPES)}"
+            )
+
+        if failures:
+            return {
+                "ok": False,
+                "stage": "task",
+                "code": "scheduled_task_invalid",
+                "error": (
+                    "Scheduled task does not point at target payload: "
+                    + "; ".join(failures)
+                ),
+                "data": {
+                    "task_name": task_name,
+                    "expected_command_substring": expected_script,
+                    "observed_command": cmd,
+                    "logon_type": logon_type,
+                    "accepted_logon_types": sorted(ACCEPTED_LOGON_TYPES),
+                    "platform": self.platform,
+                },
+                "next_action": "Run install_target_task().",
+            }
+
+        return self._ok(
+            "task",
+            data={
+                "task_name": task_name,
+                "command": cmd,
+                "logon_type": logon_type,
+                "platform": self.platform,
+            },
+        )
 
     # ── session detection helpers ─────────────────────────────────────────────
 

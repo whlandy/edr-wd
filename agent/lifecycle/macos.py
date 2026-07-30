@@ -190,6 +190,255 @@ class MacOSLifecycle:
             "uploaded": "target/ contents",
         })
 
+    # ── integrity helpers (Phase 1, read-only) ───────────────────────────────
+
+    def _target_integrity(self, cfg: dict) -> dict:
+        """
+        Read-only check: are required tracked macOS target payload files
+        present on the target?  Does not upload or modify anything.
+
+        Required files (per docs/todo/target-sync-without-ad-hoc-scripts.md):
+          <root>/server.py
+          <root>/automation/__init__.py
+          <root>/scripts/macos/start_server.sh
+          <root>/scripts/macos/stop_server.sh
+          <root>/scripts/macos/install_launch_agent.sh
+          <root>/scripts/macos/com.edr-wd.target.plist.template
+
+        Returns:
+          ok=True:  {"ok": True, "stage": "integrity",
+                     "data": {"missing": [], "target_root": root}}
+          ok=False: {"ok": False, "stage": "integrity",
+                     "code": "target_payload_incomplete",
+                     "data": {"missing": [...], "target_root": root},
+                     "next_action": "Run deploy_target() then install_target_task()."}
+        SSH failure is reported as code="target_integrity_check_failed".
+        """
+        ssh_cfg = cfg["ssh"]
+        mac_cfg = cfg["macos"]
+        target_root = mac_cfg["root"]
+
+        required = [
+            "server.py",
+            "automation/__init__.py",
+            "scripts/macos/start_server.sh",
+            "scripts/macos/stop_server.sh",
+            "scripts/macos/install_launch_agent.sh",
+            "scripts/macos/com.edr-wd.target.plist.template",
+        ]
+
+        missing: list[str] = []
+        ssh_failures: list[dict] = []
+        for fname in required:
+            remote = _remote_join(target_root, fname)
+            # Escape single quotes for shell single-quoted string.
+            sh_escaped = remote.replace("'", "'\\''")
+            cmd = (
+                "if [ -f '" + sh_escaped + "' ]; then "
+                "printf 'found'; else printf 'missing'; fi"
+            )
+            try:
+                rc, out = run_ssh(ssh_cfg, cmd, timeout=10)
+            except Exception as exc:
+                ssh_failures.append({"file": fname, "error": str(exc)[:200]})
+                continue
+            if rc != 0:
+                ssh_failures.append({
+                    "file": fname,
+                    "rc": rc,
+                    "output": (out or "")[:200],
+                })
+                continue
+            if (out or "").strip() != "found":
+                missing.append(fname)
+
+        if ssh_failures:
+            return {
+                "ok": False,
+                "stage": "integrity",
+                "code": "target_integrity_check_failed",
+                "error": (
+                    f"SSH probe failed for {len(ssh_failures)} file(s); "
+                    "cannot confirm target payload state."
+                ),
+                "data": {
+                    "target_root": target_root,
+                    "platform": self.platform,
+                    "ssh_failures": ssh_failures,
+                },
+                "next_action": (
+                    "Verify SSH connectivity (auth, network, host) to "
+                    "the target, then retry."
+                ),
+            }
+
+        if missing:
+            return {
+                "ok": False,
+                "stage": "integrity",
+                "code": "target_payload_incomplete",
+                "error": (
+                    "Target payload is incomplete; run explicit "
+                    "deploy_target() then install_target_task()."
+                ),
+                "data": {
+                    "missing": missing,
+                    "target_root": target_root,
+                    "platform": self.platform,
+                },
+                "next_action": "Run deploy_target() then install_target_task().",
+            }
+        return self._ok(
+            "integrity",
+            data={"missing": [], "target_root": target_root, "platform": self.platform},
+        )
+
+    def _launchagent_integrity(self, cfg: dict) -> dict:
+        """
+        Read-only check: is the macOS LaunchAgent plist present, with the
+        expected label, and ProgramArguments containing an argument that
+        references <target_root>/.../start_server.sh?
+
+        Does not upload or modify anything.
+
+        ProgramArguments is parsed leniently: we extract the array of
+        <string> entries under the ProgramArguments key, and require at
+        least one argument to contain both `target_root` and
+        `start_server` (basename match).  This tolerates the common
+        <string>/bin/bash</string><string>/path/start_server.sh</string>
+        shape AND a future `<string>bash</string><string>-c</string>
+        <string>cd $ROOT && ./start_server.sh</string>` form.
+
+        Returns:
+          ok=True:  plist exists, label matches `macos.launch_name`,
+                    ProgramArguments references target_root/.../start_server.sh.
+          ok=False: code="launchagent_invalid" with details, or
+                    code="target_launchagent_check_failed" for SSH errors.
+        """
+        ssh_cfg = cfg["ssh"]
+        mac_cfg = cfg["macos"]
+        target_root = mac_cfg["root"]
+        launch_name = mac_cfg["launch_name"]
+        plist_path = f"~/Library/LaunchAgents/{launch_name}.plist"
+
+        # Read plist (XML form) — returns non-zero if missing or invalid.
+        try:
+            rc, out = run_ssh(
+                ssh_cfg,
+                f"test -f {plist_path} && plutil -convert xml1 -o - {plist_path}",
+                timeout=10,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "stage": "launchagent",
+                "code": "target_launchagent_check_failed",
+                "error": f"SSH probe failed: {str(exc)[:200]}",
+                "data": {"plist_path": plist_path, "platform": self.platform},
+                "next_action": "Verify SSH connectivity, then retry.",
+            }
+        if rc != 0:
+            return {
+                "ok": False,
+                "stage": "launchagent",
+                "code": "launchagent_invalid",
+                "error": (
+                    f"LaunchAgent plist not found at {plist_path}; "
+                    "run install_target_task()."
+                ),
+                "data": {"plist_path": plist_path, "platform": self.platform},
+                "next_action": "Run install_target_task().",
+            }
+
+        plist_xml = (out or "").strip()
+
+        # Label check — plutil emits <string>{launch_name}</string> verbatim.
+        expected_label_tag = f"<string>{launch_name}</string>"
+        label_ok = expected_label_tag in plist_xml
+
+        # ProgramArguments check — parse the plist as a dict and check
+        # that ProgramArguments contains at least one entry that references
+        # both `target_root` and the `start_server` basename.  This is
+        # robust against the common
+        #   <string>/bin/bash</string><string>/path/start_server.sh</string>
+        # shape AND against a future
+        #   <string>bash</string><string>-c</string>
+        #   <string>cd $ROOT && ./start_server.sh</string>
+        # form that bundles the script into a single -c argument.
+        import plistlib
+        try:
+            plist = plistlib.loads(plist_xml.encode("utf-8"))
+        except Exception as exc:
+            return {
+                "ok": False,
+                "stage": "launchagent",
+                "code": "launchagent_invalid",
+                "error": f"plist is not parseable: {str(exc)[:200]}",
+                "data": {"plist_path": plist_path, "platform": self.platform},
+                "next_action": "Run install_target_task().",
+            }
+
+        if not isinstance(plist, dict):
+            return {
+                "ok": False,
+                "stage": "launchagent",
+                "code": "launchagent_invalid",
+                "error": "plist root is not a dict",
+                "data": {"plist_path": plist_path, "platform": self.platform},
+                "next_action": "Run install_target_task().",
+            }
+
+        program_args = plist.get("ProgramArguments", []) or []
+        if not isinstance(program_args, list):
+            program_args = [str(program_args)]
+
+        arg_matches = [
+            a for a in program_args
+            if isinstance(a, str) and target_root in a and "start_server" in a
+        ]
+
+        failures: list[str] = []
+        if not label_ok:
+            failures.append(
+                f"plist Label does not match expected launch_name '{launch_name}'"
+            )
+        if not arg_matches:
+            failures.append(
+                f"plist ProgramArguments (got {program_args!r}) does not "
+                f"contain any argument referencing both target_root and "
+                f"start_server"
+            )
+
+        if failures:
+            return {
+                "ok": False,
+                "stage": "launchagent",
+                "code": "launchagent_invalid",
+                "error": (
+                    "LaunchAgent plist is invalid: " + "; ".join(failures)
+                ),
+                "data": {
+                    "plist_path": plist_path,
+                    "expected_launch_name": launch_name,
+                    "expected_target_root": target_root,
+                    "program_arguments": program_args,
+                    "platform": self.platform,
+                },
+                "next_action": "Run install_target_task().",
+            }
+
+        return self._ok(
+            "launchagent",
+            data={
+                "label": launch_name,
+                "target_root": target_root,
+                "matched_program_arg": arg_matches[0],
+                "program_arguments": program_args,
+                "plist_path": plist_path,
+                "platform": self.platform,
+            },
+        )
+
     # ── ensure_server_running ─────────────────────────────────────────────────
 
     def ensure_server_running(self, cfg: dict) -> dict:
