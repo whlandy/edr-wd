@@ -695,7 +695,17 @@ class WindowsLifecycle:
                 },
             }
 
-        # Phase 2: stop any existing process on the port
+        # Phase 2 (refactor): verify tracked target payload is present
+        # BEFORE attempting to start the server.  No ad-hoc scp_to here —
+        # the lifecycle backend only inspects state.  If payload is
+        # missing the operator must run deploy_target() then
+        # install_target_task() explicitly.  SSH errors propagate as
+        # target_integrity_check_failed.
+        integrity = self._target_integrity(cfg)
+        if not integrity.get("ok"):
+            return integrity
+
+        # Phase 3: stop any existing process on the port
         stop_cmd = (
             f'powershell -NoProfile -Command "'
             f'Get-NetTCPConnection -LocalPort {check_port} -State Listen '
@@ -705,12 +715,8 @@ class WindowsLifecycle:
         )
         run_ssh(ssh_cfg, stop_cmd, timeout=15)
 
-        # Phase 3: upload updated start_server.ps1
-        start_script = _local_script("start_server.ps1")
-        if start_script:
-            scp_to(ssh_cfg, str(start_script), _remote_scripts_path(target_root))
-
-        # Phase 4: trigger scheduled task
+        # Phase 4: trigger scheduled task (TaskScheduler pulls the tracked
+        # start_server.ps1 from scripts/ — no per-call scp_to here)
         task_name = win_cfg.get("task_name", "StartEDRMCP")
         trigger_cmd = f'schtasks /Run /TN "{task_name}" /I'
         rc, out = run_ssh(ssh_cfg, trigger_cmd, timeout=15)
@@ -819,25 +825,21 @@ class WindowsLifecycle:
         target_root = win_cfg["target_root"]
         port = mcp_cfg["port"]
 
-        stop_script = _local_script("stop_server.ps1")
-        if stop_script:
-            remote_stop = f"{_remote_scripts_path(target_root)}\\stop_server.ps1"
-            scp_to(ssh_cfg, str(stop_script), _remote_scripts_path(target_root))
-            rc, out = run_ssh(
-                ssh_cfg,
-                f'powershell -NoProfile -ExecutionPolicy Bypass -File "{remote_stop}" -Port {port}',
-                timeout=20,
-            )
-        else:
-            rc, out = run_ssh(
-                ssh_cfg,
-                f'powershell -NoProfile -Command "'
-                f'Get-NetTCPConnection -LocalPort {port} '
-                f'-State Listen -ErrorAction SilentlyContinue | '
-                f'ForEach-Object {{ Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }}; '
-                f'exit 0"',
-                timeout=20,
-            )
+        # Phase 2 (refactor): verify tracked target payload is present
+        # BEFORE attempting to stop the server.  No ad-hoc scp_to here —
+        # the lifecycle backend only inspects state.
+        integrity = self._target_integrity(cfg)
+        if not integrity.get("ok"):
+            return integrity
+
+        # Phase 3: invoke the tracked stop_server.ps1 on the target
+        # (it was placed by install_target_task; do NOT re-scp it).
+        remote_stop = f"{_remote_scripts_path(target_root)}\\stop_server.ps1"
+        rc, out = run_ssh(
+            ssh_cfg,
+            f'powershell -NoProfile -ExecutionPolicy Bypass -File "{remote_stop}" -Port {port}',
+            timeout=20,
+        )
 
         rc_check, out_check = run_ssh(
             ssh_cfg,

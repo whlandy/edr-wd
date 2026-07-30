@@ -505,12 +505,17 @@ class MacOSLifecycle:
         )
         run_ssh(ssh_cfg, stop_cmd, timeout=15)
 
-        # Phase 3: upload start_server.sh
-        start_script = _local_script("start_server.sh")
-        if start_script:
-            scp_to(ssh_cfg, str(start_script), _remote_scripts_dir(target_root))
+        # Phase 2b (refactor): verify tracked target payload is present
+        # BEFORE invoking the LaunchAgent.  No ad-hoc scp_to here — the
+        # lifecycle backend only inspects state.  If payload is missing
+        # the operator must run deploy_target() then install_target_task().
+        # SSH errors propagate as target_integrity_check_failed.
+        integrity = self._target_integrity(cfg)
+        if not integrity.get("ok"):
+            return integrity
 
-        # Phase 4: kickstart LaunchAgent
+        # Phase 3: kickstart LaunchAgent (launchd pulls the tracked
+        # start_server.sh from scripts/macos/ — no per-call scp_to here)
         kick_cmd = (
             f"UID_VAL=$(id -u); "
             f"launchctl kickstart -k \"gui/${{UID_VAL}}/{launch_name}\" 2>&1"
@@ -676,20 +681,17 @@ class MacOSLifecycle:
         launch_name = mac_cfg["launch_name"]
         port = mcp_cfg["port"]
 
-        stop_script = _local_script("stop_server.sh")
-        if stop_script:
-            scp_to(ssh_cfg, str(stop_script), _remote_scripts_dir(target_root))
-            remote_stop = f"{_remote_scripts_dir(target_root)}/stop_server.sh"
-            rc, out = run_ssh(ssh_cfg, f"bash '{remote_stop}' --port {port}", timeout=20)
-        else:
-            rc, out = run_ssh(
-                ssh_cfg,
-                f"lsof -tiTCP:{port} -sTCP:LISTEN 2>/dev/null "
-                f"| xargs -r kill -TERM; sleep 0.5; "
-                f"lsof -tiTCP:{port} -sTCP:LISTEN 2>/dev/null "
-                f"| xargs -r kill -KILL; true",
-                timeout=20,
-            )
+        # Phase 2 (refactor): verify tracked target payload is present
+        # BEFORE attempting to stop the server.  No ad-hoc scp_to here —
+        # the lifecycle backend only inspects state.
+        integrity = self._target_integrity(cfg)
+        if not integrity.get("ok"):
+            return integrity
+
+        # Phase 3: invoke the tracked stop_server.sh on the target
+        # (it was placed by install_target_task; do NOT re-scp it).
+        remote_stop = f"{_remote_scripts_dir(target_root)}/stop_server.sh"
+        rc, out = run_ssh(ssh_cfg, f"bash '{remote_stop}' --port {port}", timeout=20)
 
         port_still_open = _is_port_listening("127.0.0.1", port)
         return self._ok("stop", data={
