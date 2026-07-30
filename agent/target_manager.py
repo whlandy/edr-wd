@@ -114,17 +114,27 @@ def _kill_ports_on_target(cfg: dict, ports: list[int]) -> None:
     ssh_cfg = cfg.get("ssh", {})
     if not ssh_cfg.get("host"):
         return
+    platform = (cfg.get("platform") or "windows").lower()
+    import logging
+    logger = logging.getLogger(__name__)
 
     for p in ports:
-        cmd = (
-            f'powershell -Command "'
-            f'Get-NetTCPConnection -LocalPort {p} -ErrorAction SilentlyContinue '
-            f'| Select-Object -ExpandProperty OwningProcess '
-            f'| ForEach-Object {{ Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }}'
-            f'"'
-        )
-        import logging
-        logger = logging.getLogger(__name__)
+        if platform == "macos":
+            cmd = (
+                f"lsof -tiTCP:{p} -sTCP:LISTEN 2>/dev/null "
+                f"| xargs -r kill -TERM 2>/dev/null; "
+                f"sleep 0.5; "
+                f"lsof -tiTCP:{p} -sTCP:LISTEN 2>/dev/null "
+                f"| xargs -r kill -KILL 2>/dev/null; true"
+            )
+        else:
+            cmd = (
+                f'powershell -Command "'
+                f'Get-NetTCPConnection -LocalPort {p} -ErrorAction SilentlyContinue '
+                f'| Select-Object -ExpandProperty OwningProcess '
+                f'| ForEach-Object {{ Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }}'
+                f'"'
+            )
         try:
             run_ssh(ssh_cfg, cmd, timeout=30)
         except Exception as exc:
@@ -374,17 +384,13 @@ def install_target_task(name: Optional[str] = None) -> dict:
     return _catch(tn, "install", _do)
 
 
-def repair_target(name: Optional[str] = None, repair: bool = False,
-                  kill_ports: Optional[list[int]] = None) -> dict:
+def repair_target(name: Optional[str] = None, repair: bool = False) -> dict:
     """
     Repair a target by sync-deploying and restarting the MCP server.
 
     When repair=True, performs a full deploy (upload target/ directory) first,
     then ensures the server is running. When repair=False, just probes and reports
     status without making changes.
-
-    kill_ports: if set, kill these ports before starting the server (force
-    recovery from stuck processes).
 
     Returns {"ok": True, "target": str, "stage": "repair", "data": {...}} or
             {"ok": False, "target": str, "stage": "repair", "error": ...,
@@ -401,14 +407,14 @@ def repair_target(name: Optional[str] = None, repair: bool = False,
             if not deploy_result.get("ok"):
                 return deploy_result
 
-        # Phase 2: ensure server is running with optional kill_ports
-        return ensure_server_running(target_name, repair_target=kill_ports)
+        # Phase 2: ensure server is running. Use repair=True so force-recovery
+        # behavior stays explicit and does not leak into normal connect flows.
+        return ensure_server_running(target_name, repair=repair)
 
     return _catch(tn, "repair", _do)
 
 
-def ensure_server_running(name: Optional[str] = None,
-                          repair_target: Optional[list[int]] = None) -> dict:
+def ensure_server_running(name: Optional[str] = None, *, repair: bool = False) -> dict:
     """
     Ensure the MCP server is running and GUI-ready on the target.
 
@@ -417,8 +423,8 @@ def ensure_server_running(name: Optional[str] = None,
     Phase 2: if port closed, dispatch to platform lifecycle to start the server,
       then wait for the port and check GUI readiness.
 
-    repair_target: optional list of ports to kill before ensuring the server
-      starts (force recovery from stuck processes).
+    repair: if True, force-clear the target MCP port before starting. This is
+      an explicit recovery path, not normal connect behavior.
 
     Returns {"ok": True, "target": str, "stage": "ensure", "data": {...}} or
             {"ok": False, "target": str, "stage": "ensure", "error": ...,
@@ -469,9 +475,10 @@ def ensure_server_running(name: Optional[str] = None,
                     result["next_action"] = _gui_recovery_action(gui_data)
                 return result
 
-        # Phase 2: if repair_target (kill_ports) is set, kill those ports first
-        if repair_target:
-            _kill_ports_on_target(cfg_light, repair_target)
+        # Phase 2: if repair is explicit, force-clear the target MCP port first.
+        if repair:
+            target_port = mcp_cfg["port"]
+            _kill_ports_on_target(cfg_light, [target_port])
 
         # Phase 3: port closed — start via lifecycle
         cfg = tc.get_resolved_target(target_name)
