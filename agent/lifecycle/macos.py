@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from agent.ssh_runner import run_ssh, scp_to
+from agent.ssh_runner import run_ssh, scp_to, scp_dir_to
 from agent.target_config import verify_observed_identity
 
 AGENT_ROOT = Path(__file__).resolve().parents[2]
@@ -160,14 +160,22 @@ class MacOSLifecycle:
     def deploy(self, cfg: dict) -> dict:
         """
         Upload the local target/ directory to the remote macos.root.
-        Returns structured result.
+
+        Uses scp_dir_to with tracked_only=True so untracked caches, logs,
+        screenshots, and local config never leak into the target payload
+        (matches Windows deploy behavior, see design doc step 5).
         """
         ssh_cfg = cfg["ssh"]
         mac_cfg = cfg["macos"]
         macos_root = mac_cfg["root"]
 
-        # Upload entire local target/ directory contents to remote macos_root
-        rc, msg = scp_to(ssh_cfg, str(LOCAL_TARGET), macos_root, timeout=60)
+        # Upload tracked local target/ contents to remote macos_root.
+        # tracked_only=True excludes untracked files (logs/, *.pyc, .tmp,
+        # local config) from the sync, mirroring Windows scp_dir_to.
+        rc, msg = scp_dir_to(
+            ssh_cfg, str(LOCAL_TARGET), macos_root,
+            timeout=60, tracked_only=True,
+        )
         if rc != 0:
             return self._err("deploy", "deploy_failed", msg[:300])
 

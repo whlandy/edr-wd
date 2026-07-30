@@ -553,10 +553,24 @@ def _gui_recovery_action(details: dict) -> str:
     )
 
 
-def stop_server(name: Optional[str] = None) -> dict:
+def stop_server(name: Optional[str] = None, *, repair: bool = False) -> dict:
     """
     Stop the MCP server process on the target.
-    Returns {"ok": True, "target": str, "stage": "stop", "data": {...}}.
+
+    Default (repair=False): no-write, lifecycle-only. The lifecycle backend
+    inspects target payload integrity (Phase 1) and refuses with
+    target_payload_incomplete when tracked files are missing. The caller
+    must run deploy_target() + install_target_task() explicitly.
+
+    repair=True: explicit opt-in to cascading repair. If the lifecycle
+    backend refuses with target_payload_incomplete, this entry point
+    delegates to repair_target(repair=True) — which may deploy/install —
+    and reports the cascade under data.repair_actions. The lifecycle
+    backend itself remains strict no-write; the cascade lives only in
+    this top-level wrapper.
+
+    Returns {"ok": True, "target": str, "stage": "stop", "data": {...}} or
+    {"ok": False, "target": str, "stage": "stop", "error": ..., "code": ...}.
     """
     def _do() -> dict:
         tc = TargetConfig()
@@ -567,7 +581,40 @@ def stop_server(name: Optional[str] = None) -> dict:
         lifecycle, err = _dispatch_lifecycle(cfg)
         if err is not None:
             return err
-        return lifecycle.stop_server(cfg)
+        result = lifecycle.stop_server(cfg)
+        if result.get("ok") or not repair:
+            return result
+
+        # repair=True AND lifecycle refused.  Cascade through the
+        # explicit repair entry point — never through the lifecycle
+        # backend directly, so the backend remains strict no-write.
+        if result.get("code") != "target_payload_incomplete":
+            # Other lifecycle errors (e.g. SSH failure) are not repairable
+            # from this entry point; surface them as-is.
+            return result
+
+        repair_result = repair_target(target_name, repair=True)
+        return {
+            "ok": False,
+            "stage": "stop",
+            "code": "stop_repair_cascaded",
+            "error": (
+                "Stop payload missing; ran explicit repair cascade. "
+                "Inspect data.lifecycle_result and data.repair_result."
+            ),
+            "data": {
+                "lifecycle_result": result,
+                "repair_result": repair_result,
+                "repair_actions": (repair_result.get("data") or {}).get(
+                    "repair_actions", []
+                ),
+            },
+            "next_action": (
+                "Repair cascade ran but stop still failed. "
+                "Re-run stop_server() now that deploy/install are done, "
+                "or run repair_target(name, repair=True) explicitly."
+            ),
+        }
 
     try:
         tc = TargetConfig()
@@ -577,12 +624,19 @@ def stop_server(name: Optional[str] = None) -> dict:
     return _catch(tn, "stop", _do)
 
 
-def restart_server(name: Optional[str] = None) -> dict:
-    """Stop then ensure running. Returns combined result."""
-    stop_result = stop_server(name)
+def restart_server(name: Optional[str] = None, *, repair: bool = False) -> dict:
+    """
+    Stop then ensure running. Returns combined result.
+
+    repair is forwarded as-is to both stop_server and ensure_server_running;
+    this wrapper does not add its own repair logic (Phase 3 design rule:
+    keep cascade logic in the leaf entry points, not duplicated in
+    restart_server).
+    """
+    stop_result = stop_server(name, repair=repair)
     if not stop_result["ok"]:
         return stop_result
-    return ensure_server_running(name)
+    return ensure_server_running(name, repair=repair)
 
 
 def _build_mcp_url(cfg: dict) -> str:

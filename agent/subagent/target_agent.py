@@ -60,10 +60,19 @@ class TargetSubAgent:
         with self._lock:
             return self.state.as_dict()
 
-    def ensure_running(self) -> dict:
-        """Ensure the target MCP server is running."""
+    def ensure_running(self, *, repair: bool = False) -> dict:
+        """
+        Ensure the target MCP server is running.
+
+        repair is forwarded as-is to target_manager.ensure_server_running.
+        The subagent does not branch on repair — it is a pure passthrough
+        so the cascade logic stays in the leaf entry points
+        (Phase 3 design rule).
+        """
         with self._lock:
-            result = target_manager.ensure_server_running(self.target)
+            result = target_manager.ensure_server_running(
+                self.target, repair=repair,
+            )
             self.state.server_running = bool(result.get("ok"))
             if result.get("ok"):
                 data = result.get("data", {})
@@ -111,10 +120,15 @@ class TargetSubAgent:
                 self.state.last_error = result.get("error", "MCP initialize failed")
             return result
 
-    def ensure_ready(self) -> dict:
-        """Ensure server is running and MCP is initialized."""
+    def ensure_ready(self, *, repair: bool = False) -> dict:
+        """
+        Ensure server is running and MCP is initialized.
+
+        repair is forwarded as-is to ensure_running (and from there to
+        target_manager.ensure_server_running). Pure passthrough.
+        """
         with self._lock:
-            running = self.ensure_running()
+            running = self.ensure_running(repair=repair)
             if not running.get("ok"):
                 return running
             return self.initialize_mcp()
