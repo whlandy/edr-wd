@@ -199,6 +199,12 @@ except Exception:
         exit 0
     }
     'push' {
+        # [debug-only] Raw SFTP copy of arbitrary sources into the
+        # target's incoming/ directory. Bypasses the deploy tracked-filter
+        # and the no-write lifecycle contract. Reserved for ad-hoc
+        # debugging when the normal deploy / repair channels cannot
+        # reach the target. Production sync must use repair or run
+        # test_case/run_tests.py — see references/agent-workflow.md.
         if (-not $Source -or $Source.Count -eq 0) {
             throw "push requires at least one source path via -Source"
         }

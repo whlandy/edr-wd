@@ -5,7 +5,7 @@
 #   up       Start the MCP server and prepare connection mode if needed
 #   down     Stop the MCP server and stop tunnel if configured
 #   status   Show target server and tunnel status when configured
-#   push     Copy a file or directory to the Windows target
+#   push     [debug-only] Copy a file or directory to the Windows target
 #   smoke    Run the MCP smoke test against the configured MCP URL
 #   repair   Sync-deploy target/ and restart the MCP server (force recovery)
 #
@@ -44,7 +44,9 @@ Commands:
   up       Start MCP server and prepare configured connection mode
   down     Stop MCP server and configured tunnel if needed
   status   Show target status and tunnel status when configured
-  push     Copy files to the Windows target via Paramiko SFTP
+  push     [debug-only] Copy files to the Windows target via Paramiko SFTP
+           (raw scp — bypasses deploy tracked-filter. Normal operation
+           should use repair or run_tests.py, not push.)
   smoke    Run the MCP smoke test against the configured MCP URL
   repair   Sync-deploy target/ and restart MCP server (force recovery)
 EOF

@@ -110,10 +110,90 @@ def test_stop_server_repair_true_cascades_on_incomplete(monkeypatch):
     assert repair_calls == [{"name": "unit-target", "repair": True}]
     # Cascade reported under code=stop_repair_cascaded
     assert result["code"] == "stop_repair_cascaded"
+    # PHASE 4: callers can distinguish recoverable cascade from hard
+    # failure so they don't show this as a user-facing error.
+    assert result["recoverable"] is True
+    assert result["ok"] is False
     assert result["data"]["lifecycle_result"]["code"] == "target_payload_incomplete"
     assert result["data"]["repair_actions"] == [
         "deploy_target", "install_target_task",
     ]
+
+
+def test_stop_server_repair_true_recoverable_flag_set(monkeypatch):
+    """When repair=True causes a cascade, the result MUST carry
+    recoverable=True so UI layers can suppress hard-error display.
+
+    This prevents false-positive error popups when the operation
+    ultimately succeeded through the repair channel.
+    """
+    from agent import target_manager
+
+    class FakeTargetConfig:
+        def get_default_target(self):
+            return "unit-target"
+
+        def get_resolved_target(self, _name):
+            return {
+                "platform": "macos",
+                "ssh": {"host": "127.0.0.1"},
+                "mcp": {"port": 8765, "connect_mode": "tunnel"},
+                "macos": {"root": "/Users/admin/edr-wd/target", "launch_name": "com.edr-wd.target"},
+            }
+
+    class FakeLifecycle:
+        def stop_server(self, _cfg):
+            return {
+                "ok": False,
+                "code": "target_payload_incomplete",
+            }
+
+    monkeypatch.setattr(target_manager, "TargetConfig", FakeTargetConfig)
+    monkeypatch.setattr(target_manager, "_dispatch_lifecycle", lambda _cfg: (FakeLifecycle(), None))
+    monkeypatch.setattr(
+        target_manager, "repair_target",
+        lambda *_a, **_k: {"ok": True, "data": {"repair_actions": ["deploy"]}},
+    )
+
+    result = target_manager.stop_server("unit-target", repair=True)
+
+    # The contract: a recoverable cascade is recoverable=True
+    assert result.get("recoverable") is True
+
+
+def test_stop_server_non_cascade_errors_have_no_recoverable_flag(monkeypatch):
+    """Other lifecycle errors (SSH failure etc.) MUST NOT be marked
+    recoverable — they did NOT recover, they simply failed.
+    """
+    from agent import target_manager
+
+    class FakeTargetConfig:
+        def get_default_target(self):
+            return "unit-target"
+
+        def get_resolved_target(self, _name):
+            return {
+                "platform": "macos",
+                "ssh": {"host": "127.0.0.1"},
+                "mcp": {"port": 8765, "connect_mode": "tunnel"},
+                "macos": {"root": "/Users/admin/edr-wd/target", "launch_name": "com.edr-wd.target"},
+            }
+
+    class FakeLifecycle:
+        def stop_server(self, _cfg):
+            return {
+                "ok": False,
+                "code": "target_launchagent_check_failed",
+                "error": "SSH timeout",
+            }
+
+    monkeypatch.setattr(target_manager, "TargetConfig", FakeTargetConfig)
+    monkeypatch.setattr(target_manager, "_dispatch_lifecycle", lambda _cfg: (FakeLifecycle(), None))
+
+    result = target_manager.stop_server("unit-target", repair=True)
+
+    # Non-cascade errors MUST NOT carry recoverable=True
+    assert "recoverable" not in result or result["recoverable"] is False
 
 
 def test_stop_server_repair_true_does_not_cascade_on_other_errors(monkeypatch):

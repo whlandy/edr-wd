@@ -594,8 +594,15 @@ def stop_server(name: Optional[str] = None, *, repair: bool = False) -> dict:
             return result
 
         repair_result = repair_target(target_name, repair=True)
+        # Lifecycle backend refused with payload_incomplete and the
+        # caller opted in to repair: cascade to repair_target and
+        # surface the cascade. We mark recoverable=True so callers
+        # can distinguish "stop failed and we recovered via
+        # deploy/install" from "stop failed irrecoverably". Recovered
+        # cases should NOT be shown as a hard error to a user.
         return {
             "ok": False,
+            "recoverable": True,
             "stage": "stop",
             "code": "stop_repair_cascaded",
             "error": (
