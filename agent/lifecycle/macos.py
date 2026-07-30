@@ -360,10 +360,6 @@ class MacOSLifecycle:
 
         plist_xml = (out or "").strip()
 
-        # Label check — plutil emits <string>{launch_name}</string> verbatim.
-        expected_label_tag = f"<string>{launch_name}</string>"
-        label_ok = expected_label_tag in plist_xml
-
         # ProgramArguments check — parse the plist as a dict and check
         # that ProgramArguments contains at least one entry that references
         # both `target_root` and the `start_server` basename.  This is
@@ -396,6 +392,7 @@ class MacOSLifecycle:
                 "next_action": "Run install_target_task().",
             }
 
+        label_ok = plist.get("Label") == launch_name
         program_args = plist.get("ProgramArguments", []) or []
         if not isinstance(program_args, list):
             program_args = [str(program_args)]
@@ -521,6 +518,10 @@ class MacOSLifecycle:
         integrity = self._target_integrity(cfg)
         if not integrity.get("ok"):
             return integrity
+
+        launchagent = self._launchagent_integrity(cfg)
+        if not launchagent.get("ok"):
+            return launchagent
 
         # Phase 3: kickstart LaunchAgent (launchd pulls the tracked
         # start_server.sh from scripts/macos/ — no per-call scp_to here)

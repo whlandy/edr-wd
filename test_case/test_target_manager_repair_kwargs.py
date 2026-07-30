@@ -17,6 +17,8 @@ its own repair branches.
 
 from __future__ import annotations
 
+import json
+
 
 # ── stop_server ──────────────────────────────────────────────────────────────
 
@@ -84,7 +86,12 @@ def test_stop_server_repair_true_cascades_on_incomplete(monkeypatch):
             }
 
     class FakeLifecycle:
+        calls = 0
+
         def stop_server(self, _cfg):
+            self.calls += 1
+            if self.calls == 2:
+                return {"ok": True, "stage": "stop", "data": {"port_killed": True}}
             return {
                 "ok": False,
                 "stage": "stop",
@@ -108,16 +115,14 @@ def test_stop_server_repair_true_cascades_on_incomplete(monkeypatch):
 
     # CRITICAL: repair_target called exactly once with repair=True
     assert repair_calls == [{"name": "unit-target", "repair": True}]
-    # Cascade reported under code=stop_repair_cascaded
-    assert result["code"] == "stop_repair_cascaded"
-    # PHASE 4: callers can distinguish recoverable cascade from hard
-    # failure so they don't show this as a user-facing error.
+    # The repaired payload is retried and the original stop action succeeds.
     assert result["recoverable"] is True
-    assert result["ok"] is False
+    assert result["ok"] is True
     assert result["data"]["lifecycle_result"]["code"] == "target_payload_incomplete"
     assert result["data"]["repair_actions"] == [
         "deploy_target", "install_target_task",
     ]
+    json.dumps(result)
 
 
 def test_stop_server_repair_true_recoverable_flag_set(monkeypatch):
@@ -142,7 +147,12 @@ def test_stop_server_repair_true_recoverable_flag_set(monkeypatch):
             }
 
     class FakeLifecycle:
+        calls = 0
+
         def stop_server(self, _cfg):
+            self.calls += 1
+            if self.calls == 2:
+                return {"ok": True, "stage": "stop", "data": {}}
             return {
                 "ok": False,
                 "code": "target_payload_incomplete",
@@ -159,6 +169,46 @@ def test_stop_server_repair_true_recoverable_flag_set(monkeypatch):
 
     # The contract: a recoverable cascade is recoverable=True
     assert result.get("recoverable") is True
+
+
+def test_stop_server_failed_repair_is_not_recoverable(monkeypatch):
+    """A failed repair must remain a hard failure."""
+    from agent import target_manager
+
+    class FakeTargetConfig:
+        def get_default_target(self):
+            return "unit-target"
+
+        def get_resolved_target(self, _name):
+            return {
+                "platform": "macos",
+                "ssh": {"host": "127.0.0.1"},
+                "mcp": {"port": 8765, "connect_mode": "tunnel"},
+                "macos": {
+                    "root": "/Users/admin/edr-wd/target",
+                    "launch_name": "com.edr-wd.target",
+                },
+            }
+
+    class FakeLifecycle:
+        def stop_server(self, _cfg):
+            return {"ok": False, "code": "target_payload_incomplete"}
+
+    monkeypatch.setattr(target_manager, "TargetConfig", FakeTargetConfig)
+    monkeypatch.setattr(
+        target_manager, "_dispatch_lifecycle", lambda _cfg: (FakeLifecycle(), None),
+    )
+    monkeypatch.setattr(
+        target_manager,
+        "repair_target",
+        lambda *_a, **_k: {"ok": False, "code": "deploy_failed"},
+    )
+
+    result = target_manager.stop_server("unit-target", repair=True)
+
+    assert result["ok"] is False
+    assert result["recoverable"] is False
+    assert result["code"] == "stop_repair_failed"
 
 
 def test_stop_server_non_cascade_errors_have_no_recoverable_flag(monkeypatch):
@@ -320,3 +370,37 @@ def test_restart_server_short_circuits_when_stop_fails(monkeypatch):
 
     assert forwarded == [("stop", "unit-target", True)]  # ensure NOT called
     assert result["code"] == "target_payload_incomplete"
+
+
+def test_restart_server_continues_after_successful_repair_cascade(monkeypatch):
+    """A repaired stop returns ok=True, allowing restart to ensure again."""
+    from agent import target_manager
+
+    forwarded = []
+
+    monkeypatch.setattr(
+        target_manager,
+        "stop_server",
+        lambda name, *, repair=False: forwarded.append(("stop", name, repair)) or {
+            "ok": True,
+            "recoverable": True,
+            "stage": "stop",
+            "data": {},
+        },
+    )
+    monkeypatch.setattr(
+        target_manager,
+        "ensure_server_running",
+        lambda name, *, repair=False: forwarded.append(("ensure", name, repair)) or {
+            "ok": True,
+            "stage": "ensure",
+        },
+    )
+
+    result = target_manager.restart_server("unit-target", repair=True)
+
+    assert result["ok"] is True
+    assert forwarded == [
+        ("stop", "unit-target", True),
+        ("ensure", "unit-target", True),
+    ]

@@ -108,6 +108,12 @@ def test_windows_ensure_proceeds_when_payload_complete(monkeypatch):
             return (1, "closed")
         if "Test-Path" in command:
             return (0, "found")
+        if "Get-ScheduledTask" in command:
+            return (
+                0,
+                "cmd=C:\\edr-wd\\target\\scripts\\start_server.ps1\n"
+                "logonType=Interactive",
+            )
         if "schtasks" in command:
             return (0, "SUCCESS")
         if "Get-CimInstance" in command or "SessionId" in command:

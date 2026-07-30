@@ -705,6 +705,10 @@ class WindowsLifecycle:
         if not integrity.get("ok"):
             return integrity
 
+        task = self._task_integrity(cfg)
+        if not task.get("ok"):
+            return task
+
         # Phase 3: stop any existing process on the port
         stop_cmd = (
             f'powershell -NoProfile -Command "'

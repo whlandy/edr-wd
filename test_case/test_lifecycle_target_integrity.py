@@ -346,6 +346,42 @@ def test_macos_launchagent_integrity_label_mismatch(monkeypatch):
 
     assert result["ok"] is False
     assert result["code"] == "launchagent_invalid"
+
+
+def test_macos_launchagent_label_must_match_label_field(monkeypatch):
+    """The expected label appearing in another plist field is insufficient."""
+    from agent.lifecycle.macos import MacOSLifecycle
+
+    plist = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.wrong</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/admin/edr-wd/target/scripts/macos/start_server.sh</string>
+    <string>com.edr-wd.target</string>
+  </array>
+</dict>
+</plist>"""
+
+    monkeypatch.setattr(
+        "agent.lifecycle.macos.run_ssh",
+        lambda *_a, **_k: (0, plist),
+    )
+
+    result = MacOSLifecycle()._launchagent_integrity({
+        "ssh": {"host": "127.0.0.1"},
+        "macos": {
+            "root": "/Users/admin/edr-wd/target",
+            "launch_name": "com.edr-wd.target",
+        },
+    })
+
+    assert result["ok"] is False
+    assert result["code"] == "launchagent_invalid"
     assert "Label" in result["error"]
 
 

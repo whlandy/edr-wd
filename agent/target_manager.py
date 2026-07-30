@@ -401,15 +401,34 @@ def repair_target(name: Optional[str] = None, repair: bool = False) -> dict:
         tc = TargetConfig()
         target_name = name or tc.get_default_target()
 
+        repair_actions: list[str] = []
+        repair_results: dict[str, dict] = {}
         if repair:
-            # Phase 1: deploy target/ directory to the remote
             deploy_result = deploy_target(target_name)
+            repair_actions.append("deploy_target")
+            repair_results["deploy_target"] = deploy_result
             if not deploy_result.get("ok"):
                 return deploy_result
 
-        # Phase 2: ensure server is running. Use repair=True so force-recovery
-        # behavior stays explicit and does not leak into normal connect flows.
-        return ensure_server_running(target_name, repair=repair)
+            install_result = install_target_task(target_name)
+            repair_actions.append("install_target_task")
+            repair_results["install_target_task"] = install_result
+            if not install_result.get("ok"):
+                return install_result
+
+        # Force-recovery remains explicit and does not leak into normal connects.
+        ensure_result = ensure_server_running(target_name, repair=repair)
+        if repair:
+            repair_actions.append("ensure_server_running")
+            ensure_snapshot = dict(ensure_result)
+            if isinstance(ensure_result.get("data"), dict):
+                ensure_snapshot["data"] = dict(ensure_result["data"])
+            repair_results["ensure_server_running"] = ensure_snapshot
+            ensure_result.setdefault("data", {}).update({
+                "repair_actions": repair_actions,
+                "repair_results": repair_results,
+            })
+        return ensure_result
 
     return _catch(tn, "repair", _do)
 
@@ -594,34 +613,50 @@ def stop_server(name: Optional[str] = None, *, repair: bool = False) -> dict:
             return result
 
         repair_result = repair_target(target_name, repair=True)
-        # Lifecycle backend refused with payload_incomplete and the
-        # caller opted in to repair: cascade to repair_target and
-        # surface the cascade. We mark recoverable=True so callers
-        # can distinguish "stop failed and we recovered via
-        # deploy/install" from "stop failed irrecoverably". Recovered
-        # cases should NOT be shown as a hard error to a user.
-        return {
-            "ok": False,
-            "recoverable": True,
-            "stage": "stop",
-            "code": "stop_repair_cascaded",
-            "error": (
-                "Stop payload missing; ran explicit repair cascade. "
-                "Inspect data.lifecycle_result and data.repair_result."
-            ),
-            "data": {
-                "lifecycle_result": result,
-                "repair_result": repair_result,
-                "repair_actions": (repair_result.get("data") or {}).get(
-                    "repair_actions", []
-                ),
-            },
-            "next_action": (
-                "Repair cascade ran but stop still failed. "
-                "Re-run stop_server() now that deploy/install are done, "
-                "or run repair_target(name, repair=True) explicitly."
-            ),
+        repair_data = repair_result.get("data") or {}
+        cascade_data = {
+            "lifecycle_result": result,
+            "repair_result": repair_result,
+            "repair_actions": repair_data.get("repair_actions", []),
         }
+        if not repair_result.get("ok"):
+            return {
+                "ok": False,
+                "recoverable": False,
+                "stage": "stop",
+                "code": "stop_repair_failed",
+                "error": "Stop payload was missing and the repair cascade failed.",
+                "data": cascade_data,
+                "next_action": repair_result.get(
+                    "next_action",
+                    "Inspect data.repair_result, fix the reported error, and retry.",
+                ),
+            }
+
+        # Repair starts the server as part of readiness verification. Retry the
+        # original stop operation so this API still fulfils its requested action.
+        retry_result = lifecycle.stop_server(cfg)
+        retry_snapshot = dict(retry_result)
+        if isinstance(retry_result.get("data"), dict):
+            retry_snapshot["data"] = dict(retry_result["data"])
+        cascade_data["retry_result"] = retry_snapshot
+        if not retry_result.get("ok"):
+            return {
+                "ok": False,
+                "recoverable": False,
+                "stage": "stop",
+                "code": "stop_retry_failed",
+                "error": "Repair succeeded, but the stop retry failed.",
+                "data": cascade_data,
+                "next_action": retry_result.get(
+                    "next_action",
+                    "Inspect data.retry_result and retry stop_server().",
+                ),
+            }
+
+        retry_result["recoverable"] = True
+        retry_result.setdefault("data", {}).update(cascade_data)
+        return retry_result
 
     try:
         tc = TargetConfig()
