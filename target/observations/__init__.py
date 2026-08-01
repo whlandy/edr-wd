@@ -74,6 +74,7 @@ from .invalidate import (
     is_live,
     mark_invalid,
     mark_live,
+    reset_for_tests,  # re-exported under its plain name for tests
 )
 from .models import (
     OBSERVATION_SCHEMA_VERSION,
@@ -141,6 +142,10 @@ __all__ = [
     "invalidate_snapshot",
     "is_live",
     "forget",
+    # Test-only reset. P1.1 review: this is now part of the
+    # public surface (still documented as test-only) so the
+    # dispatcher's test suite can drive the registry deterministically.
+    "reset_for_tests",
     # Snapshot building
     "AssignmentResult",
     "assign_target_ids",
