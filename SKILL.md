@@ -1,6 +1,6 @@
 ---
 name: edr-wd
-description: Use this skill when working on EDR-WD, a cross-platform MCP GUI automation system for HiSecEndpoint/EDR targets. Use it to inspect, modify, deploy, or test Windows/macOS agent-target workflows, target lifecycle scripts, FastMCP tools, GUI automation backends, HiSec window-pair E2E behavior, and component-tree UI actions.
+description: Operate and develop EDR-WD, a cross-platform MCP GUI automation system for HiSecEndpoint/EDR targets. Use when inspecting, modifying, deploying, repairing, or testing Windows/macOS agent-target workflows; managing target lifecycle and FastMCP sessions; automating windows and component trees; validating the HiSec entry/client window pair; or debugging SSH, profiles, GUI readiness, and E2E failures.
 ---
 
 # EDR-WD
@@ -14,6 +14,23 @@ EDR-WD has two layers:
 The agent OS and target OS are independent. A macOS agent can drive Windows or
 macOS targets, and a Windows agent can do the same when the target config and
 SSH path are valid.
+
+## Current Capabilities
+
+- Manage multiple configured targets over local, direct, or Paramiko tunnel
+  connections with target-scoped `TargetSubAgent` sessions.
+- Probe identity and dependencies; deploy only Git-tracked `target/` files;
+  install Windows Task Scheduler or macOS LaunchAgent hooks; ensure, stop,
+  restart, repair, and inspect MCP/GUI health.
+- Run FastMCP GUI tools for window discovery, connection and locking,
+  component-tree inspection, semantic control actions, pointer/keyboard input,
+  screenshots, app activation, and text extraction.
+- Activate and restore HiSecEndpoint while keeping the entry window and
+  EDRClient window ownership explicit on Windows and macOS.
+- Run guarded Windows PowerShell commands synchronously or as cancellable jobs
+  when `EDR_WD_ENABLE_POWERSHELL=1`.
+- Dispatch profile-aware smoke, integration, and E2E suites for
+  `windows_hisec`, `macos_hisec`, and `macos_generic`.
 
 ## First Steps
 
@@ -125,6 +142,27 @@ Do not start by deploying or restarting MCP. Before `deploy_target()`,
 Read `references/agent-workflow.md` before changing deployment or lifecycle
 flow.
 
+### Lifecycle Write Boundary
+
+Treat normal lifecycle calls as strict no-upload operations:
+
+- `ensure_server_running(repair=False)`, `stop_server(repair=False)`, and
+  `restart_server(repair=False)` inspect and invoke installed target payload;
+  they must not silently SCP replacement scripts.
+- `deploy_target()`, `install_target_task()`, and
+  `repair_target(repair=True)` are explicit write paths.
+- `repair_target(repair=True)` performs `deploy -> install -> ensure` and
+  records `repair_actions`/`repair_results` in its result.
+- `stop_server(repair=True)` may repair only
+  `target_payload_incomplete`, then must retry the requested stop. Never mark a
+  failed repair or failed retry as recoverable.
+- Startup must validate both tracked payload and platform registration before
+  invoking `schtasks /Run` or `launchctl kickstart`.
+- CLI `push` bypasses tracked-only deployment and is debug-only.
+
+Keep result dictionaries JSON-serializable; never embed a result object inside
+itself. Read `references/agent-workflow.md` for the complete operation table.
+
 ## Target Config
 
 Runtime targets are loaded by `agent.target_config.TargetConfig` from
@@ -171,15 +209,25 @@ agent-side command flow.
 Read `references/mcp-tools.md` when adding tools, debugging tool calls, or
 changing backend capabilities.
 
+Prefer semantic component actions (`click`, `click_target`, `select`) after
+`connect`/`lock_window` and `dump_tree`. Coordinate actions are fallback tools,
+and HiSec actions must pass `expected_process_name` so entry/client windows
+cannot be confused.
+
 ## Testing
 
 Use profile-aware tests; do not route a macOS target into Windows HiSec tests.
 
 ```bash
+python3 -m pytest -q test_case
 python test_case/run_tests.py --target 2.26-edr-win26-win11
 python test_case/run_tests.py --target 2.29-edr-mac29-macos14
 python3 -m pytest --collect-only -q test_case/test_integration test_case/test_e2e
 ```
+
+Local pytest must pass independently of live targets. E2E/integration cases may
+skip with `MCP server not reachable` until a configured target MCP server is
+available; do not report those skips as unit-test failures.
 
 Read `references/testing.md` before changing test profile dispatch, adding E2E
 cases, or interpreting live target failures.

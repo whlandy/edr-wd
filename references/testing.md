@@ -31,9 +31,22 @@ existing profile-resolution code. Do not silently fall back to Windows tests.
 ## Pytest Suites
 
 ```bash
+python3 -m pytest -q test_case
 python3 -m pytest --collect-only -q test_case/test_integration test_case/test_e2e
 python3 -m pytest -q test_case/test_integration test_case/test_e2e
 ```
+
+The full local suite includes lifecycle, repair sequencing, registration gates,
+configuration/profile, integration, and E2E tests. Unit tests must pass without
+a live endpoint. Integration/E2E cases may skip with `MCP server not reachable`
+when no configured target MCP server is running; inspect skips with:
+
+```bash
+python3 -m pytest -q -rs test_case
+```
+
+Do not convert an unreachable live target into a local unit-test failure, but
+do report that real GUI behavior remains unverified.
 
 Focused local checks:
 

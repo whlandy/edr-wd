@@ -210,6 +210,36 @@ Required order:
 Only after these checks pass should you call deployment/startup actions such as
 `deploy_target()`, `install_target_task()`, or `ensure_running()`.
 
+## Lifecycle Operation Contract
+
+Use the least invasive operation that satisfies the request:
+
+| Operation | Target writes | Contract |
+|---|---:|---|
+| `probe_target`, `check_server_health`, `health_detail` | No | Inspect identity, transport, MCP, and GUI readiness. |
+| `ensure_server_running(repair=False)` | No upload/install | Validate tracked payload and scheduler registration, then start the installed service if needed. |
+| `stop_server(repair=False)` | No upload/install | Validate tracked payload and invoke its installed stop script. |
+| `restart_server(repair=False)` | No upload/install | Stop, then ensure; stop failures short-circuit. |
+| `deploy_target` | Yes | Upload only Git-tracked files from `target/`. |
+| `install_target_task` | Yes | Register Windows Task Scheduler or macOS LaunchAgent using tracked scripts. |
+| `repair_target(repair=True)` | Yes | Run `deploy_target -> install_target_task -> ensure_server_running(repair=True)`. |
+| `stop_server(repair=True)` | Conditional | Repair only `target_payload_incomplete`, then retry stop. |
+| CLI `push` | Yes, unrestricted | Debug escape hatch; bypasses tracked-only filtering. |
+
+`ensure_server_running` must reject incomplete payload with
+`target_payload_incomplete`, invalid Windows registration with
+`scheduled_task_invalid`, and invalid macOS registration with
+`launchagent_invalid`. Keep SSH/probe errors distinct from missing state.
+
+Successful repair results include ordered `repair_actions` and per-step
+`repair_results`. Results must remain JSON-serializable. A repair failure or a
+post-repair stop retry failure must return `recoverable=False`; only a completed
+repair and successful retry may be marked recoverable.
+
+`TargetSubAgent.ensure_running(repair=...)` and `ensure_ready(repair=...)` only
+forward the flag. Keep repair branching in `agent/target_manager.py`, not in the
+subagent or platform lifecycle backend.
+
 ## Convenience Wrappers
 
 ```bash
@@ -217,7 +247,12 @@ bash agent/edr-wd.sh up
 bash agent/edr-wd.sh status
 bash agent/edr-wd.sh smoke --gui
 bash agent/edr-wd.sh down
+bash agent/edr-wd.sh repair
 ```
+
+Treat `bash agent/edr-wd.sh push ...` and `agent/deploy.ps1 -Action push` as
+debug-only commands. Production synchronization must use tracked deployment or
+repair.
 
 On Windows agents, use `agent/deploy.ps1` for the same control plane.
 
