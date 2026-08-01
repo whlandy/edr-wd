@@ -1,0 +1,37 @@
+{
+  "plan_id": "PLAN-PROTECTION-001",
+  "catalog_version": "1.0.1",
+  "catalog_digest": "sha256:0ecbda1584b1baa0cf8ada2c38fc6c2037b7f2f8334c34b33f682a0ae9e28d07",
+  "target": "2.26-edr-win26-win11",
+  "steps": [
+    {
+      "step_id": "S001",
+      "action_id": "session.connect",
+      "action_code": "A001",
+      "args": {"process_name": "EDRClient.exe"},
+      "on_error": "abort"
+    },
+    {
+      "step_id": "S002",
+      "action_id": "session.window_lock.set",
+      "action_code": "A002",
+      "args": {"process_name": "EDRClient.exe", "strict": true},
+      "depends_on": ["S001"],
+      "on_error": "abort"
+    },
+    {
+      "step_id": "S003",
+      "action_id": "gui.click",
+      "action_code": "A020",
+      "depends_on": ["S002"],
+      "on_error": "capture_and_abort",
+      "expectations": [
+        {
+          "type": "window_text_contains",
+          "value": "Protection Center",
+          "timeout_seconds": 10
+        }
+      ]
+    }
+  ]
+}
