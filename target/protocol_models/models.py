@@ -150,15 +150,28 @@ def _require_enum(
     return value
 
 
-def _allow_none(v: Any, *, path: str, field_name: str) -> Any:
+def _allow_none_or_str(v: Any, *, path: str, field_name: str) -> Any:
+    """Accept `None` or a string. P0.2 originally had `_allow_none`
+    which accepted only `None` — P0.3's fingerprint flow exercised the
+    string branch and revealed the gap. Renamed + fixed in P0.3 (see
+    CHANGELOG)."""
     if v is None:
         return None
+    if isinstance(v, str):
+        return v
     raise ProtocolModelError(
         "type_error",
         f"{field_name} must be None or a string, got {type(v).__name__}",
         path=path,
         value=type(v).__name__,
     )
+
+
+# Backwards-compat alias so callers that imported `_allow_none` from
+# P0.2 still resolve (P0.2 models only ever passed `None`, so the
+# alias preserves that behaviour while P0.3 callers use the fixed
+# helper).
+_allow_none = _allow_none_or_str
 
 
 # ---------------------------------------------------------------------------
