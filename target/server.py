@@ -1081,6 +1081,47 @@ def diagnose_windows() -> str:
 
 
 # ---------------------------------------------------------------------------
+# P1.1 unified dispatcher: execute_action MCP tool
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    name="execute_action",
+    description=(
+        "Unified dispatcher entry point (P1.1). Routes action_id to "
+        "the corresponding backend method, validates preconditions, "
+        "checks ownership, normalises the result into an "
+        "ActionReceipt, and returns the cached receipt on duplicate "
+        "request_id (FR-P1.1-01..02)."
+    ),
+)
+def execute_action(
+    action_id: str,
+    action_code: str | None = None,
+    args: dict | None = None,
+    target_ref: dict | None = None,
+    request_id: str | None = None,
+) -> str:
+    """Single unified dispatcher (P1.1).
+
+    Returns the JSON-encoded ActionReceipt. The receipt is the
+    canonical envelope for both success and failure paths; legacy
+    tools remain byte-compatible with their previous return shape.
+    """
+    # Lazy import to keep the module import surface stable.
+    from action_dispatcher import dispatch
+
+    receipt = dispatch(
+        action_id=action_id,
+        action_code=action_code,
+        args=args,
+        target_ref=target_ref,
+        request_id=request_id,
+    )
+    return receipt.to_json()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 

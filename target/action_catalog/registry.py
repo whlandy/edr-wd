@@ -76,13 +76,29 @@ BACKEND_CAPABILITIES: dict[str, dict[str, bool]] = {}
 
 
 def _build_capability_map(specs: tuple[ActionSpec, ...]) -> dict[str, dict[str, bool]]:
-    """Index each spec by action_id → {backend: True}.
+    """Index each spec by action_id → {backend: True/False}.
+
+    The map defaults to True for every `(action_id, backend)` pair
+    declared in `spec.backends`, then is overridden by
+    `BACKEND_NOT_IMPLEMENTED` (P0.1 review: the static capability
+    map must honour the not-implemented table, otherwise the
+    dispatcher would treat macOS type_text as supported even though
+    it is listed as not implemented).
 
     Static only. Live enablement is decided by P1.1 dispatcher.
     """
+    from .enums import BACKEND_NOT_IMPLEMENTED
     out: dict[str, dict[str, bool]] = {}
     for spec in specs:
-        out[spec.action_id] = {b: True for b in spec.backends}
+        out[spec.action_id] = {}
+        for b in spec.backends:
+            # BACKEND_NOT_IMPLEMENTED keys are tool_name, not
+            # action_id. Map them.
+            not_impl_tools = BACKEND_NOT_IMPLEMENTED.get(b, {})
+            if spec.tool_name in not_impl_tools:
+                out[spec.action_id][b] = False
+            else:
+                out[spec.action_id][b] = True
     return out
 
 
