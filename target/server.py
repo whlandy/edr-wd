@@ -33,6 +33,12 @@ from fastmcp import FastMCP
 
 from automation import create_backend
 from automation.base import AutomationBackend
+from action_catalog import (
+    CATALOG_VERSION,
+    catalog_digest,
+    get_action_catalog as _get_action_catalog_dict,
+    status_action_space,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -654,10 +660,49 @@ def restore_edr() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Action catalog (P0.1)
+# ---------------------------------------------------------------------------
 
-# --------------------------------------------------------------------------
+@mcp.tool(
+    name="get_action_catalog",
+    description=(
+        "Return the V1 action catalog: semantic action_id, optional "
+        "action_code, MCP tool_name, description, JSON input/result "
+        "schema, supported backends, requires, side_effect/risk/"
+        "rollback_class, default screenshot, transition_policy, "
+        "preferred_over, and live enablement for the current backend. "
+        "Use this before planning to confirm which actions are available."
+    ),
+)
+def get_action_catalog(backend: str = None, include_disabled: bool = False) -> str:
+    """Return the immutable V1 action catalog.
+
+    Parameters
+    ----------
+    backend : str | None
+        Backend name to compute static enablement for. When None,
+        `enabled` is reported as null and the planner must re-call with
+        a backend.
+    include_disabled : bool
+        When True, disabled actions are also included in the response.
+
+    Note: the tool body is purely a catalog → JSON projection (P0.1).
+    Runtime backend probing is P1.1 dispatcher territory and is not
+    accessible from this tool. See `action_catalog.runtime_capability`
+    for the runtime probe API (unused in P0.1).
+    """
+    if backend is None and _backend is not None:
+        backend = _backend_kind
+    payload = _get_action_catalog_dict(
+        backend=backend,
+        include_disabled=include_disabled,
+    )
+    return json.dumps(payload, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
 # Status
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 import socket
 
@@ -725,6 +770,15 @@ def status() -> str:
         "server_pid": pid,
         "server_pid_available": pid is not None,
         "warnings": warnings,
+        # Catalog version/digest (P0.1). Plans must carry the matching
+        # pair; a mismatch is a structured error in P0.2 validation.
+        # Nested under `metadata` to keep top-level keys stable for
+        # legacy consumers and to leave room for future metadata fields
+        # (renderer_version, schema_versions) without re-shuffling.
+        "metadata": {
+            "catalog_version": CATALOG_VERSION,
+            "catalog_digest": catalog_digest(),
+        },
         # HiSec-specific; granular process/window detection
         "hisec_agent_process_found": False,
         "hisec_main_window_found": False,
@@ -734,67 +788,12 @@ def status() -> str:
     }
 
     if _backend is not None:
-        if backend_name == "macos_accessibility":
-            action_space = {
-                "click_at": True,
-                "click_window_at": True,
-                "double_click_at": True,
-                "right_click_at": True,
-                "middle_click_at": True,
-                "hover_at": True,
-                "drag": True,
-                "scroll": True,
-                "activate_app": True,
-                "list_windows": True,
-                "is_window_open": True,
-                "wait_window": True,
-                "connect": True,
-                "screenshot": True,
-                "lock_window": True,
-                "unlock_window": True,
-                "get_window_lock": True,
-                "verify_window_lock": True,
-                "click": True,
-                "click_target": True,
-                "find_control": True,
-                "dump_tree": True,
-                "type_text": False,
-                "select": False,
-                "get_text": False,
-                "activate_edr": True,
-                "restore_edr": True,
-            }
-        else:
-            action_space = {
-                "click_at": True,
-                "click_window_at": True,
-                "double_click_at": True,
-                "right_click_at": True,
-                "middle_click_at": True,
-                "hover_at": True,
-                "drag": True,
-                "scroll": True,
-                "activate_app": True,
-                "list_windows": True,
-                "is_window_open": True,
-                "wait_window": True,
-                "connect": True,
-                "screenshot": True,
-                "lock_window": True,
-                "unlock_window": True,
-                "get_window_lock": True,
-                "verify_window_lock": True,
-                "click": True,
-                "click_target": True,
-                "find_control": True,
-                "dump_tree": True,
-                "type_text": True,
-                "select": True,
-                "get_text": True,
-                "activate_edr": hasattr(_backend, "activate_edr"),
-                "restore_edr": True,
-            }
-        result["action_space"] = action_space
+        # Catalog-driven status.action_space (P0.1). The map is generated
+        # from the V1 catalog; `restore_edr` has
+        # `execution_provider == "server_inline"` and is implemented
+        # inline in this module. The catalog is the single source of
+        # truth — no override is applied here.
+        result["action_space"] = status_action_space(backend_name)
         if hasattr(_backend, "get_window_lock"):
             try:
                 result["window_lock"] = _backend.get_window_lock()

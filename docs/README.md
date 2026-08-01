@@ -9,6 +9,9 @@ completed design plans after their rules are represented in code, tests,
 - [`architecture/00-overview.md`](architecture/00-overview.md): current
   cross-platform agent/target architecture, connection modes, backend split,
   and HiSec window-pair contract.
+- [`architecture/01-action-trace-test-report-design.md`](architecture/01-action-trace-test-report-design.md):
+  detailed implementation contract for versioned action IDs, atomic test
+  execution, chained traces, screenshots, recovery, and Markdown reports.
 
 ## Todo Designs
 
@@ -16,6 +19,32 @@ completed design plans after their rules are represented in code, tests,
   lifecycle cleanup record for making normal connect/test/SOP flows avoid
   implicit target-side script uploads after the tracked `target/` payload is
   deployed.
+- [`todo/llm-action-id-sequences.md`](todo/llm-action-id-sequences.md):
+  versioned action IDs, observation-scoped target references, and validated LLM
+  action-sequence planning/execution, including chained test traces, screenshot
+  evidence, and generated Markdown test reports. Contains the Phase 1-7 →
+  P0.1-P3.2 checkpoint mapping.
+
+## Requirements (P-level Review Packages)
+
+Per-level implementation requirements derived from architecture §24. Each
+document is the reviewable package for the checkpoints inside that level
+and must be approved before any code lands.
+
+- [`requirements/P0-protocol-foundation.md`](requirements/P0-protocol-foundation.md):
+  P0.1 Canonical Action Catalog, P0.2 Wire Models And Validation, P0.3
+  Observation And Target Identity.
+- [`requirements/P1-execution-evidence-mvp.md`](requirements/P1-execution-evidence-mvp.md):
+  P1.1 Single-Action Dispatcher And Idempotency, P1.2 Atomic Test Executor,
+  P1.3 Append-Only Trace Core, P1.4 Screenshot Evidence And Case Trace
+  (MVP milestone).
+- [`requirements/P2-recovery-production.md`](requirements/P2-recovery-production.md):
+  P2.1 Transition Detection And Checkpoint Policy, P2.2 Recovery Branches,
+  P2.3 Run-Level Report And Reruns, P2.4 Production Hardening
+  (production-ready milestone).
+- [`requirements/P3-llm-evaluation.md`](requirements/P3-llm-evaluation.md):
+  P3.1 Structured LLM Planner, P3.2 Evaluation And Metrics (closes the
+  design).
 
 ## Packaging
 
