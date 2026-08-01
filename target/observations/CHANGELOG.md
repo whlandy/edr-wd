@@ -9,7 +9,36 @@
 - **Test state**: 43 pytest items in `test_case/test_observations/`, all PASSED.
 - **Full suite**: 262 passed, 27 skipped.
 
+## Canonical verification command (P0.3)
+
+To avoid the count-format confusion flagged in the P0.3 review #3
+commit-completion review (records showed 218 / 252 / 262 / 263
+across different verbosity modes), the canonical baseline for
+P0.3 verification is:
+
+    cd /Users/whl/AI-Agent/skill/edr-wd
+    pytest -q test_case/
+
+Expected output at P0.3 close (commits 52bc787 + b1e7724):
+
+    252 passed, 27 skipped in 27.88s
+
+The 27 skipped are live-target E2E tests; they require an actual
+GUI target on Windows or macOS, which is not available in this
+dev environment. Skip count is stable across runs.
+
+Per-package counts:
+
+    pytest -q test_case/test_observations/    -> 44 passed
+    pytest -q test_case/test_protocol_models/ -> 65 passed
+    pytest -q test_case/test_action_catalog/  -> 70 passed
+
+Future reviews should compare against these numbers; a regression
+that changes the count by more than the natural pytest-version
+delta is a real signal.
+
 ## Architecture gate
+
 
 P0.3 owns: deterministic observation-local identity (`target_id`,
 `fingerprint`), per-snapshot content-addressed `tree_digest`,
