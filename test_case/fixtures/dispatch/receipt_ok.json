@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "code": "ok",
+  "action_id": "gui.click",
+  "action_code": "A020",
+  "request_id": "R-EXAMPLE-1",
+  "server_instance_id": "inst-deadbeef",
+  "result": {
+    "ok": true,
+    "data": {"clicked": true}
+  },
+  "message": "ok"
+}

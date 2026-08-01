@@ -1,0 +1,11 @@
+{
+  "ok": false,
+  "code": "backend_disabled",
+  "action_id": "gui.type_text",
+  "action_code": "A030",
+  "request_id": null,
+  "server_instance_id": "inst-deadbeef",
+  "result": null,
+  "disabled_reason": "not supported by macos_accessibility",
+  "message": "action 'gui.type_text' is disabled for the current backend ('not supported by macos_accessibility')"
+}
