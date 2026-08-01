@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0.0",
+  "snapshot_id": "0000000000001-0001-SNAP-aaaaaaaaaaaa",
+  "captured_at": "2026-08-01T10:00:00.000Z",
+  "backend": "windows_pywinauto",
+  "host": "win26",
+  "active_window": {
+    "target_id": "T0001",
+    "kind": "window",
+    "process_name": "EDRClient.exe",
+    "pid": 1234,
+    "native_window_id": "win-1",
+    "title": "EDRClient - Main",
+    "control_type": "Window",
+    "automation_id": null,
+    "text": null,
+    "rect": [0, 0, 800, 600],
+    "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    "fingerprint_fields": ["process_name", "pid", "native_window_id", "title", "control_type", "automation_id", "text", "kind"]
+  },
+  "targets": [
+    {
+      "target_id": "T0001",
+      "kind": "window",
+      "process_name": "EDRClient.exe",
+      "pid": 1234,
+      "native_window_id": "win-1",
+      "title": "EDRClient - Main",
+      "control_type": "Window",
+      "automation_id": null,
+      "text": null,
+      "rect": [0, 0, 800, 600],
+      "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+      "fingerprint_fields": ["process_name", "pid", "native_window_id", "title", "control_type", "automation_id", "text", "kind"]
+    },
+    {
+      "target_id": "T0002",
+      "kind": "control",
+      "process_name": "EDRClient.exe",
+      "pid": 1234,
+      "native_window_id": "win-1",
+      "title": "OK",
+      "control_type": "Button",
+      "automation_id": "btn-ok",
+      "text": "OK",
+      "rect": [100, 100, 200, 150],
+      "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+      "fingerprint_fields": ["process_name", "pid", "native_window_id", "title", "control_type", "automation_id", "text", "kind"]
+    },
+    {
+      "target_id": "T0003",
+      "kind": "control",
+      "process_name": "EDRClient.exe",
+      "pid": 1234,
+      "native_window_id": "win-1",
+      "title": "Cancel",
+      "control_type": "Button",
+      "automation_id": "btn-cancel",
+      "text": "Cancel",
+      "rect": [300, 100, 400, 150],
+      "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000003",
+      "fingerprint_fields": ["process_name", "pid", "native_window_id", "title", "control_type", "automation_id", "text", "kind"]
+    }
+  ],
+  "tree_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000aa",
+  "screenshot_evidence_id": null
+}

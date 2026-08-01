@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0.0",
+  "snapshot_id": "0000000000002-0001-SNAP-bbbbbbbbbbbb",
+  "captured_at": "2026-08-01T10:00:00.000Z",
+  "backend": "macos_accessibility",
+  "host": "mac29",
+  "active_window": {
+    "target_id": "T0001",
+    "kind": "window",
+    "process_name": "EDRClient",
+    "pid": 5678,
+    "native_window_id": "mac-window-1",
+    "title": "EDRClient",
+    "control_type": "AXWindow",
+    "automation_id": null,
+    "text": null,
+    "rect": [0, 0, 1200, 800],
+    "fingerprint": "sha256:00000000000000000000000000000000000000000000000000000000000000b1",
+    "fingerprint_fields": ["process_name", "pid", "native_window_id", "title", "control_type", "automation_id", "text", "kind"]
+  },
+  "targets": [
+    {
+      "target_id": "T0001",
+      "kind": "window",
+      "process_name": "EDRClient",
+      "pid": 5678,
+      "native_window_id": "mac-window-1",
+      "title": "EDRClient",
+      "control_type": "AXWindow",
+      "automation_id": null,
+      "text": null,
+      "rect": [0, 0, 1200, 800],
+      "fingerprint": "sha256:00000000000000000000000000000000000000000000000000000000000000b1",
+      "fingerprint_fields": ["process_name", "pid", "native_window_id", "title", "control_type", "automation_id", "text", "kind"]
+    },
+    {
+      "target_id": "T0002",
+      "kind": "control",
+      "process_name": "EDRClient",
+      "pid": 5678,
+      "native_window_id": "mac-window-1",
+      "title": "OK",
+      "control_type": "AXButton",
+      "automation_id": "ok-button",
+      "text": "OK",
+      "rect": [200, 200, 280, 240],
+      "fingerprint": "sha256:00000000000000000000000000000000000000000000000000000000000000b2",
+      "fingerprint_fields": ["process_name", "pid", "native_window_id", "title", "control_type", "automation_id", "text", "kind"]
+    }
+  ],
+  "tree_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000bb",
+  "screenshot_evidence_id": null
+}
