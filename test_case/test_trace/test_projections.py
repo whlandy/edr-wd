@@ -24,8 +24,8 @@ import dataclasses
 from trace import (  # noqa: E402
     EventType,
     TraceEvent,
-    canonical_event_hash,
     project_step_results,
+    stamp_event,
 )
 
 
@@ -54,10 +54,9 @@ def _build_chain(events):
     out = []
     prev_hash = None
     for e in events:
-        stamped = dataclasses.replace(e, event_hash=canonical_event_hash(e))
+        stamped = stamp_event(e)
         stamped = dataclasses.replace(stamped, previous_hash=prev_hash)
-        h = canonical_event_hash(stamped)
-        stamped = dataclasses.replace(stamped, event_hash=h)
+        h = stamp_event(stamped).event_hash
         out.append(stamped)
         prev_hash = h
     return out

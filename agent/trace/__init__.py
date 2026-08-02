@@ -30,6 +30,7 @@ from .integrity import (
     IntegrityReport,
     canonical_event_hash,
     load_events,
+    stamp_event,
     verify_chain,
 )
 from .ids import (
@@ -39,6 +40,7 @@ from .ids import (
     generate_event_id,
     generate_plan_id,
     generate_trace_id,
+    reset_for_tests,
 )
 from .manifest import (
     SCHEMA_VERSION as MANIFEST_SCHEMA_VERSION,
@@ -68,8 +70,10 @@ __all__ = [
     "generate_branch_id",
     "generate_plan_id",
     "generate_call_id",
+    "reset_for_tests",
     # integrity
     "canonical_event_hash",
+    "stamp_event",
     "load_events",
     "verify_chain",
     "IntegrityIssue",

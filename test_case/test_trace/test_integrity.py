@@ -25,6 +25,7 @@ from trace import (  # noqa: E402
     canonical_event_hash,
     from_dict,
     load_events,
+    stamp_event,
     verify_chain,
 )
 
@@ -35,10 +36,10 @@ from trace import (  # noqa: E402
 
 
 def test_event_type_catalog_complete():
-    """Architecture §12.2 mandates 24 types; P1.3 adds
-    trace_recovered for crash-tail repair.
+    """Architecture §12.2 defines 25 lifecycle events; P1.3 adds
+    trace_recovered for crash-tail repair (FR-P1.3-06).
 
-    Total = 26 (25 from §12.2 + 1 recovery event)."""
+    Total V1 event types: 26 = 25 + 1."""
     expected = {
         "trace_started", "environment_recorded", "plan_created",
         "plan_validated", "plan_rejected", "observation_recorded",
@@ -87,17 +88,18 @@ def _ev(seq: int, event_type: EventType = EventType.STEP_STARTED,
     )
 
 
-def _build_chain(events):
-    out = []
-    prev_hash = None
+def _build_chain(events: list[TraceEvent]) -> list[TraceEvent]:
+    """Stamp each event and chain `previous_hash` correctly."""
+    out: list[TraceEvent] = []
+    prev_hash: str | None = None
     for e in events:
-        h = canonical_event_hash(e)
-        stamped = dataclasses.replace(e, event_hash=h)
+        stamped = stamp_event(e)
+        # Re-stamp with the right previous_hash.
         stamped = dataclasses.replace(stamped, previous_hash=prev_hash)
-        final = canonical_event_hash(stamped)
-        stamped = dataclasses.replace(stamped, event_hash=final)
+        final_hash = canonical_event_hash(stamped)
+        stamped = dataclasses.replace(stamped, event_hash=final_hash)
         out.append(stamped)
-        prev_hash = final
+        prev_hash = final_hash
     return out
 
 
@@ -144,14 +146,15 @@ def test_tamper_detection_reorder():
 def test_tamper_detection_insert():
     """Inserting an event mid-stream fails verification (FR-P1.3-05)."""
     chain = _build_chain([_ev(1), _ev(2), _ev(3)])
+    # Re-stamp a forged event so it slots in between seq=2 and seq=3.
     forged = _ev(99, payload={"forged": True})
     forged = dataclasses.replace(
-        dataclasses.replace(forged, previous_hash=chain[1].event_hash,
-                            sequence_no=3),
-        event_hash=canonical_event_hash(
-            dataclasses.replace(forged, previous_hash=chain[1].event_hash,
-                                sequence_no=3)
-        ),
+        stamp_event(forged),
+        previous_hash=chain[1].event_hash,
+        sequence_no=3,
+    )
+    forged = dataclasses.replace(
+        forged, event_hash=canonical_event_hash(forged),
     )
     chain.insert(2, forged)
     report = verify_chain(chain)
@@ -165,9 +168,14 @@ def test_first_event_must_have_no_previous_hash():
 
 
 def test_first_event_with_previous_hash_rejected():
+    """Chain rule: first event has previous_hash=None (FR-P1.3-04)."""
     chain = _build_chain([_ev(1)])
+    # Patch the first event to claim a previous_hash.
     e = chain[0]
-    e = dataclasses.replace(e, previous_hash="sha256:deadbeef")
+    e = dataclasses.replace(
+        e,
+        previous_hash="sha256:deadbeef",
+    )
     e = dataclasses.replace(e, event_hash=canonical_event_hash(e))
     chain = [e]
     report = verify_chain(chain)
@@ -178,6 +186,7 @@ def test_first_event_with_previous_hash_rejected():
 def test_bad_hash_rejected():
     """Manually corrupting an event's hash is detected."""
     chain = _build_chain([_ev(1), _ev(2)])
+    # Tamper with the second event's stored hash.
     e = chain[1]
     e = dataclasses.replace(e, event_hash="sha256:0000000000000000")
     chain[1] = e
@@ -206,13 +215,19 @@ def test_from_dict_rejects_extra_field():
         from_dict(d)
 
 
+def _json(v):
+    import json
+    return json.dumps(v, ensure_ascii=False)
+
+
 def test_load_events_parses_jsonl():
     chain = _build_chain([_ev(1), _ev(2), _ev(3)])
-    import json
     jsonl = "\n".join(
+        # Use the same canonical bytes shape the store writes.
+        # We use to_dict() + json.dumps for the test since the
+        # store uses canonical_bytes which is equivalent.
         "{" + ",".join(
-            f'"{k}":{json.dumps(v, ensure_ascii=False)}'
-            for k, v in ev.to_dict().items()
+            f'"{k}":{_json(v)}' for k, v in ev.to_dict().items()
         ) + "}"
         for ev in chain
     )

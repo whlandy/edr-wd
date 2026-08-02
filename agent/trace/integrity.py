@@ -32,6 +32,23 @@ class IntegrityIssue:
     issue: str  # human-readable
     code: str   # stable: bad_hash | bad_previous_hash | bad_sequence
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "sequence_no": self.sequence_no,
+            "event_id": self.event_id,
+            "issue": self.issue,
+            "code": self.code,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "IntegrityIssue":
+        return cls(
+            sequence_no=int(data["sequence_no"]),
+            event_id=str(data["event_id"]),
+            issue=str(data["issue"]),
+            code=str(data["code"]),
+        )
+
 
 @dataclass(frozen=True)
 class IntegrityReport:
@@ -45,16 +62,18 @@ class IntegrityReport:
     def to_dict(self) -> dict[str, object]:
         return {
             "ok": self.ok,
-            "issues": [
-                {
-                    "sequence_no": i.sequence_no,
-                    "event_id": i.event_id,
-                    "issue": i.issue,
-                    "code": i.code,
-                }
-                for i in self.issues
-            ],
+            "issues": [i.to_dict() for i in self.issues],
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "IntegrityReport":
+        return cls(
+            ok=bool(data.get("ok", False)),
+            issues=tuple(
+                IntegrityIssue.from_dict(iss)  # type: ignore[arg-type]
+                for iss in data.get("issues", []) or []
+            ),
+        )
 
 
 def canonical_event_hash(event: TraceEvent) -> str:
@@ -66,8 +85,28 @@ def canonical_event_hash(event: TraceEvent) -> str:
     return canonical_sha256(event.to_hashable_dict())
 
 
+def stamp_event(event: TraceEvent) -> TraceEvent:
+    """Return a new event with `event_hash` populated.
+
+    Used by callers (test fixtures, the store) that construct
+    events without a hash and want them chained. Equivalently
+    `dataclasses.replace(event, event_hash=canonical_event_hash(event))`
+    but with shorter call sites.
+    """
+    import dataclasses
+    return dataclasses.replace(event, event_hash=canonical_event_hash(event))
+
+
 def verify_chain(events: Sequence[TraceEvent]) -> IntegrityReport:
-    """Walk the chain, reporting every mismatch."""
+    """Walk the chain, reporting every mismatch.
+
+    Rules enforced:
+
+      1. `event_hash` matches `canonical_event_hash(event)` (FR-P1.3-02).
+      2. First event has `previous_hash = None`; subsequent events
+         have `previous_hash == prior.event_hash` (FR-P1.3-04, -05).
+      3. `sequence_no` is monotonic starting from 1 (defensive).
+    """
     issues: list[IntegrityIssue] = []
 
     if not events:

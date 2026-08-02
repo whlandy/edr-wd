@@ -5,10 +5,14 @@ manifest.py — Case-attempt manifest (architecture §12.3, FR-P1.3-09).
 after the event chain is closed:
 
   * `trace_id`, `branch_heads`
-  * `catalog_digest`
-  * `evidence_counts`
-  * `terminal_status`
-  * `integrity_verification_result`
+  * `catalog_digest` (must match the catalog the executor ran
+    against; cross-checked against the in-process catalog at
+    report-finalize time).
+  * `evidence_counts` (per-kind tally: screenshots, expectations,
+    actions, etc.).
+  * `terminal_status` (one of `passed`, `failed`, `blocked`,
+    `skipped`, `aborted`).
+  * `integrity_verification_result` (the IntegrityReport summary).
 
 P1.3 ships the schema; consumers can ignore unknown fields.
 """
@@ -54,13 +58,7 @@ def from_dict(data: Mapping[str, Any]) -> ManifestRecord:
         catalog_digest=data["catalog_digest"],
         evidence_counts=dict(data.get("evidence_counts") or {}),
         terminal_status=data["terminal_status"],
-        integrity_verification_result=IntegrityReport(
-            ok=bool(inv.get("ok", False)),
-            issues=tuple(
-                IntegrityIssue.from_dict(iss)  # type: ignore[attr-defined]
-                for iss in inv.get("issues") or []
-            ),
-        ),
+        integrity_verification_result=IntegrityReport.from_dict(inv),
     )
 
 

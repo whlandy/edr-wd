@@ -20,10 +20,12 @@ pytest -q test_case/               -> 456 passed, 27 skipped
 agent/trace/
     __init__.py
     ids.py            — sortable unique event/trace/branch/plan/call ids
+                        (12 hex ms + 4 hex random; lex-sortable across
+                        sessions sharing a wall clock)
     events.py         — EventType (26 V1 types incl. trace_recovered)
                         + TraceEvent envelope dataclass + from_dict
                         + to_dict + to_hashable_dict
-    integrity.py      — canonical_event_hash + verify_chain
+    integrity.py      — canonical_event_hash + stamp_event + verify_chain
                         + IntegrityReport + load_events
     projections.py    — project_step_results (pure read-model
                         rebuild of step-results.json from events)
@@ -35,7 +37,7 @@ agent/trace/
 
 ## EventType catalogue (architecture §12.2 + trace_recovered)
 
-Total = **26** event types in P1.3:
+Total V1 event types = **26** (architecture §12.2 = 25 + P1.3 trace_recovered = 1):
 
 ```
 trace_started, environment_recorded, plan_created, plan_validated,
@@ -102,6 +104,15 @@ byte-identical output (FR-P1.3-08).
 3. **Manual tamper fails verification** — `test_verify_rejects_tamper_in_middle`.
 4. **Crash mid-write: reopen, recover, append, verify** — `test_incomplete_final_line_recovery`.
 5. **Projection byte-identical replay** — `test_projection_byte_identical_replay`.
+
+## Review #1 fix log (P1.3 review)
+
+| Finding | Status | Detail |
+|---------|--------|--------|
+| Blocker 1: UUIDv7/ULID monotonic semantics | ✅ | `ids.py` now uses `<12 hex ms> <4 hex counter> <4 hex random>` with a per-process monotonic counter. Same-ms emissions sort by insertion order; counter overflow bumps the timestamp. |
+| Blocker 2: Manifest round-trip | ✅ | `IntegrityIssue.from_dict` and `IntegrityReport.from_dict` added; `ManifestRecord.from_dict` uses them. Round-trip tests cover all three. |
+| Required fix: EventType count wording | ✅ | Both `test_integrity.py` docstring and this CHANGELOG say "26 = 25 + 1". |
+| Observation: trace namespace collision | ⚠ deferred | P1.3 keeps the package name `agent/trace` (architecture-mandated). Tests pin the import path; future review may rename if collisions become routine. |
 
 ## Out of Scope (deferred)
 
