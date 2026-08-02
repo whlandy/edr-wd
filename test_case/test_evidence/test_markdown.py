@@ -27,6 +27,7 @@ from trace import (  # noqa: E402
     render_case_trace,
     write_case_trace_atomic,
 )
+from trace.markdown import _escape_markdown  # noqa: E402
 from fake_target import make_png  # noqa: E402
 
 
@@ -355,3 +356,44 @@ def test_trace_md_integrity_section_reports_failure(tmp_path: Path):
     )
     assert "FAIL" in body
     assert "event_hash mismatch" in body
+
+
+
+# ---------------------------------------------------------------------------
+# Markdown escape regression table (non-blocking recommendation
+# from P1.4 review).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected_substr,forbidden_substr",
+    [
+        # HTML
+        ("<script>", "&lt;script&gt;", "<script>"),
+        ("<img src=x onerror=alert(1)>", "&lt;img", "<img src="),
+        # Markdown
+        ("[click](http://evil)", "\\[click\\]", "[click]("),
+        ("*bold*", "\\*bold\\*", None),
+        ("`code`", "\\`code\\`", None),
+        # backslash input preserved as data (escape does not
+        # touch a stray backslash that isn't followed by a
+        # special char)
+        ("plain\\text", "plain\\text", None),
+        # benign text untouched
+        ("hello world", "hello world", None),
+    ],
+    ids=[
+        "html-script",
+        "html-img",
+        "md-link",
+        "md-em",
+        "md-code",
+        "literal-backslash",
+        "benign-text",
+    ],
+)
+def test_markdown_escape_regression_table(raw, expected_substr, forbidden_substr):
+    out = _escape_markdown(raw)
+    assert expected_substr in out
+    if forbidden_substr:
+        assert forbidden_substr not in out
