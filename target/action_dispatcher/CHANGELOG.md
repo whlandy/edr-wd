@@ -1,8 +1,37 @@
 # P1.1 — Single-Action Dispatcher And Idempotency
 
-## Status
-
 - **Verdict**: implementation complete; awaiting review.
+
+## Canonical verification command (P1.1 final)
+
+Per P1.1 review #3 (final) minor note #1, the canonical
+acceptance command for this package is fixed at:
+
+```
+pytest -q test_case/
+```
+
+Expected (current state, P1.1 final):
+
+```
+338 passed, 27 skipped
+```
+
+For the dispatcher subset specifically:
+
+```
+pytest -q test_case/test_dispatcher/
+```
+
+Expected:
+
+```
+86 passed
+```
+
+Future checkpoints must record numbers from these commands
+and must not introduce a third statistical convention.
+
 - **Test state**: 73 pytest items in `test_case/test_dispatcher/`, all
   PASSED.
 - **Full repo**: 325 passed, 27 skipped.
