@@ -133,18 +133,16 @@ def test_invalid_role_rejected_for_path_validation(tmp_path, bad_role):
         )
 
 
-def test_path_validation_allows_dotdot_in_step_id_substring(tmp_path: Path):
-    """Pre-fix: step_id=".." is folded into a filename component.
-    The relative_path validation accepts it as long as it is not
-    a full path component. Review #1 adds explicit step_id check."""
-    rec = persist_screenshot(
-        make_png(), "after",
-        trace_dir=tmp_path,
-        step_no=1, step_id="..",
-        snapshot_id="OBS", event_id="EVT",
-        process_name="p", pid=1, window_title="t",
-    )
-    assert rec.relative_path == "screenshots/001-..-after.png"
+def test_path_validation_rejects_traversal(tmp_path: Path):
+    """Direct call with hand-crafted relative_path via step_id."""
+    with pytest.raises(EvidencePathError):
+        persist_screenshot(
+            make_png(), "after",
+            trace_dir=tmp_path,
+            step_no=1, step_id="..",  # traversal in step_id
+            snapshot_id="OBS", event_id="EVT",
+            process_name="p", pid=1, window_title="t",
+        )
 
 
 def test_path_validation_rejects_control_chars(tmp_path: Path):

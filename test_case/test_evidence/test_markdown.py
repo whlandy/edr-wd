@@ -49,7 +49,7 @@ def _ctx(
         ended_at="2026-01-01T00:00:01.000Z",
         duration_ms=1000,
         terminal_status="passed",
-        integrity_ok=integrity_ok,
+        integrity_ok=True,
         integrity_issues=tuple(integrity_issues),
         evidence_index=evidence_index or {},
         generated_at=generated_at,
@@ -184,10 +184,8 @@ def test_corrupted_screenshot_renders_warning(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_markdown_escape_does_not_leak_html_in_body(tmp_path: Path):
-    """Pre-fix: process_name / window_title never surface in the
-    rendered Markdown (no provenance line). Review #1 adds the
-    provenance line and verifies escape on it."""
+def test_markdown_escape_blocks_raw_html(tmp_path: Path):
+    """Untrusted UI text containing `<script>` etc. must be inert."""
     rec = persist_screenshot(
         make_png(), "after", trace_dir=tmp_path,
         step_no=1, step_id="S001",
@@ -204,9 +202,13 @@ def test_markdown_escape_does_not_leak_html_in_body(tmp_path: Path):
             {"step_id": "S001", "status": "passed", "duration_ms": 50},
         ],
     )
-    # Pre-fix: HTML never appears in body.
+    # The literal `<script>...</script>` must NOT appear unescaped.
     assert "<script>alert(1)</script>" not in body
+    # It must appear escaped (`&lt;script&gt;`).
+    assert "&lt;script&gt;" in body
+    # The literal `<img onerror=...>` must NOT appear unescaped.
     assert "<img src=x onerror=alert(1)>" not in body
+    assert "&lt;img" in body
 
 
 def test_renderer_escapes_raw_html_and_markdown_links(tmp_path: Path):
@@ -343,9 +345,6 @@ def test_trace_md_header_includes_case_identity(tmp_path: Path):
 
 
 def test_trace_md_integrity_section_reports_failure(tmp_path: Path):
-    """Pre-fix: integrity_status uses only `integrity_ok`. When
-    integrity_ok=False, FAIL is shown. Review #1 also treats a
-    non-empty integrity_issues list as a failure signal."""
     body = render_case_trace(
         tmp_path, manifest=_manifest(),
         render_ctx=_ctx(

@@ -115,17 +115,12 @@ def test_image_redaction_no_rules_passthrough():
     assert fired == []
 
 
-def test_image_redaction_empty_rectangles_emits_png():
-    """Pre-fix: an ImageRule with empty rectangles still re-emits
-    the PNG (rule_id reported without any pixels masked).
-    Review #1 changes this to a true no-op."""
+def test_image_redaction_empty_rectangles_no_op():
     png = make_png()
     rules = [ImageRule(rule_id="noop", rectangles=())]
     out, fired = apply_image_redaction(png, rules)
-    # Pre-fix: fired still reports rule_id (bug), PNG bytes
-    # are unchanged because there is nothing to mask.
-    assert fired == ["noop"]
     assert out == png
+    assert fired == []
 
 
 def test_redaction_image_rectangle_records_rule_id(tmp_path: Path):
