@@ -264,7 +264,7 @@ def test_step_results_atomic_write(executor, backend, obs_provider, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_visual_evidence_unavailable_blocks_step(executor, backend, obs_provider):
+def test_visual_evidence_evaluator_runs_when_no_evidence_recorded(executor, backend, obs_provider):
     case = _case(
         _step("S001", expectations=[
             Expectation(type="visual_evidence_captured"),
@@ -272,8 +272,9 @@ def test_visual_evidence_unavailable_blocks_step(executor, backend, obs_provider
     )
     result = executor.run_case(case)
     sr = result.step_results[0]
-    assert sr.status is StepStatus.BLOCKED
-    assert sr.error["code"] == "expectation_not_available"
+    # P1.4: visual_evidence_captured is now a real evaluator;
+    # the step is no longer hard-blocked.
+    assert sr.status is StepStatus.FAILED
 
 
 # ---------------------------------------------------------------------------

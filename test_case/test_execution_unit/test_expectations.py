@@ -54,7 +54,8 @@ def _err_receipt():
     )
 
 
-def test_registry_has_all_nine_evaluators():
+def test_registry_has_all_ten_evaluators():
+    """P1.4: visual_evidence_captured is now a real evaluator."""
     expected = {
         "action_ok",
         "window_open",
@@ -65,13 +66,15 @@ def test_registry_has_all_nine_evaluators():
         "control_text_equals",
         "control_text_contains",
         "window_text_contains",
+        "visual_evidence_captured",
     }
     assert set(EXPECTATION_REGISTRY.keys()) == expected
-    assert "visual_evidence_captured" not in EXPECTATION_REGISTRY
 
 
-def test_visual_evidence_is_listed_as_not_available():
-    assert "visual_evidence_captured" in EVALUATORS_NOT_AVAILABLE
+def test_visual_evidence_is_now_available():
+    """P1.4: visual_evidence_captured ships as a real evaluator."""
+    assert "visual_evidence_captured" not in EVALUATORS_NOT_AVAILABLE
+    assert EXPECTATION_REGISTRY.get("visual_evidence_captured") is not None
 
 
 # -------- action_ok --------
@@ -275,8 +278,11 @@ def test_unmatched_observation_is_handled_gracefully():
         assert result.status is StepStatus.FAILED, name
 
 
-def test_expectation_not_available_signals_p14():
-    """The executor's job is to catch this; the test just records the
-    sentinel exists."""
-    assert "visual_evidence_captured" in EVALUATORS_NOT_AVAILABLE
-    assert EXPECTATION_REGISTRY.get("visual_evidence_captured") is None
+def test_expectation_not_available_sentinel_still_exposed():
+    """EVALUATORS_NOT_AVAILABLE is now empty (P1.4); the sentinel
+    still exists for callers that branch on it."""
+    from execution import EVALUATORS_NOT_AVAILABLE
+    # P1.4: empty set; future evaluator types can register here.
+    assert isinstance(EVALUATORS_NOT_AVAILABLE, frozenset)
+    # visual_evidence_captured moved from not-available to the registry.
+    assert "visual_evidence_captured" not in EVALUATORS_NOT_AVAILABLE

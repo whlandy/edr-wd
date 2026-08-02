@@ -298,7 +298,8 @@ def test_acceptance_step_results_partial_progress(executor, backend, obs_provide
 
 
 def test_required_visual_evidence_unavailable_blocks(executor, backend, obs_provider):
-    """Required visual evidence cannot silently pass or skip."""
+    """P1.4: visual_evidence_captured evaluator runs and FAILED
+    when no evidence has been recorded for the step."""
     case = TestCase(
         case_id="TC-VIS",
         title="Visual evidence required but unavailable",
@@ -308,9 +309,14 @@ def test_required_visual_evidence_unavailable_blocks(executor, backend, obs_prov
     )
     result = executor.run_case(case)
     sr = result.step_results[0]
-    assert sr.status is StepStatus.BLOCKED
-    assert sr.error["code"] == "expectation_not_available"
-    assert sr.error["expectation"] == "visual_evidence_captured"
+    assert sr.status is StepStatus.FAILED
+    # The expectation result is in the step's expectation_results list.
+    vis_results = [
+        er for er in sr.expectation_results
+        if er.expectation_type == "visual_evidence_captured"
+    ]
+    assert len(vis_results) == 1
+    assert vis_results[0].status is StepStatus.FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -342,9 +348,10 @@ def test_required_target_stale_blocks(executor, backend, obs_provider):
 
 
 def test_config_visual_evidence_available_flag(backend, obs_provider):
-    """`ExecutorConfig.visual_evidence_available = True` would
-    silence the expectation_not_available path. P1.2 default is
-    False; P1.4 will flip the default. This test pins the contract."""
+    """P1.4: visual_evidence_available is now a no-op flag (the
+    evaluator is always wired). The flag is preserved for
+    forward-compatibility but has no effect on the step outcome.
+    """
     executor = AtomicExecutor(
         dispatch=backend.dispatch,
         observation_provider=obs_provider,
@@ -352,10 +359,12 @@ def test_config_visual_evidence_available_flag(backend, obs_provider):
     )
     case = TestCase(
         case_id="TC-VIS-CONF",
-        title="Visual evidence disabled",
+        title="Visual evidence (P1.4 default-on)",
         steps=(
             _step("S001", expectations=(Expectation(type="visual_evidence_captured"),)),
         ),
     )
     result = executor.run_case(case)
-    assert result.step_results[0].status is StepStatus.BLOCKED
+    # No evidence recorded -> the expectation FAILED, step FAILED,
+    # but never blocked (the hard gate is gone).
+    assert result.step_results[0].status is StepStatus.FAILED

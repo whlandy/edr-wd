@@ -54,6 +54,33 @@ from .store import (
     TraceError,
     TraceStore,
 )
+from .evidence import (
+    EvidenceError,
+    EvidenceIntegrityError,
+    EvidencePathError,
+    EvidenceRecord,
+    ImageProvider,
+    ImageRule,
+    Rectangle,
+    TextRule,
+    persist_screenshot,
+    verify_evidence_on_disk,
+    VALID_ROLES,
+)
+from .capture_policy import (
+    CaptureContext,
+    CapturePlan,
+    resolve_capture_plan,
+)
+from .markdown import (
+    RenderContext,
+    render_case_trace,
+    write_case_trace_atomic,
+)
+from .redaction import (
+    apply_image_redaction,
+    apply_text_redaction,
+)
 
 
 __all__ = [

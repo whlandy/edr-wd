@@ -1,9 +1,19 @@
-"""Stub MCP-style fake_target for P1.2 integration tests.
+"""Test-only fixtures for fake targets + fake image providers.
 
-This package is the test-only harness used by the integration tests in
-`test_case/test_executor_integration/`.  It is not imported by any
-production code."""
+P1.2 ships FakeBackend + FakeObservationProvider (executor
+harness); P1.4 adds fake image generation under `fake_image` for
+evidence / screenshot tests.
+"""
+
+from __future__ import annotations
 
 from .fake_backend import FakeBackend, FakeObservationProvider, _failed_receipt, _ok_receipt
+from .fake_image import make_png
 
-__all__ = ["FakeBackend", "FakeObservationProvider", "_ok_receipt", "_failed_receipt"]
+__all__ = [
+    "FakeBackend",
+    "FakeObservationProvider",
+    "_failed_receipt",
+    "_ok_receipt",
+    "make_png",
+]
