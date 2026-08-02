@@ -541,6 +541,8 @@ class TestCase:
     case_id: str
     title: str
     description: str = ""
+    __test__ = False  # not a pytest TestCase class
+
     profiles: tuple[str, ...] = field(default_factory=tuple)
     tags: tuple[str, ...] = field(default_factory=tuple)
     preconditions: tuple[AtomicTestStep, ...] = field(default_factory=tuple)
