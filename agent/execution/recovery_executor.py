@@ -33,8 +33,8 @@ Round 2 budget tests covered here:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from typing import Callable, Mapping
 
 from agent.execution.recovery import (
     FailureContext,
@@ -48,6 +48,11 @@ from agent.execution.recovery import (
     RestoreStrategy,
     advance_replan_state,
     severity_of,
+)
+from agent.execution.recovery_events import (
+    RequestedEvent,
+    make_recovery_requested_event,
+    make_recovery_result_event,
 )
 
 
@@ -76,25 +81,6 @@ returning a :class:`RestoreResult`:
 The handler must not raise; it must catch its own errors and
 return ``RestoreResult(ok=False, code=...)``.
 """
-
-
-# ---------------------------------------------------------------------------
-# Requested trace events (Commit D produces dicts; Commit E emits them)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class RequestedEvent:
-    """A trace event the executor wants written.
-
-    Commit D produces these as part of the :class:`ExecutionOutcome`;
-    Commit E forwards them to ``TraceStore.append``. Keeping the
-    events as data lets us assert on them in unit tests without
-    spinning up a trace store.
-    """
-
-    event_type: str
-    payload: Mapping[str, object] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -344,17 +330,14 @@ class RecoveryExecutor:
                 pass
 
         # --- Construct the RECOVERY_REQUESTED event ---
-        events.append(RequestedEvent(
-            event_type="recovery_requested",
-            payload={
-                "step_id": failure.step_id,
-                "branch_id": branch_id,
-                "parent_branch_id": parent_branch_id,
-                "strategy": plan.strategy.value,
-                "severity": severity_of(plan.strategy).value,
-                "attempts_so_far": self._state.attempts,
-                "replans_so_far": self._state.replans,
-            },
+        events.append(make_recovery_requested_event(
+            step_id=failure.step_id,
+            branch_id=branch_id,
+            parent_branch_id=parent_branch_id,
+            strategy=plan.strategy,
+            severity=severity_of(plan.strategy),
+            attempts_so_far=self._state.attempts,
+            replans_so_far=self._state.replans,
         ))
 
         # --- Dispatch ---
@@ -374,25 +357,26 @@ class RecoveryExecutor:
         # --- Consume an attempt ---
         self._state.attempts += 1
 
-        # --- Build the RECOVERY_RESULT event ---
-        events.append(RequestedEvent(
-            event_type="recovery_result",
-            payload={
-                "step_id": failure.step_id,
-                "branch_id": branch_id,
-                "parent_branch_id": parent_branch_id,
-                "strategy": plan.strategy.value,
-                "status": (
-                    "success" if restore_result.ok else "failed"
-                ),
-                "attempts": self._state.attempts,
-                "elapsed_ms": attempt_elapsed_ms,
-                "error_code": (
-                    restore_result.code.value
-                    if restore_result.code is not None
-                    else None
-                ),
-            },
+        # --- Build the RECOVERY_RESULT event (handler outcome) ---
+        result_status = (
+            RecoveryStatus.SUCCESS if restore_result.ok
+            else RecoveryStatus.FAILED
+        )
+        result_error_code = (
+            restore_result.code.value
+            if restore_result.code is not None
+            else None
+        )
+        events.append(make_recovery_result_event(
+            step_id=failure.step_id,
+            branch_id=branch_id,
+            parent_branch_id=parent_branch_id,
+            strategy=plan.strategy,
+            status=result_status,
+            attempts=self._state.attempts,
+            elapsed_ms=attempt_elapsed_ms,
+            error_code=result_error_code,
+            detail="",
         ))
 
         # --- Path A: handler reported failure ---
@@ -482,18 +466,16 @@ class RecoveryExecutor:
         tests can compare against a single canonical terminal
         shape.
         """
-        events.append(RequestedEvent(
-            event_type="recovery_result",
-            payload={
-                "step_id": failure.step_id,
-                "branch_id": branch_id,
-                "parent_branch_id": parent_branch_id,
-                "strategy": plan.strategy.value,
-                "status": status.value,
-                "attempts": self._state.attempts,
-                "error_code": code.value,
-                "detail": detail,
-            },
+        events.append(make_recovery_result_event(
+            step_id=failure.step_id,
+            branch_id=branch_id,
+            parent_branch_id=parent_branch_id,
+            strategy=plan.strategy,
+            status=status,
+            attempts=self._state.attempts,
+            elapsed_ms=0,
+            error_code=code.value,
+            detail=detail,
         ))
         return ExecutionOutcome(
             result=RecoveryResult(
@@ -545,6 +527,5 @@ class RecoveryExecutor:
 __all__ = [
     "RecoveryExecutor",
     "ExecutionOutcome",
-    "RequestedEvent",
     "RestoreHandler",
 ]

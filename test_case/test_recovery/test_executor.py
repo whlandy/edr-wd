@@ -309,17 +309,17 @@ def test_executor_emits_recovery_requested_and_result_events():
     requested, result_evt = out.events
 
     assert requested.event_type == "recovery_requested"
-    assert requested.payload["step_id"] == "step-1"
-    assert requested.payload["branch_id"] == "BR-002"
-    assert requested.payload["parent_branch_id"] == "BR-001"
-    assert requested.payload["strategy"] == "process_restart"
-    assert requested.payload["severity"] == RecoverySeverity.APPLICATION.value
+    assert requested.payload.step_id == "step-1"
+    assert requested.payload.branch_id == "BR-002"
+    assert requested.payload.parent_branch_id == "BR-001"
+    assert requested.payload.strategy is RestoreStrategy.PROCESS_RESTART
+    assert requested.payload.severity is RecoverySeverity.APPLICATION
 
     assert result_evt.event_type == "recovery_result"
-    assert result_evt.payload["status"] == "success"
-    assert result_evt.payload["strategy"] == "process_restart"
-    assert result_evt.payload["attempts"] == 1
-    assert result_evt.payload["error_code"] is None
+    assert result_evt.payload.status is RecoveryStatus.SUCCESS
+    assert result_evt.payload.strategy is RestoreStrategy.PROCESS_RESTART
+    assert result_evt.payload.attempts == 1
+    assert result_evt.payload.error_code is None
 
 
 def test_executor_failure_event_carries_error_code():
@@ -335,8 +335,8 @@ def test_executor_failure_event_carries_error_code():
     assert out.result.status is RecoveryStatus.FAILED
     result_evt = out.events[-1]
     assert result_evt.event_type == "recovery_result"
-    assert result_evt.payload["status"] == "failed"
-    assert result_evt.payload["error_code"] == "restore_lock_verify_failed"
+    assert result_evt.payload.status is RecoveryStatus.FAILED
+    assert result_evt.payload.error_code == "restore_lock_verify_failed"
 
 
 # ---------------------------------------------------------------------------

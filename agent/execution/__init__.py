@@ -74,12 +74,17 @@ from .recovery_inverse import (
     SOPInverseAction,
 )
 from .recovery_planner import plan_recovery
-from .recovery_executor import (
-    ExecutionOutcome,
-    RecoveryExecutor,
+from .recovery_executor import ExecutionOutcome, RecoveryExecutor, RestoreHandler
+from .recovery_events import (
+    EVENT_TYPE_RECOVERY_REQUESTED,
+    EVENT_TYPE_RECOVERY_RESULT,
+    RecoveryRequestedPayload,
+    RecoveryResultPayload,
     RequestedEvent,
-    RestoreHandler,
+    make_recovery_requested_event,
+    make_recovery_result_event,
 )
+from .trace_adapter import TraceStoreAdapter
 from .step_results import load_step_results, write_atomic
 from .transitions import (
     TransitionKind,
@@ -163,6 +168,22 @@ __all__ = [
     # recovery executor (P2.2 — Commit D)
     "RecoveryExecutor",
     "ExecutionOutcome",
-    "RequestedEvent",
     "RestoreHandler",
+    # recovery typed events (P2.2 — Commit E, N2 freeze)
+    "RequestedEvent",
+    "RecoveryRequestedPayload",
+    "RecoveryResultPayload",
+    "EVENT_TYPE_RECOVERY_REQUESTED",
+    "EVENT_TYPE_RECOVERY_RESULT",
+    "make_recovery_requested_event",
+    "make_recovery_result_event",
+    # restore dispatch + trace adapter (P2.2 — Commit E)
+    "RestoreDispatch",
+    "RedriveHandler",
+    "ReconnectHandler",
+    "ProcessRestartHandler",
+    "ReobserveReplanHandler",
+    "CatalogDispatchFn",
+    "SessionReconnectFn",
+    "TraceStoreAdapter",
 ]
