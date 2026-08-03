@@ -52,6 +52,25 @@ from .state_machine import (
     next_state,
     validate_transition,
 )
+from .recovery import (
+    IllegalReplanTransition,
+    RecoveryBudget,
+    RecoveryErrorCode,
+    RecoveryPlan,
+    RecoveryResult,
+    RecoverySeverity,
+    RecoveryStatus,
+    ReplanState,
+    RestoreResult,
+    RestoreStrategy,
+    advance_replan_state,
+    severity_of,
+)
+from .recovery_inverse import (
+    DuplicateInverseError,
+    InverseRegistry,
+    SOPInverseAction,
+)
 from .step_results import load_step_results, write_atomic
 from .transitions import (
     TransitionKind,
@@ -107,4 +126,24 @@ __all__ = [
     "SopIndexEntry",
     "SopIndexLoadError",
     "load_sop_index",
+    # recovery contracts (P2.2 — Commit A)
+    "RestoreStrategy",
+    "RecoverySeverity",
+    "RecoveryStatus",
+    "ReplanState",
+    "RecoveryErrorCode",
+    "RESTORE_SEVERITY",
+    "severity_of",
+    "advance_replan_state",
+    "IllegalReplanTransition",
+    "RecoveryBudget",
+    "RestoreResult",
+    "RecoveryResult",
+    "FailureContext",
+    "RecoveryPlan",
+    "Branch",
+    # recovery inverse registry (P2.2 — Commit A)
+    "SOPInverseAction",
+    "InverseRegistry",
+    "DuplicateInverseError",
 ]
