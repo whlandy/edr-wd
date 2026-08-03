@@ -46,6 +46,14 @@ from .parse import (
     ValidationError,
     parse_plan,
 )
+from .persist import (
+    PLANNER_EVENT_SCHEMA_VERSION,
+    PLAN_EVENT_TYPES,
+    PlanEvent,
+    PlanEventType,
+    audit_persisted_plans,
+    build_plan_event,
+)
 from .schema import (
     LLMPlanRequest,
     LLMPlanResponse,
@@ -80,4 +88,11 @@ __all__ = [
     "CODE_DEPENDENCY_CYCLE",
     "COORDINATE_FALLBACK_NOT_ALLOWED",
     "CODE_UNKNOWN_SCHEMA_VERSION",
+    # persist (D)
+    "PLANNER_EVENT_SCHEMA_VERSION",
+    "PLAN_EVENT_TYPES",
+    "PlanEvent",
+    "PlanEventType",
+    "build_plan_event",
+    "audit_persisted_plans",
 ]
