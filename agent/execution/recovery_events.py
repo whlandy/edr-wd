@@ -41,15 +41,7 @@ from agent.execution.recovery import (
     RecoveryStatus,
     RestoreStrategy,
 )
-
-
-if TYPE_CHECKING:
-    # Forward refs for the typed payload union. ``branch_events``
-    # defines these; importing at runtime would create a cycle.
-    from agent.execution.branch_events import (
-        BranchCreatedPayload,
-        ReplanCreatedPayload,
-    )
+from agent.execution.trace_payload import TracePayload
 
 
 # ---------------------------------------------------------------------------
@@ -182,12 +174,7 @@ class RequestedEvent:
     """
 
     event_type: str
-    payload: (
-        RecoveryRequestedPayload
-        | RecoveryResultPayload
-        | "BranchCreatedPayload"
-        | "ReplanCreatedPayload"
-    )
+    payload: TracePayload
 
     def to_dict(self) -> dict[str, Any]:
         return self.payload.to_dict()

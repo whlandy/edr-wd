@@ -93,6 +93,17 @@ from .branch_events import (
     make_replan_created_event,
 )
 from .branch_ancestry import BranchCycleError, BranchNotFoundError, BranchRegistry
+from .projection import (
+    ProjectionProtocol,
+    ProjectionRegistry,
+    ProjectionResult,
+    StepResultsPayload,
+    StepResultsProjection,
+    load_projection_payload,
+    write_projection,
+)
+from .trace_md import TraceMarkdownProjection
+from .trace_payload import TracePayload
 from .trace_adapter import TraceStoreAdapter
 from .step_results import load_step_results, write_atomic
 from .transitions import (
@@ -205,4 +216,16 @@ __all__ = [
     "BranchRegistry",
     "BranchCycleError",
     "BranchNotFoundError",
+    # TracePayload protocol (P2.2 — Commit G, N3 refactor)
+    "TracePayload",
+    # projections (P2.2 — Commit G.1)
+    "ProjectionProtocol",
+    "ProjectionRegistry",
+    "ProjectionResult",
+    "StepResultsPayload",
+    "StepResultsProjection",
+    "load_projection_payload",
+    "write_projection",
+    # trace.md writer (P2.2 — Commit G.2)
+    "TraceMarkdownProjection",
 ]

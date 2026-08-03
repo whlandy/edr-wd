@@ -92,11 +92,16 @@ class TraceStoreAdapter:
     ) -> list[EventType]:
         """Append every event in ``events`` to the store.
 
+        **Unknown event behavior (documented invariant):**
+
+        An event with an ``event_type`` not in the dispatch
+        table is **silently skipped**. Callers should not
+        forward unknown events. Use :meth:`forward_strict`
+        if unknown events are programmer errors that should
+        raise immediately.
+
         Returns the list of :class:`EventType` values that were
-        forwarded (useful for tests / logging). Unknown event
-        types are skipped and logged via a :class:`ValueError`
-        in strict mode, or returned as ``None`` in non-strict
-        mode (see :meth:`forward_strict`).
+        forwarded (useful for tests / logging).
         """
         forwarded: list[EventType] = []
         for event in events:
@@ -109,7 +114,15 @@ class TraceStoreAdapter:
         self,
         events: Iterable[RequestedEvent],
     ) -> list[EventType]:
-        """Like :meth:`forward` but raises on unknown event types."""
+        """Like :meth:`forward` but raises on unknown event types.
+
+        Use this when an unknown event type is a programmer
+        error (e.g. a new payload was added without updating
+        the dispatch table). Production code should use
+        :meth:`forward` and log the skip; tests use
+        :meth:`forward_strict` to assert dispatch-table
+        completeness.
+        """
         forwarded: list[EventType] = []
         for event in events:
             et = self._dispatch_strict(event)
