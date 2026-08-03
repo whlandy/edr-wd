@@ -766,3 +766,47 @@ Reviewer action items (round 2):
    commitments, not module choices.
 5. Sign off the design package as a whole, or send Request
    Changes with specific D items to revise.
+
+---
+
+## Reviewer Approval Log
+
+Append-only. Each entry records who closed which round of the
+gate, when, and which commit/version was approved.
+
+### Round 1 — CHANGES REQUESTED
+
+- **Date**: 2026-08-02 (per P2.5 round 1 review log)
+- **Reviewer verdict**: ⚠️ NEEDS CHANGES (not approved)
+- **Findings**: D1 / D3 needed decision criteria / options;
+  D4 too absolute; D7 conflated text/numeric; D8/D9/D10 too
+  implementation-bound; D6 wording; per-D structure missing;
+  exit condition missing.
+- **Approved commit**: `ced7f88 docs(requirements): add P2.5
+  design review gate (paper-only)` — REJECTED; revised in
+  round 2.
+
+### Round 2 — APPROVED
+
+- **Date**: 2026-08-02 (per P2.5 round 2 review log)
+- **Reviewer verdict**: ✅ APPROVED WITH MINOR NOTES
+- **Minor notes**: M1 (this section), M2 (DECISIONS.md
+  time-line).
+- **Approved commit**: `282b20a docs(requirements): P2.5 round
+  2 — rewrite D items as contracts`.
+- **Status**: gate APPROVED; P2.5 closes here.
+
+---
+
+## P2.5 Closed
+
+P2.5 closes on this commit. P3.1 implementation may begin.
+
+P3.1 itself produces its own review package; P2.5 is not a
+substitute. The next gate is **P3.1 design review**, not
+direct implementation.
+
+This file remains the audit trail for the gate; future
+checkpoints that surface deferred decisions MAY add new D
+items here but MUST NOT revise already-locked contracts
+without a fresh reviewer round.

@@ -24,9 +24,23 @@ implementation is downstream.
 
 ---
 
-## P2.5 Design Review Gate (round 2 — contracts only)
+## P2.5 Design Review Gate
 
-### D1. Unique-identifier format
+### Time line (append-only)
+
+- **2026-08-02 round 1** — CHANGES REQUESTED. P2.5 v1 had
+  implementation-bound decisions and was rejected. See
+  `P2-5-design-gate.md` "Reviewer Approval Log" for full
+  findings.
+- **2026-08-02 round 2** — APPROVED WITH MINOR NOTES. P2.5 v2
+  rewrote D items as 5-part contracts (Problem / Contract /
+  Non-Goals / Implementation Freedom / Migration Impact).
+  Round 2 reviewer approved with non-blocking notes M1 / M2
+  (addressed in this file + DECISIONS.md).
+
+### Round 2 — contracts (current)
+
+#### D1. Unique-identifier format
 
 - Contract: unique + lex-sortable + JSON-round-trippable +
   stable across releases.
