@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .cleanup_cascade import compute_display_status, has_cleanup_failure
+from .markdown_escape import escape_markdown
 from .runs import (
     CaseAttemptRef,
     Manifest,
@@ -519,7 +520,9 @@ def _render_markdown(
     parts.append("(First = outcome of attempt-0001 per case; Final = "
                  "outcome of last attempt per case.)\n")
 
-    # Per-case attempts table
+    # Per-case attempts table. Escape user-controlled values
+    # (safe_case_id, trace_id) so a pipe / backtick / newline in a
+    # case id doesn't break the table structure (P2.4.D).
     parts.append("## Per-Case Attempts\n")
     parts.append("| Case | Attempts | Final | Trace |")
     parts.append("|------|----------|-------|-------|")
@@ -538,13 +541,14 @@ def _render_markdown(
                                  final.get("terminal_status", "unknown"))
         first_trace = case_m[0].get("trace_id", "")
         parts.append(
-            f"| {cid} | {n} | {final_status} | "
-            f"{first_trace} |"
+            f"| {escape_markdown(cid)} | {n} | {final_status} | "
+            f"{escape_markdown(first_trace)} |"
         )
     parts.append("")
 
     # Failures and blocks (filter by display_status, NOT terminal_status,
-    # so cascade-flipped cases show up here).
+    # so cascade-flipped cases show up here). Escape user-controlled
+    # fields.
     failures = [m for m in per_case_manifests
                 if m.get("display_status",
                          m.get("terminal_status")) == "failed"]
@@ -562,20 +566,25 @@ def _render_markdown(
                     and has_cleanup_failure(m)
                     and bool(m.get("cleanup_outcome_critical"))):
                 cleanup_note = " (cascaded from cleanup failure)"
-            parts.append(f"### {cid} — {aid} (failed{cleanup_note})\n")
-            parts.append(f"- Trace: {m.get('trace_id', '?')}\n")
+            parts.append(f"### {escape_markdown(cid)} — "
+                         f"{escape_markdown(aid)} (failed{cleanup_note})\n")
+            parts.append(f"- Trace: "
+                         f"{escape_markdown(m.get('trace_id', '?'))}\n")
         for m in blocks:
             cid = m.get("safe_case_id", "?")
             aid = m.get("attempt_id", "?")
-            parts.append(f"### {cid} — {aid} (blocked)\n")
-            parts.append(f"- Trace: {m.get('trace_id', '?')}\n")
+            parts.append(f"### {escape_markdown(cid)} — "
+                         f"{escape_markdown(aid)} (blocked)\n")
+            parts.append(f"- Trace: "
+                         f"{escape_markdown(m.get('trace_id', '?'))}\n")
         parts.append("")
 
     # Cleanup Warnings (P2.4 D11 + D12).
     # Lists every case where cleanup_status == "failed", regardless of
     # outcome_critical flag — non-critical failures surface here as
     # informational, even though they don't cascade to failed case
-    # status.
+    # status. Escape user-controlled fields; cleanup_status is a
+    # renderer-controlled enum so it is NOT escaped.
     cleanup_failures = [m for m in per_case_manifests
                         if has_cleanup_failure(m)]
     if cleanup_failures:
@@ -594,7 +603,8 @@ def _render_markdown(
             crit = "yes" if m.get("cleanup_outcome_critical") else "no"
             trace = m.get("trace_id", "?")
             parts.append(
-                f"| {cid} | {aid} | {cleanup_status} | {crit} | {trace} |"
+                f"| {escape_markdown(cid)} | {escape_markdown(aid)} | "
+                f"{cleanup_status} | {crit} | {escape_markdown(trace)} |"
             )
         parts.append("")
 
@@ -623,6 +633,7 @@ __all__ = [
     "compute_aggregate_status",
     "compute_attempt_split",
     "compute_display_status",
+    "escape_markdown",
     "has_cleanup_failure",
     "Totals",
     "AttemptSplit",

@@ -1,14 +1,25 @@
 """
-P2.3.D — Full P2.3 acceptance suite (architecture §Checkpoint P2.3).
+P2.4.D — Full P2.4 acceptance suite (architecture §Checkpoint P2.4).
 
-End-to-end tests covering FR-P2.3-01 through FR-P2.3-09.
-FR-P2.3-07 is explicitly deferred — see test_fr07_cleanup_cascade_deferred.
+End-to-end tests covering:
+  * FR-P2.3-01 through FR-P2.3-09 (regression from P2.3.D)
+  * FR-P2.3-07 — Cleanup cascade (NOW IMPLEMENTED, replaces the
+    P2.3.D deferred marker)
+  * FR-P2.3-10 — Markdown escaping (P2.4.D)
 
 Test categories:
-  * FR-P2.3-01 to FR-P2.3-09 end-to-end (8 FRs + 1 deferred)
-  * Full pipeline scenarios (5 scenarios)
+  * FR-P2.3-01 to FR-P2.3-09 end-to-end (9 FRs)
+  * FR-P2.3-07 cleanup cascade (new in P2.4 — replaces deferred)
+  * FR-P2.3-10 markdown escape (new in P2.4)
+  * Full pipeline scenarios (5 scenarios from P2.3.D)
   * Cross-run isolation (1)
   * Manifest persistence (1)
+
+The detailed unit tests for cascade semantics live in
+`test_cleanup_cascade.py`. The detailed unit tests for escape
+live in `test_markdown_escape.py`. This file is the acceptance
+suite — it verifies FR-level end-to-end behavior across the
+agent/trace pipeline.
 
 Run:
     cd /Users/edr-test/edr-wd
@@ -285,31 +296,87 @@ class TestFR06Sanitization:
 
 
 # ----------------------------------------------------------------------
-# FR-P2.3-07 — Cleanup cascade (DEFERRED)
+# FR-P2.3-07 — Cleanup cascade (P2.4 — REPLACES P2.3.D DEFERRED MARKER)
 # ----------------------------------------------------------------------
 
-class TestFR07CleanupCascadeDeferred:
+class TestFR07CleanupCascadeImplemented:
     """FR-P2.3-07: Cleanup failures change a passed case to failed only
     when the test definition marks cleanup as outcome-critical.
 
-    DEFERRED RATIONALE: requires TestCase.cleanup_outcome_critical field
-    which is in target/protocol_models. P2.3 is per-design scoped to
-    agent/trace only — TestCase changes deferred to P2.4.
+    P2.4 IMPLEMENTATION: This replaces the P2.3.D
+    `TestFR07CleanupCascadeDeferred` class. The deferred marker test
+    (`test_fr07_deferred_with_rationale`) has been REMOVED — see
+    design §9.5.
 
-    Until implemented:
-      * Case-attempt-manifest.json does not include cleanup_status.
-      * render_report does not cascade passed→failed on cleanup failure.
-      * Test runner does not pass cleanup outcome-critical flag.
+    Schema changes:
+      * `TestCase.cleanup_outcome_critical: bool = False` (P2.4.A)
+      * `ManifestRecord.{cleanup_status, cleanup_outcome_critical}`
+        (P2.4.A, additive; SCHEMA_VERSION unchanged at 1.0.0)
 
-    This test will be enabled in P2.4 when the TestCase schema gains
-    cleanup_outcome_critical.
+    Renderer wiring (P2.4.C):
+      * `compute_display_status()` implements D12 cascade rule.
+      * Cleanup Warnings section surfaces non-critical cleanup failures.
+
+    Detailed unit tests for the cascade rule live in
+    `test_cleanup_cascade.py`. This file verifies the FR-level
+    end-to-end behavior across the agent/trace pipeline.
     """
 
-    def test_fr07_deferred_with_rationale(self):
-        """Marker test — confirms the deferral is documented."""
-        # If TestCase gains cleanup_outcome_critical in P2.4, replace this
-        # with the actual cascade test.
-        assert True  # placeholder
+    def test_fr07_cleanup_cascade_implemented_remove_deferred_marker(
+        self,
+    ) -> None:
+        """Marker test confirming the deferred class was deleted and
+        replaced with this implemented class.
+
+        If you can read this and the P2.3.D deferred class no longer
+        exists, FR-P2.3-07 is implemented (D11 + D12 + D13 satisfied).
+        """
+        import agent.trace.runs  # noqa: F401  (import check)
+        # Real verification: cascade rule applied end-to-end.
+        from agent.trace.cleanup_cascade import compute_display_status
+        m = {
+            "terminal_status": "passed",
+            "cleanup_status": "failed",
+            "cleanup_outcome_critical": True,
+        }
+        assert compute_display_status(m) == "failed"
+        # Non-critical: no cascade.
+        m_noncrit = {
+            "terminal_status": "passed",
+            "cleanup_status": "failed",
+            "cleanup_outcome_critical": False,
+        }
+        assert compute_display_status(m_noncrit) == "passed"
+
+    def test_old_manifest_without_cleanup_status_no_cascade(self) -> None:
+        """P2.3-era manifest without cleanup_* fields → no cascade (D13)."""
+        # This is the same scenario as P2.4.C test, but at FR level.
+        m = {"terminal_status": "passed"}
+        from agent.trace.cleanup_cascade import compute_display_status
+        assert compute_display_status(m) == "passed"
+
+    def test_cleanup_status_persisted_in_manifest_on_disk(self) -> None:
+        """cleanup_status round-trips through ManifestRecord (P2.4.B
+        → P2.4.A wiring)."""
+        from agent.trace.manifest import IntegrityReport, ManifestRecord
+        m = ManifestRecord(
+            trace_id="trace_test",
+            branch_heads=(),
+            catalog_digest="a" * 64,
+            evidence_counts={},
+            terminal_status="passed",
+            integrity_verification_result=IntegrityReport(ok=True, issues=()),
+            cleanup_status="failed",
+            cleanup_outcome_critical=True,
+        )
+        d = m.to_dict()
+        assert d["cleanup_status"] == "failed"
+        assert d["cleanup_outcome_critical"] is True
+        # Module-level from_dict (not classmethod).
+        from agent.trace.manifest import from_dict as manifest_from_dict
+        m2 = manifest_from_dict(d)
+        assert m2.cleanup_status == "failed"
+        assert m2.cleanup_outcome_critical is True
 
 
 # ----------------------------------------------------------------------
@@ -567,21 +634,22 @@ class TestManifestPersistence:
 # ----------------------------------------------------------------------
 
 class TestSpecCompliance:
-    """Index test verifying the 9 FR coverage matrix."""
+    """Index test verifying the 10 FR coverage matrix."""
 
     def test_fr_matrix_complete(self):
-        """All 9 FRs are accounted for:
+        """All 10 FRs are accounted for:
           FR-01 additive reruns       — TestFR01AdditiveReruns
           FR-02 reconciliation        — TestFR02Reconciliation
           FR-03 first/final visible   — TestFR03FirstFinalVisible
           FR-04 missing links warn    — TestFR04MissingLinksWarn
           FR-05 determinism           — TestFR05Determinism
           FR-06 sanitization rejects  — TestFR06Sanitization
-          FR-07 cleanup cascade       — TestFR07CleanupCascadeDeferred (DEFERRED)
+          FR-07 cleanup cascade       — TestFR07CleanupCascadeImplemented
           FR-08 metric redaction      — TestFR08MetricPersistence
           FR-09 tolerates evidence    — TestFR09ToleratesCorruptEvidence
+          FR-10 markdown escape       — TestFR10MarkdownEscape (P2.4.D)
 
-        8 / 9 implemented; FR-07 deferred (P2.4 needs TestCase schema change).
+        10 / 10 implemented as of P2.4.
         """
         frs = {
             "FR-P2.3-01": "implemented",
@@ -590,9 +658,194 @@ class TestSpecCompliance:
             "FR-P2.3-04": "implemented",
             "FR-P2.3-05": "implemented",
             "FR-P2.3-06": "implemented",
-            "FR-P2.3-07": "deferred (P2.4)",
+            "FR-P2.3-07": "implemented",
             "FR-P2.3-08": "implemented",
             "FR-P2.3-09": "implemented",
+            "FR-P2.3-10": "implemented",
         }
         implemented = sum(1 for v in frs.values() if v == "implemented")
-        assert implemented == 8, f"Expected 8 implemented, got {implemented}"
+        assert implemented == 10, (
+            f"Expected 10 implemented, got {implemented}"
+        )
+
+
+# ----------------------------------------------------------------------
+# FR-P2.3-10 — Markdown escape (P2.4.D)
+# ----------------------------------------------------------------------
+
+class TestFR10MarkdownEscape:
+    """FR-P2.3-10: User-controlled values in markdown output do not
+    break markdown table structure.
+
+    Implementation: `escape_markdown()` helper in
+    `agent.trace.markdown_escape`, wired into `render_report` at all
+    user-controlled value points (per-case table, failures section,
+    cleanup warnings).
+
+    Detailed unit tests for `escape_markdown` live in
+    `test_markdown_escape.py`. This file verifies the FR-level
+    end-to-end behavior across the agent/trace pipeline.
+    """
+
+    def test_pipe_in_trace_id_does_not_break_table(
+        self, tmp_path,
+    ) -> None:
+        """A pipe in trace_id is escaped in markdown table cells."""
+        import json
+        from agent.trace.runs import CaseAttemptRef, RunContext
+        from agent.trace.render_report import render_report
+
+        run_dir = tmp_path / "run_test"
+        run_dir.mkdir()
+        run = RunContext(root=tmp_path, run_id="run_test")
+        run.finalize()
+        (run_dir / "manifest.json").write_text(
+            '{"schema_version": "1.0", "run_id": "run_test", '
+            '"started_at": "2024-01-01T00:00:00Z", "ended_at": '
+            '"2024-01-01T00:01:00Z", "renderer_version": "p2.4", '
+            '"evidence_status": "complete"}',
+            encoding="utf-8",
+        )
+
+        case_dir = run_dir / "case_test" / "attempt-0001"
+        case_dir.mkdir(parents=True)
+        (case_dir / "case-attempt-manifest.json").write_text(
+            json.dumps({
+                "schema_version": "1.0.0",
+                "trace_id": "trace|with|pipe",
+                "branch_heads": [],
+                "catalog_digest": "a" * 64,
+                "evidence_counts": {},
+                "terminal_status": "passed",
+                "integrity_verification_result": {"ok": True, "issues": []},
+            }),
+            encoding="utf-8",
+        )
+
+        attempt = CaseAttemptRef(
+            safe_case_id="case_test",
+            attempt_id="attempt-0001",
+            trace_id="trace|with|pipe",
+            path=case_dir,
+        )
+        body, _ = render_report(run, attempts=[attempt])
+
+        # Pipe is escaped in the per-case table.
+        assert "trace\\|with\\|pipe" in body
+        # Per-case table structure preserved (header row intact).
+        assert "| Case | Attempts | Final | Trace |" in body
+
+    def test_backtick_in_case_id_does_not_break_inline_code(
+        self, tmp_path,
+    ) -> None:
+        """A backtick in safe_case_id is escaped."""
+        import json
+        from agent.trace.runs import CaseAttemptRef, RunContext
+        from agent.trace.render_report import render_report
+
+        run_dir = tmp_path / "run_test"
+        run_dir.mkdir()
+        run = RunContext(root=tmp_path, run_id="run_test")
+        run.finalize()
+        (run_dir / "manifest.json").write_text(
+            '{"schema_version": "1.0", "run_id": "run_test", '
+            '"started_at": "2024-01-01T00:00:00Z", "ended_at": '
+            '"2024-01-01T00:01:00Z", "renderer_version": "p2.4", '
+            '"evidence_status": "complete"}',
+            encoding="utf-8",
+        )
+
+        case_dir = run_dir / "case_test" / "attempt-0001"
+        case_dir.mkdir(parents=True)
+        (case_dir / "case-attempt-manifest.json").write_text(
+            json.dumps({
+                "schema_version": "1.0.0",
+                "trace_id": "trace_x",
+                "branch_heads": [],
+                "catalog_digest": "a" * 64,
+                "evidence_counts": {},
+                "terminal_status": "passed",
+                "integrity_verification_result": {"ok": True, "issues": []},
+            }),
+            encoding="utf-8",
+        )
+
+        # safe_case_id is what the renderer uses; bypass sanitize here
+        # for the FR-level test.
+        attempt = CaseAttemptRef(
+            safe_case_id="case`with`backtick",
+            attempt_id="attempt-0001",
+            trace_id="trace_x",
+            path=case_dir,
+        )
+        body, _ = render_report(run, attempts=[attempt])
+        assert "case\\`with\\`backtick" in body
+
+    def test_renderer_generated_text_not_escaped(self) -> None:
+        """Headings, table syntax, status enums are NOT escaped."""
+        from agent.trace.markdown_escape import escape_markdown
+        # Sanity: renderer-generated strings should NOT flow through
+        # escape_markdown — verify the helper is selective by
+        # checking that simple ASCII text passes through unchanged.
+        assert escape_markdown("Run Report") == "Run Report"
+        assert escape_markdown("Per-Case Attempts") == "Per-Case Attempts"
+        assert escape_markdown("passed") == "passed"
+        assert escape_markdown("failed") == "failed"
+
+    def test_report_determinism_with_escaped_input(
+        self, tmp_path,
+    ) -> None:
+        """FR-P2.3-05 + escape: same input → same output regardless of
+        escape behavior. Escape is a pure function of input.
+        """
+        import json
+        from agent.trace.runs import CaseAttemptRef, RunContext
+        from agent.trace.render_report import render_report
+        from agent.trace.markdown_escape import escape_markdown
+
+        run_dir = tmp_path / "run_test"
+        run_dir.mkdir()
+        run = RunContext(root=tmp_path, run_id="run_test")
+        run.finalize()
+        (run_dir / "manifest.json").write_text(
+            '{"schema_version": "1.0", "run_id": "run_test", '
+            '"started_at": "2024-01-01T00:00:00Z", "ended_at": '
+            '"2024-01-01T00:01:00Z", "renderer_version": "p2.4", '
+            '"evidence_status": "complete"}',
+            encoding="utf-8",
+        )
+
+        case_dir = run_dir / "case_test" / "attempt-0001"
+        case_dir.mkdir(parents=True)
+        (case_dir / "case-attempt-manifest.json").write_text(
+            json.dumps({
+                "schema_version": "1.0.0",
+                "trace_id": "trace|evil",
+                "branch_heads": [],
+                "catalog_digest": "a" * 64,
+                "evidence_counts": {},
+                "terminal_status": "passed",
+                "integrity_verification_result": {"ok": True, "issues": []},
+            }),
+            encoding="utf-8",
+        )
+
+        attempt = CaseAttemptRef(
+            safe_case_id="case_test",
+            attempt_id="attempt-0001",
+            trace_id="trace|evil",
+            path=case_dir,
+        )
+
+        body1, _ = render_report(
+            run, attempts=[attempt],
+            frozen_generated_at="2026-01-01T00:00:00Z",
+        )
+        body2, _ = render_report(
+            run, attempts=[attempt],
+            frozen_generated_at="2026-01-01T00:00:00Z",
+        )
+        # Same inputs → same output (FR-P2.3-05 determinism).
+        assert body1 == body2
+        # Escape applied (defense-in-depth).
+        assert escape_markdown("trace|evil") in body1
