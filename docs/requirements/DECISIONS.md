@@ -308,3 +308,18 @@ implementation's job.
 | D1 | Unique + lex-sortable + JSON-round-trippable + stable | P3.1 implementation records option chosen (UUIDv7 / ULID / ad-hoc) |
 | D3 | Backend returns raw PNG bytes + capability declared | P3.1 implementation records module chosen (catalog / execution / provider) |
 | D4 | Post-encoding threshold; inline ≤ threshold; managed transfer above; digest verified | P3.1 implementation records threshold value (default 1 MiB post-encoding) |
+
+
+---
+
+## P3.1 Design Gate Closure
+
+- **2026-08-02 round 1** — APPROVED WITH MINOR NOTES.
+- Notes addressed in revision commit (D11 schema_version;
+  D12 stages must pass; D13 replan_id; D14 executor boundary;
+  D15 3 trust boundaries; D16 event schema_version; M1
+  completion state; M2 inherited note).
+- Gate closed.
+- **Next**: P3.1 implementation may begin once it produces
+  its own review package that records option choices for
+  D1 / D3 / D4.

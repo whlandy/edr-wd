@@ -2,11 +2,28 @@
 
 ## Status
 
-- **Round**: 1 (initial draft).
-- **Verdict**: implementation complete (docs only).
+- **Round**: 1 — APPROVED WITH MINOR NOTES (notes addressed).
+- **Verdict**: gate closed.
 - **Code written**: 0
 - **Tests added**: 0
 - **Branch**: `codex/hermes-p31-design`
+
+## Round 1 review notes addressed
+
+| Note | Where addressed |
+|------|-----------------|
+| D11: schema version migration | `schema_version` field + migration strategy note added to D11 contract |
+| D12: avoid hard-coded validation order | D12 rewritten to "all 5 stages MUST pass" (parallel allowed) |
+| D13: replan correlation | `replan_id` + run_id/step_id/replan_id/event_id hierarchy added to D13 |
+| D14: confirmation at executor boundary | D14 contract now explicitly places the gate at executor boundary |
+| D15: keep trust boundaries separate | D15 + Reviewer Approval Log state 3 distinct trust boundaries (prompt / markdown / trace) |
+| D16: event schema versioning | per-event `schema_version` field added (`plan_created.v1` etc.) |
+| M1: completion state | Status block + Reviewer Approval Log entry added |
+| M2: inherited contracts | Inherited table updated to "Inherited; option at P3.1 implementation review" |
+
+Gate closes on this revision. P3.1 implementation may begin
+once it produces its own review package that records option
+choices for D1 / D3 / D4.
 
 ## Deliverables
 
