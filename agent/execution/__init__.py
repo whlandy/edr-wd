@@ -64,7 +64,9 @@ from .recovery import (
     RestoreResult,
     RestoreStrategy,
     advance_replan_state,
+    resolve_strategy,
     severity_of,
+    strategies_for_severity,
 )
 from .recovery_inverse import (
     DuplicateInverseError,
@@ -143,6 +145,9 @@ __all__ = [
     "FailureContext",
     "RecoveryPlan",
     "Branch",
+    # recovery composition helpers (P2.2 — Round 3 patch)
+    "strategies_for_severity",
+    "resolve_strategy",
     # recovery inverse registry (P2.2 — Commit A)
     "SOPInverseAction",
     "InverseRegistry",

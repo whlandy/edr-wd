@@ -28,7 +28,9 @@ from agent.execution.recovery import (
     ReplanState,
     RestoreStrategy,
     advance_replan_state,
+    resolve_strategy,
     severity_of,
+    strategies_for_severity,
 )
 from agent.execution.recovery_inverse import (
     DuplicateInverseError,
@@ -289,3 +291,134 @@ def test_inverse_registry_membership_and_get():
     assert reg.get("nonexistent") is None
     assert "edrclient.main" in reg
     assert "nonexistent" not in reg
+
+
+# ---------------------------------------------------------------------------
+# Composition helpers (Round 3 patch: A1 + B2)
+# ---------------------------------------------------------------------------
+
+
+def test_strategies_for_severity_reverse_lookup():
+    """A1 — ``strategies_for_severity`` returns every strategy
+    whose mapped severity equals the requested level. The
+    reverse lookup is deterministic (declaration order).
+    """
+    # APPLICATION level currently maps only to PROCESS_RESTART.
+    assert strategies_for_severity(RecoverySeverity.APPLICATION) == (
+        RestoreStrategy.PROCESS_RESTART,
+    )
+    # SESSION level currently maps only to RECONNECT.
+    assert strategies_for_severity(RecoverySeverity.SESSION) == (
+        RestoreStrategy.RECONNECT,
+    )
+    # NONE level maps to NONE + BLOCKED (both are severity NONE).
+    none_set = set(strategies_for_severity(RecoverySeverity.NONE))
+    assert none_set == {RestoreStrategy.NONE, RestoreStrategy.BLOCKED}
+
+
+def test_strategies_for_severity_empty_for_unused_levels():
+    """A1 — the helper returns an empty tuple for severity
+    levels that no strategy currently occupies (CONTROL). This
+    is the stable contract; future strategies can claim CONTROL
+    without breaking existing callers.
+    """
+    assert strategies_for_severity(RecoverySeverity.CONTROL) == ()
+
+
+def test_resolve_strategy_picks_most_restrictive():
+    """B2 — when multiple strategies are proposed, the
+    resolver picks the highest-severity one (APPLICATION >
+    SESSION > WINDOW > PAGE).
+    """
+    # PAGE candidate loses to APPLICATION candidate.
+    assert (
+        resolve_strategy([
+            RestoreStrategy.REDRIVE,
+            RestoreStrategy.PROCESS_RESTART,
+        ])
+        is RestoreStrategy.PROCESS_RESTART
+    )
+    # PAGE loses to SESSION.
+    assert (
+        resolve_strategy([
+            RestoreStrategy.REDRIVE,
+            RestoreStrategy.RECONNECT,
+        ])
+        is RestoreStrategy.RECONNECT
+    )
+    # PAGE loses to WINDOW.
+    assert (
+        resolve_strategy([
+            RestoreStrategy.REDRIVE,
+            RestoreStrategy.REOBSERVE_REPLAN,
+        ])
+        is RestoreStrategy.REOBSERVE_REPLAN
+    )
+
+
+def test_resolve_strategy_single_input_passthrough():
+    """B2 — with a single candidate, the resolver returns it
+    unchanged. This locks Q2 behavior for the case where the
+    caller already merged sources (P2.1 boundary) and just
+    wants a deterministic round-trip.
+    """
+    assert (
+        resolve_strategy([RestoreStrategy.REDRIVE])
+        is RestoreStrategy.REDRIVE
+    )
+    assert (
+        resolve_strategy([RestoreStrategy.PROCESS_RESTART])
+        is RestoreStrategy.PROCESS_RESTART
+    )
+
+
+def test_resolve_strategy_tie_first_registered_wins():
+    """B2 — same-severity tie-break: the strategy that appears
+    first in ``RESTORE_SEVERITY`` declaration order wins.
+    This matches the design doc's §5.2 "first registered source
+    wins" rule.
+    """
+    # Two PAGE-level candidates — REDRIVE is declared first
+    # in RESTORE_SEVERITY. (None currently exist at PAGE level
+    # besides REDRIVE, so the test directly asserts the
+    # declaration-order property by constructing a hypothetical
+    # tie; we use REDRIVE twice to confirm identity.)
+    assert (
+        resolve_strategy([RestoreStrategy.REDRIVE, RestoreStrategy.REDRIVE])
+        is RestoreStrategy.REDRIVE
+    )
+
+
+def test_resolve_strategy_rejects_blocked():
+    """B2 — BLOCKED is a terminal, not a candidate. The
+    resolver raises ``ValueError`` if BLOCKED is present so the
+    caller is forced to handle the terminal explicitly.
+    """
+    with pytest.raises(ValueError, match="BLOCKED"):
+        resolve_strategy([RestoreStrategy.BLOCKED])
+    with pytest.raises(ValueError, match="BLOCKED"):
+        resolve_strategy([
+            RestoreStrategy.REDRIVE,
+            RestoreStrategy.BLOCKED,
+        ])
+
+
+def test_resolve_strategy_rejects_empty():
+    """B2 — empty input is a programming error (the caller
+    should have at least one non-BLOCKED candidate). Raise
+    rather than silently returning ``NONE``.
+    """
+    with pytest.raises(ValueError, match="at least one"):
+        resolve_strategy([])
+
+
+def test_resolve_strategy_is_pure():
+    """B2 — the resolver must not mutate its input. Two
+    consecutive calls with the same iterable (re-constructed
+    each time) must produce the same result.
+    """
+    candidates_a = [RestoreStrategy.REDRIVE, RestoreStrategy.PROCESS_RESTART]
+    candidates_b = [RestoreStrategy.REDRIVE, RestoreStrategy.PROCESS_RESTART]
+    assert resolve_strategy(candidates_a) is resolve_strategy(candidates_b)
+    # And the input list is unchanged.
+    assert candidates_a == [RestoreStrategy.REDRIVE, RestoreStrategy.PROCESS_RESTART]

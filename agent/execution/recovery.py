@@ -39,6 +39,8 @@ Boundary with the executor:
 
 from __future__ import annotations
 
+from typing import Iterable
+
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from typing import Any
@@ -125,6 +127,78 @@ def severity_of(strategy: RestoreStrategy) -> RecoverySeverity:
     severity dynamically without breaking callers.
     """
     return RESTORE_SEVERITY[strategy]
+
+
+def strategies_for_severity(
+    severity: RecoverySeverity,
+) -> tuple[RestoreStrategy, ...]:
+    """Round 3 A1 — reverse lookup.
+
+    Return every :class:`RestoreStrategy` whose severity equals
+    ``severity``, in :data:`RESTORE_SEVERITY` declaration order.
+
+    Use case: the executor may surface "give me every strategy
+    that could be classified at PAGE level" when deciding which
+    restore strategy to retry after a partial failure.
+
+    The result is deterministic (dict insertion order in modern
+    CPython) so callers can rely on stable iteration.
+    """
+    return tuple(
+        strategy
+        for strategy, mapped_severity in RESTORE_SEVERITY.items()
+        if mapped_severity == severity
+    )
+
+
+def resolve_strategy(
+    strategies: Iterable[RestoreStrategy],
+) -> RestoreStrategy:
+    """Round 3 B2 — Q2 conflict resolver.
+
+    Given a non-empty iterable of :class:`RestoreStrategy`
+    candidates (typically emitted by multiple decision sources),
+    return the **most-restrictive** strategy, where "restrictive"
+    is defined by :class:`RecoverySeverity` ordering:
+
+        APPLICATION > SESSION > WINDOW > PAGE > CONTROL > NONE
+
+    BLOCKED is **not** a candidate: callers must filter BLOCKED
+    out before calling. If any BLOCKED is present, raise
+    :class:`ValueError` so the caller is forced to handle the
+    terminal explicitly rather than silently ignoring it.
+
+    Tie-breaking (same severity): the first registered strategy
+    in :data:`RESTORE_SEVERITY` wins. This matches the design
+    doc's "first registered source wins" rule (§5.2).
+
+    The function is **pure**: same input -> same output,
+    deterministic, no I/O.
+    """
+    seen: list[RestoreStrategy] = []
+    for s in strategies:
+        if s is RestoreStrategy.BLOCKED:
+            raise ValueError(
+                "resolve_strategy() received BLOCKED; "
+                "filter BLOCKED before calling (it is terminal, "
+                "not a candidate)."
+            )
+        seen.append(s)
+
+    if not seen:
+        raise ValueError(
+            "resolve_strategy() requires at least one non-BLOCKED "
+            "candidate; got an empty iterable."
+        )
+
+    # Sort by severity descending, then by RESTORE_SEVERITY
+    # declaration order (Python 3.7+ dict preserves insertion
+    # order, so enumerate gives us a stable tie-breaker).
+    declaration_order = {s: i for i, s in enumerate(RESTORE_SEVERITY)}
+    seen.sort(
+        key=lambda s: (-severity_of(s).value, declaration_order[s])
+    )
+    return seen[0]
 
 
 # ---------------------------------------------------------------------------

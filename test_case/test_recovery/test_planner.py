@@ -22,9 +22,10 @@ These tests cover 6 of the 9 spec tests in
 The remaining 3 spec tests (``test_logical_recovery_reobserves``,
 ``test_session_recovery_recreates_lock``,
 ``test_step_results_show_both_attempts``,
-``test_trace_md_two_subsections``) require executor + trace
-integration that lands in Commit C' / P2.4 (out of scope for
-the pure planner).
+``test_trace_md_two_subsections``) require P2.2 executor integration:
+budget enforcement + recovery_result events + step-results projection
++ trace.md renderer. They live in the executor integration phase
+(P2.2 next checkpoint), not P2.4 (Round 3 review C1 wording fix).
 """
 
 from __future__ import annotations
