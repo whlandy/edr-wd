@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .cleanup_cascade import compute_display_status, has_cleanup_failure
 from .runs import (
     CaseAttemptRef,
     Manifest,
@@ -115,14 +116,19 @@ class Totals:
         cls,
         manifests: Sequence[Mapping[str, Any]],
     ) -> "Totals":
-        """Count `terminal_status` across all manifests in input order.
+        """Count statuses across all manifests in input order.
 
-        Each manifest must have at least `terminal_status` and
-        `safe_case_id` fields. Unknown statuses are ignored (not counted).
+        Each manifest must have at least `display_status` (preferred)
+        or `terminal_status` (fallback) field. The renderer injects
+        `display_status` per P2.4 cascade rule (D12); if absent, we
+        fall back to `terminal_status` so external callers continue
+        to work without cascade semantics.
+
+        Unknown statuses are ignored (not counted).
         """
         passed = failed = blocked = skipped = 0
         for m in manifests:
-            ts = m.get("terminal_status", "unknown")
+            ts = m.get("display_status", m.get("terminal_status", "unknown"))
             if ts == "passed":
                 passed += 1
             elif ts == "failed":
@@ -328,8 +334,7 @@ def render_report(
 
     Order: header → report status banner → identity → headline totals →
     first/final split → per-case table → failures and blocks →
-    recovery stats → evidence integrity → cleanup warnings → evidence
-    warnings → footer.
+    cleanup warnings → evidence integrity → evidence warnings → footer.
 
     Raises:
         ManifestMissingError: if manifest.json missing (D6 fail severity).
@@ -365,7 +370,10 @@ def render_report(
             f"manifest.json at {manifest_path} is corrupt: {e}"
         ) from e
 
-    # Read per-case manifests to compute aggregate + totals
+    # Read per-case manifests to compute aggregate + totals.
+    # Inject `display_status` per P2.4 cascade rule (D12). This is
+    # the only place the cascade fires — read-time only, in-memory
+    # view, no mutation of the on-disk manifest (D17).
     per_case_manifests: list[dict[str, Any]] = []
     for ca in attempts:
         campath = ca.case_attempt_manifest_path()
@@ -376,6 +384,8 @@ def render_report(
                 cm["safe_case_id"] = ca.safe_case_id
                 cm["attempt_id"] = ca.attempt_id
                 cm["trace_id"] = ca.trace_id
+                # Inject display_status (P2.4 cascade).
+                cm["display_status"] = compute_display_status(cm)
                 per_case_manifests.append(cm)
             except (OSError, json.JSONDecodeError):
                 per_case_manifests.append({
@@ -383,6 +393,7 @@ def render_report(
                     "attempt_id": ca.attempt_id,
                     "trace_id": ca.trace_id,
                     "terminal_status": "unknown",
+                    "display_status": "unknown",
                 })
         else:
             per_case_manifests.append({
@@ -390,12 +401,14 @@ def render_report(
                 "attempt_id": ca.attempt_id,
                 "trace_id": ca.trace_id,
                 "terminal_status": "unknown",
+                "display_status": "unknown",
             })
 
-    # Compute aggregate status (renderer-owned per Minor 1)
-    terminal_statuses = [m.get("terminal_status", "unknown")
-                         for m in per_case_manifests]
-    agg = compute_aggregate_status(terminal_statuses)
+    # Compute aggregate status (renderer-owned per Minor 1) using
+    # display_status (cascade-applied).
+    display_statuses = [m.get("display_status", "unknown")
+                        for m in per_case_manifests]
+    agg = compute_aggregate_status(display_statuses)
 
     # Compute Totals (headline) and reconcile
     headline = Totals.from_manifests(per_case_manifests)
@@ -517,7 +530,12 @@ def _render_markdown(
         case_m = sorted(by_case[cid], key=lambda x: x.get("attempt_id", ""))
         n = len(case_m)
         final = case_m[-1]
-        final_status = final.get("terminal_status", "unknown")
+        # Use display_status (cascade-applied) so the table reflects
+        # the cascade rule (P2.4 D12). The original terminal_status
+        # is preserved on the manifest (D17) — only the displayed
+        # value reflects the cascade.
+        final_status = final.get("display_status",
+                                 final.get("terminal_status", "unknown"))
         first_trace = case_m[0].get("trace_id", "")
         parts.append(
             f"| {cid} | {n} | {final_status} | "
@@ -525,23 +543,59 @@ def _render_markdown(
         )
     parts.append("")
 
-    # Failures and blocks
+    # Failures and blocks (filter by display_status, NOT terminal_status,
+    # so cascade-flipped cases show up here).
     failures = [m for m in per_case_manifests
-                if m.get("terminal_status") == "failed"]
+                if m.get("display_status",
+                         m.get("terminal_status")) == "failed"]
     blocks = [m for m in per_case_manifests
-              if m.get("terminal_status") == "blocked"]
+              if m.get("display_status",
+                       m.get("terminal_status")) == "blocked"]
     if failures or blocks:
         parts.append("## Failures And Blocks\n")
         for m in failures:
             cid = m.get("safe_case_id", "?")
             aid = m.get("attempt_id", "?")
-            parts.append(f"### {cid} — {aid} (failed)\n")
+            # Surface cleanup cascade reason if applicable.
+            cleanup_note = ""
+            if (m.get("terminal_status") == "passed"
+                    and has_cleanup_failure(m)
+                    and bool(m.get("cleanup_outcome_critical"))):
+                cleanup_note = " (cascaded from cleanup failure)"
+            parts.append(f"### {cid} — {aid} (failed{cleanup_note})\n")
             parts.append(f"- Trace: {m.get('trace_id', '?')}\n")
         for m in blocks:
             cid = m.get("safe_case_id", "?")
             aid = m.get("attempt_id", "?")
             parts.append(f"### {cid} — {aid} (blocked)\n")
             parts.append(f"- Trace: {m.get('trace_id', '?')}\n")
+        parts.append("")
+
+    # Cleanup Warnings (P2.4 D11 + D12).
+    # Lists every case where cleanup_status == "failed", regardless of
+    # outcome_critical flag — non-critical failures surface here as
+    # informational, even though they don't cascade to failed case
+    # status.
+    cleanup_failures = [m for m in per_case_manifests
+                        if has_cleanup_failure(m)]
+    if cleanup_failures:
+        parts.append("## Cleanup Warnings\n")
+        parts.append(
+            "Cases whose cleanup steps failed. Cases flagged "
+            "`outcome_critical` already cascade to a failed case "
+            "status above; non-critical failures are informational.\n"
+        )
+        parts.append("| Case | Attempt | Cleanup | Outcome Critical | Trace |")
+        parts.append("|------|---------|---------|------------------|-------|")
+        for m in cleanup_failures:
+            cid = m.get("safe_case_id", "?")
+            aid = m.get("attempt_id", "?")
+            cleanup_status = m.get("cleanup_status", "unknown")
+            crit = "yes" if m.get("cleanup_outcome_critical") else "no"
+            trace = m.get("trace_id", "?")
+            parts.append(
+                f"| {cid} | {aid} | {cleanup_status} | {crit} | {trace} |"
+            )
         parts.append("")
 
     # Evidence warnings
@@ -568,6 +622,8 @@ __all__ = [
     "ReconciliationError",
     "compute_aggregate_status",
     "compute_attempt_split",
+    "compute_display_status",
+    "has_cleanup_failure",
     "Totals",
     "AttemptSplit",
     "ReportStatus",
