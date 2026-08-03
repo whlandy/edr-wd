@@ -315,18 +315,66 @@ def now_utc_iso() -> str:
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
-def atomic_write_json(path: Path, data: Mapping[str, Any]) -> None:
-    """Write `data` as JSON atomically: temp file + os.replace.
+# -----------------------------------------------------------------------
+# Atomic write helpers (P2.3 §atomic writes / FR-P2.3-04)
+# -----------------------------------------------------------------------
 
-    Atomic write guarantees readers never observe a half-written file
-    (P2.3 §4.5 / FR-P2.3-04).
+def _atomic_replace(path: Path, tmp: Path) -> None:
+    """Move `tmp` to `path` atomically. On BaseException, clean tmp."""
+    try:
+        os.replace(tmp, path)
+    except BaseException:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Atomically write `text` (UTF-8) to `path`.
+
+    Readers never observe a half-written file (FR-P2.3-04). Strategy:
+    write to `<path>.tmp`, then `os.replace` (atomic on POSIX and
+    Windows). On exception, the temp file is removed so we don't leak
+    partial data.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False)
-        f.write("\n")
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+    except BaseException:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+    _atomic_replace(path, tmp)
+
+
+def atomic_write_json(path: Path, data: Mapping[str, Any]) -> None:
+    """Atomically serialize `data` as JSON to `path` (FR-P2.3-04).
+
+    Same atomic-write strategy as `atomic_write_text`. JSON-specific
+    so we can centralize indent / ensure_ascii / sort_keys conventions.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False)
+            f.write("\n")
+    except BaseException:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+    _atomic_replace(path, tmp)
 
 
 # ----------------------------------------------------------------------

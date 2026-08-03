@@ -36,6 +36,7 @@ from .runs import (
     RunContext,
     UnsupportedManifestSchemaError,
     atomic_write_json,
+    atomic_write_text,
     now_utc_iso,
 )
 
@@ -568,4 +569,54 @@ __all__ = [
     "ReportStatus",
     "reconcile_totals",
     "render_report",
+    "write_run_report",
 ]
+
+
+# ----------------------------------------------------------------------
+# write_run_report — top-level persistence entry point (P2.3.C)
+# ----------------------------------------------------------------------
+
+def write_run_report(
+    run: RunContext,
+    *,
+    attempts: Sequence[CaseAttemptRef],
+    frozen_generated_at: str | None = None,
+    report_filename: str = "report.md",
+) -> ReportStatus:
+    """Render report.md and write it atomically to `run.run_dir`.
+
+    Boundary (P2.3 §3.1): this function is a write-side consumer of
+    `render_report()`. It does NOT mutate manifest.json or per-case
+    artifacts. The only side effect is creating/overwriting
+    `run.run_dir / report_filename`.
+
+    Steps:
+        1. Call `render_report()` to produce (body, ReportStatus).
+        2. Write `body` to `run.run_dir / report_filename` atomically
+           via `atomic_write_text` (FR-P2.3-04).
+
+    Args:
+        run: Finalized RunContext (state == FINALIZED).
+        attempts: Sequence of CaseAttemptRef to include in the report.
+        frozen_generated_at: If provided, use as-is for the report
+            header timestamp (FR-P2.3-05 determinism).
+        report_filename: Default "report.md". Parametric to support
+            alternate naming (e.g. CI summary report).
+
+    Returns:
+        ReportStatus — same value render_report returned.
+
+    Raises:
+        ManifestMissingError: manifest.json missing (D6 fail severity).
+        ManifestCorruptError: manifest.json corrupt (D6 fail severity).
+        UnsupportedManifestSchemaError: schema_version unsupported (D8).
+    """
+    body, status = render_report(
+        run,
+        attempts=attempts,
+        frozen_generated_at=frozen_generated_at,
+    )
+    report_path = run.run_dir / report_filename
+    atomic_write_text(report_path, body)
+    return status
