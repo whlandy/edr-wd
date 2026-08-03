@@ -32,13 +32,24 @@ the contract.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from agent.execution.recovery import (
+    RecoveryBudget,
+    RecoveryErrorCode,
     RecoverySeverity,
     RecoveryStatus,
     RestoreStrategy,
 )
+
+
+if TYPE_CHECKING:
+    # Forward refs for the typed payload union. ``branch_events``
+    # defines these; importing at runtime would create a cycle.
+    from agent.execution.branch_events import (
+        BranchCreatedPayload,
+        ReplanCreatedPayload,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -144,21 +155,39 @@ EVENT_TYPE_RECOVERY_RESULT = "recovery_result"
 class RequestedEvent:
     """A trace event the executor wants written.
 
-    The envelope holds a typed payload (``RecoveryRequestedPayload``
-    or ``RecoveryResultPayload``). Wire serialization uses
-    ``payload.to_dict()``.
+    The envelope holds a typed payload (see P2.2 Commit E N2
+    freeze for the recovery-cycle payloads, and Commit F for
+    branch + replan payloads):
 
-    Construct via the helpers below (:func:`make_requested_event`)
-    rather than direct dataclass construction so the event_type
-    matches the payload class.
+    * :class:`RecoveryRequestedPayload`
+    * :class:`RecoveryResultPayload`
+    * :class:`BranchCreatedPayload`
+    * :class:`ReplanCreatedPayload`
+
+    Wire serialization uses ``payload.to_dict()``.
+
+    Construct via the helpers
+    (:func:`make_recovery_requested_event`,
+    :func:`make_recovery_result_event`,
+    :func:`make_branch_created_event`,
+    :func:`make_replan_created_event`)
+    rather than direct dataclass construction so the
+    event_type matches the payload class.
 
     Commit D shipped this as ``RequestedEvent(event_type: str,
-    payload: Mapping[str, object])``. Commit E replaces the
+    payload: Mapping[str, object])``. Commit E replaced the
     ``Mapping`` payload with a typed payload (N2 freeze).
+    Commit F broadened the payload union to include the
+    branch + replan events.
     """
 
     event_type: str
-    payload: RecoveryRequestedPayload | RecoveryResultPayload
+    payload: (
+        RecoveryRequestedPayload
+        | RecoveryResultPayload
+        | "BranchCreatedPayload"
+        | "ReplanCreatedPayload"
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return self.payload.to_dict()

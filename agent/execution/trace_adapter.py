@@ -34,6 +34,10 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from agent.execution.branch_events import (
+    EVENT_TYPE_BRANCH_CREATED,
+    EVENT_TYPE_REPLAN_CREATED,
+)
 from agent.execution.recovery_events import (
     EVENT_TYPE_RECOVERY_REQUESTED,
     EVENT_TYPE_RECOVERY_RESULT,
@@ -51,6 +55,8 @@ from agent.trace.store import TraceStore
 _EVENT_TYPE_MAP: dict[str, EventType] = {
     EVENT_TYPE_RECOVERY_REQUESTED: EventType.RECOVERY_REQUESTED,
     EVENT_TYPE_RECOVERY_RESULT: EventType.RECOVERY_RESULT,
+    EVENT_TYPE_BRANCH_CREATED: EventType.BRANCH_CREATED,
+    EVENT_TYPE_REPLAN_CREATED: EventType.REPLAN_CREATED,
 }
 
 

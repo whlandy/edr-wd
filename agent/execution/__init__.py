@@ -84,6 +84,15 @@ from .recovery_events import (
     make_recovery_requested_event,
     make_recovery_result_event,
 )
+from .branch_events import (
+    EVENT_TYPE_BRANCH_CREATED,
+    EVENT_TYPE_REPLAN_CREATED,
+    BranchCreatedPayload,
+    ReplanCreatedPayload,
+    make_branch_created_event,
+    make_replan_created_event,
+)
+from .branch_ancestry import BranchCycleError, BranchNotFoundError, BranchRegistry
 from .trace_adapter import TraceStoreAdapter
 from .step_results import load_step_results, write_atomic
 from .transitions import (
@@ -186,4 +195,14 @@ __all__ = [
     "CatalogDispatchFn",
     "SessionReconnectFn",
     "TraceStoreAdapter",
+    # branch + replan events + ancestry (P2.2 — Commit F)
+    "BranchCreatedPayload",
+    "ReplanCreatedPayload",
+    "EVENT_TYPE_BRANCH_CREATED",
+    "EVENT_TYPE_REPLAN_CREATED",
+    "make_branch_created_event",
+    "make_replan_created_event",
+    "BranchRegistry",
+    "BranchCycleError",
+    "BranchNotFoundError",
 ]
