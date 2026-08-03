@@ -71,6 +71,7 @@ from .recovery_inverse import (
     InverseRegistry,
     SOPInverseAction,
 )
+from .recovery_planner import plan_recovery
 from .step_results import load_step_results, write_atomic
 from .transitions import (
     TransitionKind,
@@ -146,4 +147,6 @@ __all__ = [
     "SOPInverseAction",
     "InverseRegistry",
     "DuplicateInverseError",
+    # recovery planner (P2.2 — Commit B)
+    "plan_recovery",
 ]
