@@ -495,6 +495,12 @@ class RunContext:
         `add_case_attempt`, `record_metric`, or `finalize` itself raise
         `InvalidStateTransitionError`.
 
+        Note on `aggregate_status` (per review Minor 1 / R1):
+            RunContext does NOT compute aggregate_status. That is the
+            renderer's job (P2.3.B / `render_report.compute_aggregate_status`).
+            We write `"unknown"` as a placeholder; the renderer overwrites
+            its display value when constructing `report.md`.
+
         Raises:
             InvalidStateTransitionError: if state == FINALIZED.
         """
@@ -504,27 +510,10 @@ class RunContext:
             )
         self.state = RunState.FINALIZED
         self._ended_at = now_utc_iso()
-        # Aggregate status: failed > blocked > passed > unknown
-        status_priority = {"failed": 3, "blocked": 2, "passed": 1, "unknown": 0}
-        agg = "passed"
-        for ca in self._case_attempts:
-            # best-effort: read case-attempt manifest if present
-            campath = ca.case_attempt_manifest_path()
-            if campath.exists():
-                try:
-                    with open(campath, encoding="utf-8") as f:
-                        data = json.load(f)
-                    ts = data.get("terminal_status", "unknown")
-                except (OSError, json.JSONDecodeError):
-                    ts = "unknown"
-            else:
-                ts = "unknown"
-            if status_priority.get(ts, 0) > status_priority.get(agg, 0):
-                agg = ts
-        if not self._case_attempts:
-            agg = "passed"  # empty run = passed (no failures)
-        self._aggregate_status = agg
-        agg_final: str = self._aggregate_status if self._aggregate_status is not None else "unknown"
+        # Per Minor 1 review: RunContext does NOT compute aggregate_status.
+        # Renderer (P2.3.B) computes it from case-attempt-manifest.json
+        # per-case terminal_status when rendering report.md.
+        self._aggregate_status = "unknown"
 
         manifest = Manifest(
             schema_version=MANIFEST_SCHEMA_VERSION,
@@ -536,7 +525,7 @@ class RunContext:
             case_attempts=tuple(self._case_attempts),
             renderer_version=self._renderer_version,
             schema_versions=dict(self._schema_versions),
-            aggregate_status=agg_final,
+            aggregate_status="unknown",
             metrics_summary=tuple(self._metrics),
             report_status="valid",
             evidence_status="complete",

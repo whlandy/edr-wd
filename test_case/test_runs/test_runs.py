@@ -350,18 +350,21 @@ class TestRunContextOwnership:
         assert data["schema_version"] == "1.0"
         assert data["run_id"] == "run-A"
 
-    def test_aggregate_status_empty_run_is_passed(self, tmp_path: Path):
+    def test_aggregate_status_empty_run_is_unknown(self, tmp_path: Path):
+        """Per review Minor 1: RunContext does NOT compute
+        aggregate_status; renderer (P2.3.B) does. finalize() writes
+        'unknown' as placeholder."""
         ctx = RunContext(tmp_path, "run-A")
         m = ctx.finalize()
-        assert m.aggregate_status == "passed"
+        assert m.aggregate_status == "unknown"
 
-    def test_aggregate_status_no_attempt_manifests_is_passed(self, tmp_path: Path):
-        """When no case-attempt-manifest exists, status defaults to
-        'passed' (no failures recorded)."""
+    def test_aggregate_status_no_attempt_manifests_is_unknown(self, tmp_path: Path):
+        """When no case-attempt-manifest exists, RunContext.finalize()
+        still writes 'unknown' — renderer reads manifests at render time."""
         ctx = RunContext(tmp_path, "run-A")
         ctx.add_case_attempt("case_A", "t1")
         m = ctx.finalize()
-        assert m.aggregate_status == "passed"
+        assert m.aggregate_status == "unknown"
 
     def test_case_attempt_ref_helpers(self, tmp_path: Path):
         ref = CaseAttemptRef(
