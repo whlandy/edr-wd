@@ -9,69 +9,111 @@ Format:
 
 ```
 YYYY-MM-DD  D<n>  TITLE
-  Resolution: ...
-  Rationale: ...
-  Source:    P<x>.<y> review round N
+  Contract:    ...
+  Resolution:  ...
+  Rationale:   ...
+  Source:      P<x>.<y> review round N
 ```
 
 Entries are append-only.
 
+The log distinguishes **contract decisions** (locked
+behavioural commitments) from **implementation choices** (left
+to P3.x to decide). The contract is the gate; the
+implementation is downstream.
+
 ---
 
-## P2.5 Design Review Gate (2026-08-02)
+## P2.5 Design Review Gate (round 2 — contracts only)
 
-### D1. UUIDv7 vs ULID
+### D1. Unique-identifier format
 
-- Resolution: **PENDING** (reviewer's call).
-- Options:
-  - (a) UUIDv7 (Python 3.14 stdlib or 3rd-party dep).
-  - (b) ULID (Crockford base32; language-agnostic).
-  - (c) Keep current ad-hoc `<12 hex ms> <4 hex counter> <4 hex random>` format.
-- Source: P0.1 Open Decision #1; P1.3 implemented as (c).
+- Contract: unique + lex-sortable + JSON-round-trippable +
+  stable across releases.
+- Resolution: contract locked; option (a/b/c) selection at
+  P3.1 review.
+- Rationale: format choice (UUIDv7 / ULID / current ad-hoc)
+  is downstream; what matters is the contract.
+- Source: P0.1 Open Decision #1; P1.3 implemented as ad-hoc.
 
 ### D2. Redaction layering
 
-- Resolution: **KEEP BOTH LAYERS** (defence-in-depth).
+- Contract: layer 1 (sanitisation at observation boundary) +
+  layer 2 (escape at render boundary), both required,
+  rule-id audit preserved end-to-end.
+- Resolution: contract locked.
 - Source: P2.4.D review note 4.
 
-### D3. `target/screenshot_bytes()` location
+### D3. Screenshot bytes interface location
 
-- Resolution: **PENDING**.
-- Source: P0 Open Decision #2; P1.4 left as `image_provider` hook.
+- Contract: backend returns raw PNG bytes on demand; capability
+  declared in `BACKEND_CAPABILITIES`; supports live capture
+  AND re-read from file path.
+- Resolution: contract locked; module-ownership (option a/b/c)
+  at P3.1 review.
+- Source: P0 Open Decision #2.
 
 ### D4. Image transport threshold
 
-- Resolution: **1 MiB** (base64 inline ≤ 1 MiB; managed transfer > 1 MiB; never target-local absolute path).
+- Contract: post-encoding size measured; ≤ threshold inline;
+  > threshold via managed transfer; never target-local absolute
+  path; digest verified at receiver.
+- Resolution: contract locked; threshold value (default 1 MiB
+  post-encoding) configurable per deployment.
 - Source: P2 Open Decision #3.
 
-### D5. Live E2E harness scope for P3
+### D5. Live E2E harness scope
 
-- Resolution: **P3 reuses without modifying** the existing harness.
+- Contract: P3 reuses without modifying existing
+  `test_case/run_*.py` / `test_case/test_e2e/*`; P3's own
+  planner E2E is in a separate directory.
+- Resolution: contract locked.
 - Source: P2.4 acceptance #8.
 
-### D6. Prompt sanitisation contract
+### D6. LLM prompt sanitisation
 
-- Resolution: **Same escape helper as `trace.md`** for all user-controlled values in planner prompt; renderer-generated structure un-escaped.
-- Source: P2.4.D M1 / M2.
+- Contract: every prompt-input value treated as untrusted;
+  per-transport encoding (Markdown / JSON / structured schema
+  / plain text); renderer-generated structure un-escaped.
+- Resolution: contract locked.
+- Source: P3 spec §P3.1.
 
-### D7. Metrics file sanitisation
+### D7. Metrics data sanitisation
 
-- Resolution: **Metrics writer runs payload through `RedactionRegistry.apply_text()`** before persistence; fuzz-tested.
+- Contract: metrics are structured data; sanitisation is
+  field-type aware (text → redaction; numeric → preserved;
+  keys → controlled namespace); audit on post-sanitisation
+  bytes.
+- Resolution: contract locked.
 - Source: P2.4 acceptance #7-8.
 
-### D8. Planner sandbox / eval target policy
+### D8. Planner capability boundary
 
-- Resolution: **Planner restricted to `enabled_actions_for(backend, profile)`**; dispatcher rejects out-of-set with `unknown_action_id`.
-- Source: P3 spec §P3.1 in_scope.
+- Contract: planner MUST NOT emit actions outside the active
+  backend + profile capability set; dispatcher rejects with
+  existing `unknown_action_id`; no second capability table.
+- Resolution: contract locked; access mechanism (function /
+  property / adapter) free at P3.1.
+- Source: P3 spec §P3.1.
 
 ### D9. Coordinate fallback policy
 
-- Resolution: **Reject coordinate fallback when unique semantic target exists**; dispatcher's `missing_selector_hint` enforces "no selector, no mutation".
-- Source: P3 spec §P3.1 in_scope.
+- Contract: snapshot-validated semantic target preferred;
+  coordinate fallback rejected when unique semantic target
+  exists; existing `missing_selector_hint` enforcement
+  reused for HiSec.
+- Resolution: contract locked; detection mechanism (snapshot
+  lookup / tool call / hybrid) free at P3.1.
+- Source: P3 spec §P3.1.
 
-### D10. Branch / replan surfaces
+### D10. Replan / recovery auditability
 
-- Resolution: **P3.1 planner emits `replan_created`** on unexpected transition; P3.2 metrics records replan count.
+- Contract: unexpected execution divergence MUST produce an
+  auditable replan event with trigger / prior snapshot / new
+  plan / reason metadata; emitter-agnostic; lands in trace
+  chain (not side channel).
+- Resolution: contract locked; event schema + emitter choice
+  free at P3.1.
 - Source: P2.2 + P2.4.
 
 ---
@@ -80,14 +122,14 @@ Entries are append-only.
 
 Recap from architecture §24 deferred lists:
 
-| ID | Title | Status (P2.5) |
-|----|-------|---------------|
-| 1 | UUIDv7 vs ULID | D1 |
-| 2 | `target/screenshot_bytes()` location | D3 |
-| 3 | Image transport threshold | D4 |
+| ID | Title | Status (P2.5 round 2) |
+|----|-------|------------------------|
+| 1 | UUIDv7 vs ULID | D1 — contract locked; option at P3.1 |
+| 2 | `target/screenshot_bytes()` location | D3 — contract locked; module at P3.1 |
+| 3 | Image transport threshold | D4 — contract locked; threshold value at P3.1 |
 
-All three either resolved or pending reviewer call. P2.5
-closes the ledger entry "open decisions" at this point.
+All three have contracts; option selection is the P3.1
+implementation's job.
 
 ---
 
@@ -130,7 +172,8 @@ closes the ledger entry "open decisions" at this point.
   edges.
 
 ### P1.3
-- **Event id format**: chose ad-hoc (c) — see D1.
+- **Event id format**: chose ad-hoc — see D1 for future
+  contract.
 - **Hash chain over `canonical_bytes`**: yes; excludes
   `event_hash` field.
 - **Recovery on open**: detect partial trailing line,

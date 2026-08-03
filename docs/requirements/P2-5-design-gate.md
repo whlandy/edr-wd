@@ -36,20 +36,37 @@ P3 itself.
 
 ---
 
+## What P2.5 locks — and what it does not
+
+**P2.5 locks:**
+
+- **Behavioral contracts** — what MUST hold regardless of how
+  P3.1 / P3.2 implements.
+- **Non-goals** — what MUST NOT be assumed by P3.
+- **Migration impact** — what existing P0..P2.x surfaces MUST
+  continue to work.
+
+**P2.5 does NOT lock:**
+
+- **Module ownership** — which file owns which function.
+- **Helper names** — e.g. "use `enabled_actions_for`" vs
+  another access pattern; both are valid implementations of the
+  same contract.
+- **Internal data structures** — only the externally-observable
+  shape is locked.
+
+This split is enforced throughout D1..D10 below.
+
+---
+
 ## In Scope
 
 This checkpoint collects, classifies, and decides the design
-questions that P3 will need answered. Each item lists:
-
-- the P2.x review round that surfaced it,
-- the current state in code/docs,
-- the proposed resolution,
-- what the resolution unlocks / locks in for P3.
-
-If the reviewer cannot agree on a resolution, the item is
-**deferred to P3 implementation** with an explicit decision log
-entry; P2.5 itself never blocks on disagreement but never
-silently chooses either.
+questions that P3 will need answered. Each item follows a fixed
+shape (see "Per-decision shape" below) and the resolution is
+either explicit (P2.5 closed) or deferred with owner +
+milestone (P2.5 closed but the decision itself goes to a later
+gate).
 
 ### Out of Scope
 
@@ -61,215 +78,550 @@ silently chooses either.
 
 ---
 
-## Decision Items Collected From P2.x Review Cycle
+## Per-decision shape
 
-### D1. UUIDv7 vs ULID (resolves a P0 deferral)
+Every D item below is structured as:
 
-**Source**: P0.1 Open Decision #1; P0.3 deferred to P3; P1.3
-implemented as `<12 hex ms> <4 hex counter> <4 hex random>` —
-not real UUIDv7 or ULID.
-
-**Current state**: ids.py uses an ad-hoc format that is
-sortable within one process but does NOT match a published
-spec. Cross-process and cross-language readers cannot rely on
-the format.
-
-**Proposed resolution**: adopt one of:
-- (a) **UUIDv7** — requires Python 3.14 stdlib `uuid.uuid7()`
-  (or 3rd-party dep); future-proof.
-- (b) **ULID** — Crockford base32; language-agnostic; spec
-  at <https://github.com/ulid/spec>.
-- (c) **Stay with current ad-hoc format** — accept the cost of
-  no published compatibility.
-
-**P3 impact**: the planner needs to emit trace / branch / call
-ids as part of `ActionSequence`. If P3 readers (downstream
-analytics, third-party tooling) need a standard format, pick (a)
-or (b). Otherwise (c) is acceptable.
-
-### D2. Redaction layering: registry + renderer escape
-
-**Source**: P2.4.D review note 4 (defense-in-depth positioning).
-
-**Current state**: two layers exist:
-- `apply_text_redaction` / `apply_image_redaction` (P1.4) —
-  registry-based replacement at persistence time.
-- `escape_markdown()` (P2.4.D) — escape-only at renderer time,
-  only on user-controlled values.
-
-**Proposed resolution**: keep both. P2.4.D review confirmed the
-defence-in-depth design is correct. P3 inherits both layers:
-the planner never sees redacted text (sanitisation at
-observation/persistence boundary), AND the renderer escape
-runs as a final safety net.
-
-**P3 impact**: planner can prompt with `case_id`, `target`,
-`profile`, but never with raw window titles or screen text. The
-escape layer ensures that even if a planner bug leaks
-uncontrolled text, the markdown renderer produces inert output.
-
-### D3. Where `target/screenshot_bytes()` lives for cross-platform
-
-**Source**: P0 Open Decision #2; P1.4 introduced the interface
-with `image_provider` hook in `EvidenceRecord`.
-
-**Current state**: stub `ImageProvider` exists in
-`agent/trace/evidence.py`; production backends return dict
-shapes (path + metadata) via `target/automation/base.py`'s
-`screenshot()` method. The `screenshot_bytes()` capability is
-not yet declared in `BACKEND_CAPABILITIES`.
-
-**Proposed resolution**: declare `screenshot_bytes` in
-`BACKEND_CAPABILITIES` for both `windows_pywinauto` and
-`macos_accessibility`. Update `BACKEND_NOT_IMPLEMENTED` if
-either backend genuinely cannot return raw bytes (use the
-existing `screenshot(path=...)` fallback only as a last
-resort).
-
-**P3 impact**: the planner needs to consume live screenshots
-to ground its structured output. If both backends can return
-bytes inline, P3.1 can prompt with image references without
-resorting to managed transfer.
-
-### D4. Image transport for over-threshold images
-
-**Source**: P2 Open Decision #3.
-
-**Current state**: not yet decided. Base64 inline works for
-small/medium; managed transfer for large; target-local
-absolute paths forbidden in `trace.md` / `report.md`.
-
-**Proposed resolution**: keep both paths available, with the
-following decision matrix:
-
-| Image size | Transport |
-|------------|-----------|
-| ≤ 1 MiB | base64 inline in `ActionReceipt` |
-| > 1 MiB | managed transfer layer (existing) |
-| Target wrote to local disk only | explicit copy via dispatcher's transfer helper; verify digest before recording |
-
-**P3 impact**: the planner will receive image bytes inline (1
-MiB cap) or via a transfer handle (large). P3.2 metrics
-collector needs to know the transfer method for cost / latency
-recording.
-
-### D5. Live E2E harness scope for P3
-
-**Source**: P2.4 acceptance #8 + Live E2E requirement.
-
-**Current state**: `test_case/run_*.py` exists; not modified
-by P2.x.
-
-**Proposed resolution**: P3 does NOT modify the E2E harness.
-P3 produces a separate E2E suite at `test_case/test_planner_e2e/`
-that reuses the existing harness without changing it.
-
-**P3 impact**: keeps P2.x E2E stable; isolates planner E2E
-to its own directory.
-
-### D6. Prompt sanitisation contract
-
-**Source**: P2.4.D M1 (escape scope conservative), M2 (control
-chars stripped).
-
-**Current state**: `escape_markdown()` runs only on
-user-controlled values, not on renderer-generated markdown
-structure. `safe_case_id`, `trace_id`, `target` are escaped.
-Control chars stripped; TAB preserved.
-
-**Proposed resolution**: extend the same contract to the P3
-planner prompt:
-- All user-controlled values in the prompt go through the
-  same escape helper.
-- Renderer-generated structure (table separators, headings,
-  status enums, fixed strings) stays un-escaped.
-
-**P3 impact**: planner prompt can include live target
-metadata without re-introducing injection risk.
-
-### D7. Metrics collection: where do secrets / screen text go?
-
-**Source**: P2.4 acceptance #7-8 (metrics file passes the
-no-secret / no-screen-text audit).
-
-**Current state**: P2.4 declares metrics file passes
-`test_metrics_no_screen_text` + `test_metrics_no_secret_arguments`
-but the metrics writer itself is deferred to P3.2.
-
-**Proposed resolution**: P3.2 metrics writer MUST run the
-metrics payload through `RedactionRegistry.apply_text()` before
-persistence. A fuzz test exercises the metrics writer with
-adversarial inputs (NUL, control chars, Unicode separators,
-known secret patterns).
-
-**P3 impact**: locks the metrics surface against the same
-adversarial inputs that the existing redactor handles.
-
-### D8. Sandbox / eval target policy
-
-**Source**: P3 spec §P3.1 in_scope (limit LLM output to live
-enabled actions).
-
-**Current state**: catalog filtering (`enabled_actions_for`)
-exists in P0.1 views; planner is not wired.
-
-**Proposed resolution**: P3.1's planner is restricted to actions
-that pass the catalog's `enabled_actions_for(backend, profile)`
-filter. The planner never emits an action outside this set;
-the dispatcher rejects any out-of-set action with
-`code=unknown_action_id`.
-
-**P3 impact**: closes the "planner invents an action" attack
-surface. The dispatcher already has the validation; planner
-just has to honour it.
-
-### D9. Coordinate fallback policy
-
-**Source**: P3 spec §P3.1 in_scope (reject coordinate
-fallbacks when a unique semantic target exists).
-
-**Current state**: catalog declares `pointer.*` actions with
-risk=risk_candidate; dispatcher passes through.
-
-**Proposed resolution**: when the snapshot contains a unique
-semantic target for the action's selector, the planner MUST
-emit the semantic action (e.g. `gui.click`) and NOT emit
-`pointer.click_xy`. The dispatcher's `missing_selector_hint`
-code already enforces "no selector, no mutation" for HiSec
-profiles; extend the same enforcement to planner output.
-
-**P3 impact**: keeps the planner within the deterministic
-boundary; no fuzzy "click at coordinate X" paths from LLM
-output.
-
-### D10. Branch / replan surfaces
-
-**Source**: P2.2 (RecoveryExecutor); P2.4 (cleanup cascade).
-
-**Current state**: `recovery_requested`, `branch_created`,
-`replan_created` events exist; the planner doesn't yet emit
-them. RecoveryExecutor consumes recovery events.
-
-**Proposed resolution**: P3.1 planner emits `replan_created`
-when it observes an unexpected transition and decides to
-re-plan. P3.2 metrics records the replan count.
-
-**P3 impact**: keeps the recovery surface usable from the
-planner; doesn't introduce a second planning mechanism.
+1. **Problem** — what was deferred, where it came from.
+2. **Contract** — what MUST hold (the locked part).
+3. **Non-goals** — what MUST NOT be assumed by P3.
+4. **Implementation freedom** — concrete options left open
+   for P3.1 / P3.2 to choose.
+5. **Migration impact** — what existing P0..P2.x surfaces must
+   continue to work.
 
 ---
 
-## Open Decisions Deferred From P0 / P1 / P2
+## Decision Items Collected From P2.x Review Cycle
 
-Recap from the architecture's deferred-decision ledger, now
-P2.5 must commit to a direction:
+### D1. Unique-identifier format
 
-1. UUIDv7 vs ULID — see D1.
-2. `target/screenshot_bytes()` location — see D3.
-3. Image transport threshold — see D4.
+**Problem.**
 
-These are the only open decisions that survived P2.x without
-a resolution.
+P0.1 Open Decision #1 (UUIDv7 vs ULID) was deferred through P0.3,
+P1.3, P2.x. P1.3 implemented an ad-hoc format
+(`<12 hex ms> <4 hex counter> <4 hex random>`) that is sortable
+within one process but is NOT a published specification. Cross-
+process and cross-language readers cannot rely on the format.
+Three open decisions in the architecture ledger still list this.
+
+**Contract.**
+
+- All event / trace / branch / plan / call / evidence /
+  checkpoint identifiers generated by EDR-WD MUST be:
+  - **Unique** across the entire system (no collisions across
+    processes, hosts, or restart cycles).
+  - **Lex-sortable in creation order** when sorted as strings
+    (so `trace_started` events land before their `step_started`
+    descendants without an extra index).
+  - **Round-trippable** through JSON without information loss
+    (no opaque bytes that depend on host endianness).
+- Identifier format MUST be **stable across releases**:
+  changing it is a major-version break.
+
+**Non-goals.**
+
+- P2.5 does NOT prescribe a specific bit layout (UUIDv7 vs ULID
+  vs ad-hoc). Any format satisfying the contract above is
+  acceptable.
+- P2.5 does NOT mandate third-party dependencies (uuid7 lib,
+  ulid-py). A stdlib-only implementation is acceptable if it
+  satisfies the contract.
+
+**Implementation freedom.**
+
+| Option | Pros | Cons |
+|--------|------|------|
+| (a) UUIDv7 (Python 3.14 `uuid.uuid7()` or 3rd-party lib) | Published spec; cross-language readers exist | Python 3.14 not yet universal; 3rd-party adds dep |
+| (b) ULID (Crockford base32) | Published spec; language-agnostic; sortability by construction | Requires external lib OR careful stdlib reimpl |
+| (c) Keep current ad-hoc format | No new deps; already shipping | No published compat; cross-language readers can't decode |
+
+Decision criteria the P3 implementation MUST apply to pick:
+
+1. **Cross-language support** — must downstream readers (Rust /
+   Go / JS analytics tooling) be able to decode?
+2. **Sortable ordering requirement** — covered by the contract
+   regardless of option.
+3. **Storage format compatibility** — JSON serialisation; all
+   three options fit.
+4. **Dependency constraints** — stdlib-only vs 3rd-party.
+5. **Migration cost** — switching from current ad-hoc format
+   requires a one-time format-version bump; cost depends on
+   how many trace / artifact stores already exist.
+
+P2.5 leaves the option selection to P3.1 implementation;
+P3.1 review will record which option was chosen and why.
+
+**Migration impact.**
+
+- Existing P1.x / P2.x traces use the current ad-hoc format.
+  New format MUST continue to verify old traces unchanged
+  (the `verify_chain` logic in P1.3 operates on canonical bytes,
+  not on the id format).
+- Catalog digest (`sha256:0ecbda15...`) is unaffected — it
+  hashes the canonical action table, not the id format.
+
+---
+
+### D2. Redaction layering
+
+**Problem.**
+
+P1.4 ships `apply_text_redaction` / `apply_image_redaction`
+(registry-based replacement at persistence time). P2.4.D ships
+`escape_markdown()` (renderer-time escape). P2.4.D review
+confirmed the defence-in-depth design but did not formally
+write down the contract for the two layers.
+
+**Contract.**
+
+- **Layer 1 — Sanitisation at observation boundary** MUST
+  redact secrets / screen text / control characters BEFORE
+  any data lands in:
+  - `events.jsonl` (trace chain),
+  - `step-results.json` (projection),
+  - `manifest.json`,
+  - evidence record metadata,
+  - any persisted artifact (report.md, metrics file, etc.).
+- **Layer 2 — Output escape at render boundary** MUST treat
+  every user-controlled value as untrusted, and escape it
+  according to the output transport's encoding rules (Markdown
+  table cell, JSON string, plain log line, prompt transport).
+- Sanitisation (layer 1) and escape (layer 2) are
+  **complementary**, not alternatives. Removing either is a
+  security regression.
+- The rule-id audit trail from layer 1 MUST be preserved
+  end-to-end (survives projection, manifest, report).
+
+**Non-goals.**
+
+- P2.5 does NOT specify the redaction rule schema (which is
+  P3.x territory for any new rule categories).
+- P2.5 does NOT specify which output transports the layer-2
+  escape applies to; each new transport needs its own
+  contract.
+
+**Implementation freedom.**
+
+- Layer 1 implementation: P1.4's `RedactionRegistry` (text
+  patterns + image rectangles) is the canonical V1. P3.x may
+  add new rule types as long as the contract above holds.
+- Layer 2 implementation per transport: Markdown has its own
+  escape (`escape_markdown`); JSON strings need a different
+  one (Python's `json.dumps` handles this); LLM prompts need
+  transport-specific encoding (see D6).
+
+**Migration impact.**
+
+- Existing redaction behaviour is unchanged. P3.x extends it
+  without breaking P1.4 / P2.4.D surfaces.
+
+---
+
+### D3. Screenshot bytes interface location
+
+**Problem.**
+
+P0 Open Decision #2: where does `target/screenshot_bytes()` live?
+P1.4 introduced an `image_provider` hook in
+`agent/trace/evidence.py` (stub `ImageProvider` class), and the
+existing backends return dict shapes via
+`target/automation/base.py`'s `screenshot(path=...)` method.
+The `screenshot_bytes()` capability is not declared in
+`BACKEND_CAPABILITIES` and no backend implements it yet.
+
+**Contract.**
+
+- **Backend MUST be able to return raw PNG bytes for a
+  screenshot, on demand.** The bytes MUST be byte-equivalent
+  to the on-disk PNG (modulo redaction in the P2.4.D sense).
+- The interface MUST support **both**:
+  - "give me the current screen" (live capture), and
+  - "give me the bytes behind this existing PNG file path"
+    (re-read after the fact, used for projection rebuild).
+- Backend's `BACKEND_CAPABILITIES` declaration MUST reflect
+  whether `screenshot_bytes` is supported; `BACKEND_NOT_IMPLEMENTED`
+  is the truthful failure mode for backends that genuinely
+  cannot return bytes inline.
+
+**Non-goals.**
+
+- P2.5 does NOT prescribe which module owns the call. Both
+  the dispatcher-side capture path and the trace-side
+  evidence path are valid implementation choices; P3.1 picks
+  based on where the planner needs the bytes.
+- P2.5 does NOT mandate pixel-level transformation (crop,
+  resize). The contract is "raw bytes of the screenshot".
+
+**Implementation freedom.**
+
+| Option | Where the call lives | Pros | Cons |
+|--------|---------------------|------|------|
+| (a) `protocol_models` owns it | A new `protocol_models/capture.py` module exposes `screenshot_bytes(backend, region=None) -> bytes` | Single import path for any layer that needs bytes | `protocol_models` becomes a runtime call site, which it currently isn't |
+| (b) Execution layer owns it | `agent/execution/capture.py` calls into the backend | Closer to the planner's call site | Hidden from the catalog-side view; couples planner to execution |
+| (c) Provider interface in trace | `agent/trace/image_provider.py` is the canonical hook; both dispatcher and planner import it | P1.4 already has the stub; minimal new surface | New module just for one method |
+
+P3.1 picks based on which layer initiates the call. The
+contract above holds regardless of choice.
+
+**Migration impact.**
+
+- `ImageProvider` stub in P1.4 can stay as a forward-compat
+  interface or be deleted; P3.1 decides.
+- Backends must add `screenshot_bytes` (or declare
+  `BACKEND_NOT_IMPLEMENTED`). This is a small, additive
+  change per backend.
+
+---
+
+### D4. Image transport threshold
+
+**Problem.**
+
+P2 Open Decision #3: when does a screenshot travel inline in
+`ActionReceipt` vs via the managed transfer layer? P2.5 must
+specify the rule, not the magic number.
+
+**Contract.**
+
+- **Transport size is measured AFTER any required encoding**
+  (PNG compression is already on-disk; base64 expansion is
+  ~4/3 of raw bytes; zlib wrapping is a separate concern).
+- **Inline transport (base64 in `ActionReceipt` or in the
+  planner's image reference) is allowed iff** the post-
+  encoding size is at or below the configured threshold
+  (default: 1 MiB post-encoding).
+- **Above threshold, payload MUST travel via managed transfer**
+  (file path + digest; never target-local absolute path in
+  `trace.md` / `report.md` / planner prompt).
+- **Exactly at threshold**: implementation MAY choose inline
+  OR transfer; the choice MUST be deterministic given
+  identical inputs (same backend, same region, same redaction
+  rules).
+- The digest is the source of truth — regardless of transport,
+  the receiver MUST verify `sha256` of the received bytes
+  against the digest in the receipt / manifest / image
+  reference.
+
+**Non-goals.**
+
+- P2.5 does NOT pin a specific byte value (1 MiB is a
+  default; production deployment may override via config).
+  The contract is the rule, not the number.
+- P2.5 does NOT specify the transfer mechanism (existing
+  managed-transfer layer vs. new mechanism). P3.1 picks.
+
+**Implementation freedom.**
+
+- Threshold is configurable per deployment (P3.1 review will
+  record the default + the override mechanism).
+- The transport choice (inline vs transfer) is free per
+  call as long as the threshold rule holds.
+- Encoding measurement MAY use raw bytes OR base64-expanded
+  bytes; whichever the implementation picks, the threshold
+  is interpreted against that measurement (no mixed
+  semantics).
+
+**Migration impact.**
+
+- Existing receipts that fit inline continue to fit; nothing
+  in P2.x needs to change.
+- Large screenshots (rare; full-screen 4K) that previously
+  overflowed `ActionReceipt` MUST now go via transfer
+  (this was the deferred decision; P3.1 implements the path).
+
+---
+
+### D5. Live E2E harness scope
+
+**Problem.**
+
+P2.4 acceptance #8 requires live E2E on at least one Windows
+and one macOS target. P3 introduces a planner; live E2E for
+the planner is a new concern but should not disturb the
+existing P2.x harness.
+
+**Contract.**
+
+- Existing live E2E tests (`test_case/run_*.py`,
+  `test_case/test_e2e/*`) MUST continue to run unmodified
+  after P3 lands. P3 does NOT modify their test scripts.
+- P3.1 / P3.2 introduces its own planner E2E suite at
+  `test_case/test_planner_e2e/` (or similar; naming is a
+  P3.1 detail).
+- The shared live-target harness (whatever P2.x consumes)
+  is a **read-only dependency** for P3.
+
+**Non-goals.**
+
+- P2.5 does NOT modify the harness.
+- P2.5 does NOT specify the planner E2E surface in detail;
+  P3.1 does.
+
+**Implementation freedom.**
+
+- P3 may choose to live in a separate test directory or
+  under `test_case/test_planner_e2e/`; either works.
+- P3 may share fixtures with P2.x as long as the P2.x tests
+  are not edited.
+
+**Migration impact.**
+
+- None. P2.x E2E stays untouched.
+
+---
+
+### D6. LLM prompt sanitisation
+
+**Problem.**
+
+P3.1 introduces an LLM prompt that includes live target
+metadata (case_id, target, profile, action set, snapshot
+reference). The prompt is the new "render boundary" for the
+planner; user-controlled values flowing into the prompt must
+not introduce injection risk.
+
+**Contract.**
+
+- Every value that flows from the live target / case / user
+  into the LLM prompt MUST be treated as **untrusted**
+  regardless of how the value was originally generated
+  (sanitised observation, manifest field, replayed trace).
+- The encoding used for prompt sanitisation MUST be
+  appropriate to the **transport format** (JSON wire,
+  Markdown table cell, structured JSON Schema, plain text).
+  Markdown escaping is one such encoding; it is NOT the only
+  one.
+- Renderer-generated structure (table separators, headings,
+  fixed strings, status enums) MUST NOT be escaped — same
+  boundary rule as `trace.md`.
+
+**Non-goals.**
+
+- P2.5 does NOT prescribe the encoding for non-Markdown
+  transports. P3.1 picks per transport.
+- P2.5 does NOT introduce a new redactor or escape helper.
+  P3.1 either reuses an existing one (e.g.
+  `escape_markdown`) or defines a transport-specific
+  equivalent.
+
+**Implementation freedom.**
+
+- JSON-string prompts: use `json.dumps` (built-in escape).
+- Markdown-table-cell prompts: use `escape_markdown` (P2.4.D).
+- Structured-output-schema prompts: rely on the LLM
+  provider's JSON parser; no escape needed (the parser
+  handles strings).
+- Plain-text prompts: define a transport-specific escaper
+  in P3.1.
+
+**Migration impact.**
+
+- None. P2.x surfaces are unchanged.
+
+---
+
+### D7. Metrics data sanitisation
+
+**Problem.**
+
+P2.4 acceptance #7-8 requires metrics file to pass a
+`no-secret / no-screen-text` audit. The metrics writer itself
+is deferred to P3.2. The contract must distinguish between
+data shapes (text / numeric / keys) so redaction doesn't
+corrupt numeric semantics.
+
+**Contract.**
+
+- Metrics file MUST be **structured data** (JSON / line-
+  delimited JSON / similar) — not free-form text.
+- Sanitisation MUST be **field-type aware**:
+  - **Text fields** (descriptions, captured screen snippets,
+    user-supplied labels) → run through
+    `RedactionRegistry.apply_text` before persistence.
+  - **Numeric fields** (latencies, byte counts, counts of
+    events) → MUST NOT be modified by text redaction.
+  - **Keys** (metric names, label keys, structured IDs) →
+    MUST come from a controlled namespace; not user-
+    supplied.
+- The audit that P2.4 acceptance requires (zero secret
+  matches across the metrics file) MUST hold AFTER
+  sanitisation. The audit operates on the post-sanitisation
+  bytes.
+
+**Non-goals.**
+
+- P2.5 does NOT specify which metrics to collect (P3.2
+  design).
+- P2.5 does NOT specify the storage format (JSON, parquet,
+  etc.) — P3.2 picks.
+
+**Implementation freedom.**
+
+- P3.2 may define new redaction rules specific to metric
+  labels (e.g. redact anything matching "label_*") as long
+  as numeric fields remain numeric.
+- P3.2 may use a third-party metrics library (statsd,
+  Prometheus client, OpenTelemetry) — the field-type
+  contract applies regardless.
+
+**Migration impact.**
+
+- None. Metrics writer does not exist yet.
+
+---
+
+### D8. Planner capability boundary
+
+**Problem.**
+
+P3.1 introduces an LLM planner that emits `ActionSequence`.
+The planner MUST NOT emit actions that the active backend /
+profile cannot perform.
+
+**Contract.**
+
+- **Planner MUST NOT emit actions outside the active
+  backend's statically-supported set**, filtered by the
+  current profile (`windows_hisec`, `macos_hisec`,
+  `macos_generic`, etc.).
+- The dispatcher MUST reject any out-of-set action with
+  `code=unknown_action_id` — same code it uses for any
+  unknown action_id today. The planner gets the same
+  rejection, not a special "planner mistake" code.
+- The capability set is computed from the **catalog + live
+  probe** (existing P0.1 + P1.1 surface). P3 does NOT
+  introduce a second capability table.
+
+**Non-goals.**
+
+- P2.5 does NOT prescribe how the planner queries the
+  capability set. Any access pattern that yields the same
+  result is acceptable.
+- P2.5 does NOT change dispatcher behaviour; the existing
+  `unknown_action_id` path is reused.
+
+**Implementation freedom.**
+
+- The capability access can be a function call, a property,
+  a precomputed view, or a per-backend adapter — P3.1 picks.
+
+**Migration impact.**
+
+- None. Catalog dispatch contract unchanged.
+
+---
+
+### D9. Coordinate fallback policy
+
+**Problem.**
+
+P3.1 in_scope: reject coordinate fallbacks when a unique
+semantic target exists in the snapshot. This is the
+"LLM-invents-pixel-click" defence.
+
+**Contract.**
+
+- **When the live snapshot contains a unique semantic target
+  for an action's selector**, the planner MUST emit the
+  semantic action (e.g. `gui.click` with a `control_ref`).
+- **Coordinate-based actions** (e.g. `pointer.click_xy`) MUST
+  NOT be emitted when a unique semantic target exists.
+- **When no semantic target exists**, coordinate fallback is
+  permitted; the dispatcher's existing
+  `missing_selector_hint` code already enforces "no selector,
+  no mutation" for HiSec profiles.
+- **Reversibility check**: coordinate-based actions on HiSec
+  targets without a snapshot-validated target MUST be
+  rejected before dispatch, not after.
+
+**Non-goals.**
+
+- P2.5 does NOT change the catalog's `pointer.*` actions or
+  their risk annotations.
+- P2.5 does NOT introduce a new "coordinate rejection" code;
+  the existing rejection path (precondition_failed /
+  ownership_mismatch / dispatch_target_missing depending on
+  the missing context) is reused.
+
+**Implementation freedom.**
+
+- How the planner detects "unique semantic target exists" is
+  free; can be a snapshot-tree lookup, an LLM-side tool call,
+  or a hybrid.
+- P3.1 may define a stricter profile-level policy (e.g.
+  `hisec_no_coordinate_ever`) as long as the contract above
+  holds for the base case.
+
+**Migration impact.**
+
+- None. Existing `pointer.*` actions still work in legacy
+  flows; the contract only applies to the planner.
+
+---
+
+### D10. Replan / recovery auditability
+
+**Problem.**
+
+P2.2 introduced `recovery_requested`, `branch_created`,
+`replan_created`, `recovery_result` events. P3.1 introduces
+the planner that may decide to replan after an unexpected
+transition. The contract is what MUST hold at the audit-
+boundary, not which module emits the event.
+
+**Contract.**
+
+- **Unexpected execution divergence** (snapshot before action
+  ≠ snapshot after action, beyond expected transitions) MUST
+  produce an **auditable replan event** in the trace chain.
+- The replan event MUST carry enough metadata for post-hoc
+  analysis: trigger, prior snapshot ref, new plan ref (if
+  any), reason.
+- The recovery executor (P2.2) MUST be able to consume this
+  event when the planner emits one; the contract is
+  **emitter-agnostic** (planner, runtime, future automated
+  agent — any emitter that produces the contract shape).
+- The event MUST land in the trace chain (P1.3) — not in a
+  side channel — so the projection / manifest / report
+  layers pick it up uniformly.
+
+**Non-goals.**
+
+- P2.5 does NOT prescribe the event schema fields beyond
+  the required metadata. P3.1 design fills in.
+- P2.5 does NOT prescribe which module emits the event. P3.1
+  may introduce a `planner` module; P2.5 doesn't care.
+
+**Implementation freedom.**
+
+- The event schema can be `replan_created`, `replan_started`,
+  `replan_completed` — P3.1 design decides.
+- The decision to emit can be automatic (P3.1 planner always
+  emits on unexpected transition) or policy-gated (only on
+  certain profiles) — P3.1 design decides.
+
+**Migration impact.**
+
+- P2.2's recovery executor already consumes `replan_created`.
+  No change needed there; P3 just exercises an existing path.
+
+---
+
+## Open Decisions From Architecture Ledger
+
+Recap from architecture §24 deferred lists, now P2.5 must
+commit to a direction (either resolve or pass to P3.1 with
+explicit criteria):
+
+| ID | Title | P2.5 outcome |
+|----|-------|--------------|
+| 1 | UUIDv7 vs ULID | D1 — criteria locked; option selection at P3.1 |
+| 2 | `target/screenshot_bytes()` location | D3 — contract locked; option selection at P3.1 |
+| 3 | Image transport threshold | D4 — rule locked; threshold value at P3.1 (default 1 MiB post-encoding) |
+
+All three either resolved (contract + criteria) or pending
+reviewer call (option selection deferred to P3.1).
 
 ---
 
@@ -278,26 +630,49 @@ a resolution.
 This checkpoint has **no code-level functional requirements**.
 It produces:
 
-- this design review package
+- this design review package (D1..D10 in contract form),
 - a `DECISIONS.md` log under `docs/requirements/` recording
-  the resolved items (D1..D10 above)
+  the resolved items,
 - a CHANGELOG entry under `docs/requirements/P3-llm-evaluation.md`
-  linking to P2.5 as the gate that closed the open decisions
+  linking to P2.5 as the gate that closed the open decisions.
 
-Acceptance criteria for P2.5 are reviewer-side, not test-side:
+---
 
-1. **Reviewer can read D1..D10 and either agree with the
-   proposed resolution OR explicitly defer with a logged
-   decision**. No silent deferral.
-2. **All three open decisions from architecture** (§24 / P0
-   / P1 / P2 deferred lists) **have a final answer** (either
-   "resolved" or "deferred to P3 with documented rationale").
-3. **The reviewer confirms** that P3.1 / P3.2 can begin
-   without re-opening any of D1..D10.
+## Acceptance Criteria (reviewer-side, P2.5 itself)
 
-If the reviewer asks to flip a proposed resolution, P2.5
-edits this document in place and re-submits; no
-implementation work begins until the gate is closed.
+P2.5 ships no code; the "tests" are reviewer approvals:
+
+1. **Each D item has the 5-part structure**: Problem,
+   Contract, Non-Goals, Implementation Freedom, Migration
+   Impact.
+2. **Contract vs implementation is separated**: any D item
+   that read like "use module X" or "call function Y" is a
+   reject; contracts describe behaviour, not module names.
+3. **All three architecture open decisions** (UUIDv7/ULID,
+   screenshot_bytes, transport threshold) have a contract
+   + decision criteria in D1 / D3 / D4. Option selection
+   may be deferred to P3.1, but the criteria MUST be locked
+   here.
+4. **No D item re-implements a P0..P2.x contract** without
+   an explicit migration-impact note.
+
+P2.5 closes when all four criteria are satisfied AND the
+reviewer signs off each D item (or formally defers with
+owner + target milestone).
+
+### P2.5 exit condition
+
+```
+P2.5 closes when:
+- D1..D10 each have final state (resolved OR deferred)
+- Unresolved items have owner + target milestone recorded
+  in DECISIONS.md
+- P3 implementation has no unresolved contract dependency
+- Reviewer signs off the design package as a whole
+```
+
+Until the exit condition holds, P3.1 implementation may NOT
+begin.
 
 ---
 
@@ -316,7 +691,10 @@ those tests land under P3.1 / P3.2 (not P2.5).
 
 - `docs/requirements/P2-5-design-gate.md` (this file).
 - `docs/requirements/DECISIONS.md` — single-line log of each
-  decision and its outcome.
+  decision and its outcome (contract vs implementation
+  separated).
+- `docs/requirements/CHANGELOG-P2-5.md` — this checkpoint's
+  status entry.
 - Update to `docs/requirements/P3-llm-evaluation.md` adding a
   "P2.5 design gate" reference section.
 
@@ -327,10 +705,11 @@ those tests land under P3.1 / P3.2 (not P2.5).
 Stop after the reviewer has:
 
 1. read this document,
-2. signed off on D1..D10 (or explicitly deferred each with a
-   rationale),
-3. signed off on the P3.1 / P3.2 scope unaffected by these
-   decisions.
+2. confirmed each D item satisfies the 5-part structure,
+3. signed off on each D item's contract (or formally deferred
+   each with owner + target milestone),
+4. confirmed the P3.1 / P3.2 scope is unaffected by any
+   unresolved contract.
 
 After approval, **P3.1 implementation** may begin. P3.1 itself
 will produce its own review package — P2.5 is not a substitute
@@ -345,12 +724,16 @@ tests, no commits beyond the docs above.
 
 | Area | Reusable in P3 |
 |------|----------------|
-| Catalog filtering (`enabled_actions_for`, `status_action_space`) | Yes — D8 / D9 use it directly. |
-| Redaction registry (`apply_text`, `apply_image`) | Yes — D2 / D7. |
-| Markdown escape (`escape_markdown`) | Yes — D6. |
-| Trace event types (`replan_created`, `branch_created`) | Yes — D10. |
-| Recovery executor | Yes — D10. |
-| Live E2E harness (`test_case/run_*.py`) | Yes — D5 (read-only). |
+| Catalog filtering (any access pattern yielding capability set) | Yes — D8 contract. |
+| Catalog `BACKEND_NOT_IMPLEMENTED` | Yes — D3 contract. |
+| Redaction registry (`apply_text`, `apply_image`) | Yes — D2 layer 1, D7 text-field contract. |
+| Renderer escape (per-transport escapers) | Yes — D2 layer 2, D6 contract. |
+| Trace event types (`replan_created`, `branch_created`) | Yes — D10 contract. |
+| Recovery executor (consumes `replan_created`) | Yes — D10 contract. |
+| Dispatcher `unknown_action_id` code | Yes — D8 contract. |
+| Dispatcher `missing_selector_hint` code | Yes — D9 contract. |
+| Live E2E harness | Yes — D5 contract (read-only). |
+| Existing `verify_chain` (P1.3) | Yes — D1 contract (id format agnostic). |
 
 No P2.x code is modified by P2.5. P2.5 is docs only.
 
@@ -361,17 +744,25 @@ No P2.x code is modified by P2.5. P2.5 is docs only.
 ```
 P2.5 — Design Review Gate (Post-P2 / Pre-P3)
 
-Status: DRAFT awaiting reviewer sign-off
+Status: DRAFT (CHANGES REQUESTED on review round 1)
 Implementation: NONE (docs only)
 Tests: NONE (paper gate)
 Decision items: D1..D10 (10 deferred decisions surfaced)
-Open decisions: 3 from architecture (D1 / D3 / D4)
+                  All written in contract form (5-part structure)
+Open decisions: 3 from architecture (D1 / D3 / D4) — contracts
+                locked; option selection deferred to P3.1
 ```
 
-Reviewer action items:
+Reviewer action items (round 2):
 
-1. Read D1..D10.
-2. For each: agree with proposed resolution, OR propose
-   alternative, OR explicitly defer to P3 with rationale.
-3. Confirm P3.1 / P3.2 scope is not blocked by any of these.
-4. Sign off (or send Request Changes).
+1. Verify each D item has Problem / Contract / Non-Goals /
+   Implementation Freedom / Migration Impact sections.
+2. Confirm contracts (not implementations) describe the
+   locked behaviour. Flag any remaining "use module X" /
+   "call function Y" wording.
+3. Confirm D4 / D7 contract refinements (post-encoding
+   threshold; field-type-aware sanitisation).
+4. Confirm D8 / D9 / D10 contracts read as behavioural
+   commitments, not module choices.
+5. Sign off the design package as a whole, or send Request
+   Changes with specific D items to revise.
