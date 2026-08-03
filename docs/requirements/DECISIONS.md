@@ -235,3 +235,76 @@ implementation's job.
 - **Escape ordering**: control chars → backslash → pipe →
   backtick → CR/LF normalization.
 - **Boundary rule**: user-controlled values only.
+
+---
+
+## P3.1 Design Review Gate
+
+### Time line (append-only)
+
+- **2026-08-02 P3.1 round 1** — pending reviewer.
+
+### Round 1 — contracts (current)
+
+#### D11. Structured-output schema contract
+
+- Contract: schema derived from P0.2 models; `additionalProperties:
+  false` everywhere; rejection returns `plan_schema_invalid` +
+  JSON pointer + message; exported to
+  `test_case/schema/plan.schema.json`.
+- Resolution: contract locked.
+- Source: P3.1 spec §FR-P3.1-01..02.
+
+#### D12. Plan validation contract
+
+- Contract: 5-stage validation order (schema → catalog →
+  action_code → target_ref → DAG); stable codes per P1.1;
+  failures do not silently pass.
+- Resolution: contract locked.
+- Source: P3.1 spec §FR-P3.1-03..06, -10.
+
+#### D13. Replan trigger and bound contract
+
+- Contract: replan triggered on stale target_ref / unexpected
+  transition / stale snapshot_id; bounded (no loops);
+  `replan_budget_exhausted` at bound; bound value is
+  implementation-defined.
+- Resolution: contract locked.
+- Source: P3.1 spec §"post_step.py".
+
+#### D14. Confirmation policy contract
+
+- Contract: required for `risk ∈ {high, irreversible}` OR
+  `(side_effect ∈ {gui_mutation, system_mutation} ∧ profile
+  demands)`; deterministic gate; LLM cannot bypass via
+  action_id swap / `requires` omission / in-payload
+  confirmation; missing confirmation returns
+  `confirmation_required`; plan not dispatched.
+- Resolution: contract locked.
+- Source: P3.1 spec §FR-P3.1-08.
+
+#### D15. Prompt sanitisation contract (re-stating D6 in P3)
+
+- Contract: per-transport encoding (Markdown → `escape_markdown`;
+  JSON → `json.dumps`; structured schema → none needed;
+  plain-text → P3.1-specific); renderer-generated structure
+  un-escaped.
+- Resolution: contract locked.
+- Source: P2.5 D6 + P3.1 in_scope.
+
+#### D16. Persistence + sanitisation contract
+
+- Contract: plan events (`plan_created`, `plan_validated`,
+  `plan_rejected`, `replan_created`) MUST run through
+  `RedactionRegistry.apply_text` before persistence; audit
+  contract extends; events land in P1.3 trace chain.
+- Resolution: contract locked.
+- Source: P3.1 spec §"persist.py" + P1.4 redaction.
+
+### Inherited from P2.5 (unchanged contracts; P3.1 review notes required)
+
+| ID | Contract | P3.1 review note required |
+|----|----------|---------------------------|
+| D1 | Unique + lex-sortable + JSON-round-trippable + stable | P3.1 implementation records option chosen (UUIDv7 / ULID / ad-hoc) |
+| D3 | Backend returns raw PNG bytes + capability declared | P3.1 implementation records module chosen (catalog / execution / provider) |
+| D4 | Post-encoding threshold; inline ≤ threshold; managed transfer above; digest verified | P3.1 implementation records threshold value (default 1 MiB post-encoding) |
