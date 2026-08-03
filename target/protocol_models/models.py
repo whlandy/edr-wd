@@ -548,16 +548,27 @@ class TestCase:
     preconditions: tuple[AtomicTestStep, ...] = field(default_factory=tuple)
     steps: tuple[AtomicTestStep, ...] = field(default_factory=tuple)
     cleanup: tuple[AtomicTestStep, ...] = field(default_factory=tuple)
+    cleanup_outcome_critical: bool = False
     timeout_seconds: int = 120
 
     _ALLOWED: frozenset[str] = frozenset({
         "case_id", "title", "description", "profiles", "tags",
-        "preconditions", "steps", "cleanup", "timeout_seconds",
+        "preconditions", "steps", "cleanup",
+        "cleanup_outcome_critical",
+        "timeout_seconds",
     })
 
     def __post_init__(self) -> None:
         _require_str(self.case_id, path="case_id", field_name="case_id")
         _require_str(self.title, path="title", field_name="title")
+        if not isinstance(self.cleanup_outcome_critical, bool):
+            raise ProtocolModelError(
+                "type_error",
+                f"cleanup_outcome_critical must be a bool, "
+                f"got {type(self.cleanup_outcome_critical).__name__}",
+                path="cleanup_outcome_critical",
+                value=type(self.cleanup_outcome_critical).__name__,
+            )
         if not isinstance(self.timeout_seconds, int):
             raise ProtocolModelError(
                 "type_error",
