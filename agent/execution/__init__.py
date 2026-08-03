@@ -74,6 +74,12 @@ from .recovery_inverse import (
     SOPInverseAction,
 )
 from .recovery_planner import plan_recovery
+from .recovery_executor import (
+    ExecutionOutcome,
+    RecoveryExecutor,
+    RequestedEvent,
+    RestoreHandler,
+)
 from .step_results import load_step_results, write_atomic
 from .transitions import (
     TransitionKind,
@@ -154,4 +160,9 @@ __all__ = [
     "DuplicateInverseError",
     # recovery planner (P2.2 — Commit B)
     "plan_recovery",
+    # recovery executor (P2.2 — Commit D)
+    "RecoveryExecutor",
+    "ExecutionOutcome",
+    "RequestedEvent",
+    "RestoreHandler",
 ]
