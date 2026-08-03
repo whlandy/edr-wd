@@ -7,6 +7,8 @@ profiles: [windows_hisec, macos_hisec]
 platforms: [windows, macos]
 primary_window_scope: hisec_agent
 risk: read_only
+transition_kind: page_navigation
+application_state_hint: <sop-specific-end-state>
 ---
 
 # <SOP Title>

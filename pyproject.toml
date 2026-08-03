@@ -10,7 +10,19 @@ dependencies = [
     "Pillow>=10.0.0",
     "paramiko>=3.4.0",
     "PyAutoGUI>=0.9.54",
+    "PyYAML>=6.0",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "pytest-asyncio>=0.21"]
+
+[tool.pytest.ini_options]
+# Add `target/` and `agent/` to sys.path so test files can use
+# `import action_dispatcher`, `from execution import ...`, etc.
+# (P2.1 review issue #6 — tests should not mutate sys.path).
+pythonpath = ["target", "agent", "."]
+testpaths = ["test_case"]
+asyncio_mode = "auto"
 
 [project.scripts]
 edr-wd = "edr_wd.server:main"

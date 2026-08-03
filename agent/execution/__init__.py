@@ -14,6 +14,12 @@ CAPTURING_BEFORE / CAPTURING_AFTER states and flip
 `ExecutorConfig.visual_evidence_available = True`.
 """
 
+from .checkpoints import (
+    CheckpointDecision,
+    CheckpointKind,
+    VALID_CHECKPOINT_KINDS,
+    decide_checkpoint,
+)
 from .executor import AtomicExecutor, BackendUnavailable, IllegalTransition, ObservationProvider
 from .expectations import (
     EXPECTATION_REGISTRY,
@@ -32,6 +38,12 @@ from .models import (
     coerce_on_error,
     worst_status,
 )
+from .sop_index import (
+    SopIndex,
+    SopIndexEntry,
+    SopIndexLoadError,
+    load_sop_index,
+)
 from .state_machine import (
     TRANSITIONS,
     StepState,
@@ -41,6 +53,12 @@ from .state_machine import (
     validate_transition,
 )
 from .step_results import load_step_results, write_atomic
+from .transitions import (
+    TransitionKind,
+    TransitionResult,
+    VALID_TRANSITION_KINDS,
+    classify_transition,
+)
 
 
 __all__ = [
@@ -74,4 +92,19 @@ __all__ = [
     "write_atomic",
     "load_step_results",
     "IllegalTransition",
+    # transitions (P2.1)
+    "TransitionKind",
+    "VALID_TRANSITION_KINDS",
+    "TransitionResult",
+    "classify_transition",
+    # checkpoints (P2.1)
+    "CheckpointKind",
+    "VALID_CHECKPOINT_KINDS",
+    "CheckpointDecision",
+    "decide_checkpoint",
+    # sop_index (P2.1)
+    "SopIndex",
+    "SopIndexEntry",
+    "SopIndexLoadError",
+    "load_sop_index",
 ]

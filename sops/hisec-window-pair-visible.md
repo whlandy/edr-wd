@@ -7,6 +7,8 @@ profiles: [windows_hisec, macos_hisec]
 platforms: [windows, macos]
 primary_window_scope: none
 risk: read_only
+transition_kind: window_open
+application_state_hint: hisec_and_edr_client_pair_visible
 ---
 
 # HiSec Window Pair Visibility

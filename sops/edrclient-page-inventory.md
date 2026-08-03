@@ -7,6 +7,8 @@ profiles: [windows_hisec, macos_hisec]
 platforms: [windows, macos]
 primary_window_scope: edr_client
 risk: read_only
+transition_kind: control_state_change
+application_state_hint: edr_client_inventory_collected
 ---
 
 # EDRClient Page Component Inventory
