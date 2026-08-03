@@ -353,9 +353,10 @@ def render_report(
         ) from e
     try:
         manifest = Manifest.from_dict(manifest_data)
-    except UnsupportedManifestSchemaError:
-        # Surface as manifest corrupt + invalid status
-        body = _render_invalid_banner(run, generated_at)
+    except UnsupportedManifestSchemaError as e:
+        # Surface as manifest invalid + invalid status. Include the
+        # specific reason (FR-P2.3-09 / D8).
+        body = _render_invalid_banner(run, generated_at, reason=str(e))
         return body, ReportStatus(
             report_status="invalid", evidence_status="degraded"
         )
@@ -428,11 +429,14 @@ def render_report(
 # Markdown rendering
 # ----------------------------------------------------------------------
 
-def _render_invalid_banner(run: RunContext, generated_at: str) -> str:
+def _render_invalid_banner(
+    run: RunContext,
+    generated_at: str,
+    reason: str = "manifest.json missing or corrupt",
+) -> str:
     return (
         f"# Run Report — {run.run_id} (generated {generated_at})\n\n"
-        "> **Report Status**: `invalid` — manifest.json missing or "
-        "corrupt; totals NOT trustworthy.\n\n"
+        f"> **Report Status**: `invalid` — {reason}; totals NOT trustworthy.\n\n"
         "---\n\n"
         "*Renderer: p2.3 | Reconciliation: FAILED*\n"
     )
