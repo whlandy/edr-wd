@@ -1,0 +1,229 @@
+{
+  "$defs": {
+    "ActionStep": {
+      "additionalProperties": false,
+      "properties": {
+        "action_code": {
+          "description": "Optional; must match catalog action_code for action_id (D12 stage 3).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "action_id": {
+          "description": "Must match a catalog action_id; validated by parse_plan (D12 stage 2).",
+          "type": "string"
+        },
+        "args": {
+          "description": "Action input args; must match the action's `input_schema` (P0.2).",
+          "type": "object"
+        },
+        "step_id": {
+          "description": "Stable id within the plan.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "target_ref": {
+          "$ref": "#/$defs/TargetRef"
+        },
+        "timeout_seconds": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "step_id",
+        "action_id"
+      ],
+      "type": "object"
+    },
+    "EvidenceSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "screenshot": {
+          "description": "Mirrors P0.2 default_screenshot enum.",
+          "enum": [
+            "none",
+            "before",
+            "after",
+            "before_and_after",
+            "failure"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Expectation": {
+      "additionalProperties": false,
+      "properties": {
+        "timeout_seconds": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "type": {
+          "description": "Mirrors the P1.2 / P1.4 expectation registry (10 types).",
+          "enum": [
+            "action_ok",
+            "window_open",
+            "window_closed",
+            "active_window_owner",
+            "control_exists",
+            "control_absent",
+            "control_text_equals",
+            "control_text_contains",
+            "window_text_contains",
+            "visual_evidence_captured"
+          ],
+          "type": "string"
+        },
+        "value": {
+          "description": "Type-specific expected value; schema depends on `type`."
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "TargetRef": {
+      "additionalProperties": false,
+      "properties": {
+        "snapshot_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "target_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "target_id"
+      ],
+      "type": "object"
+    },
+    "Transition": {
+      "additionalProperties": false,
+      "properties": {
+        "expected": {
+          "description": "Mirrors the P2.1 transition kinds.",
+          "enum": [
+            "none",
+            "control_state_change",
+            "page_navigation",
+            "modal_open",
+            "modal_close",
+            "window_open",
+            "window_close",
+            "window_owner_change",
+            "application_restart",
+            "unknown_material_change"
+          ],
+          "type": "string"
+        },
+        "on_error": {
+          "description": "Mirrors the P1.2 on_error policies.",
+          "enum": [
+            "abort",
+            "retry",
+            "capture_and_abort",
+            "reobserve_replan"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "expected"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://edr-wd.local/schemas/plan.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Wire schema for the planner's structured-output plan. Schema version `plan_schema.v1`.",
+  "properties": {
+    "expected_actions": {
+      "description": "The ordered list of steps the planner emits. Each step maps 1:1 to a P0.2 `ActionStep`.",
+      "items": {
+        "$ref": "#/$defs/ActionStep"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "expected_dependencies": {
+      "additionalProperties": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "description": "step_id -> [step_id...] dependency map. Used by FR-P3.1-10 cycle detection.",
+      "type": "object"
+    },
+    "expected_evidence": {
+      "additionalProperties": {
+        "$ref": "#/$defs/EvidenceSpec"
+      },
+      "description": "step_id -> EvidenceSpec override.",
+      "type": "object"
+    },
+    "expected_expectations": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Expectation"
+      },
+      "description": "step_id -> Expectation declaration.",
+      "type": "object"
+    },
+    "hints": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Free-form hints for the planner surface; consumed but not enforced.",
+      "type": "object"
+    },
+    "plan_id": {
+      "description": "Sortable unique id (FR-P3.1-02 wire format).",
+      "type": "string"
+    },
+    "replan_count": {
+      "description": "How many replan attempts preceded this plan; D13 bound is implementation-defined but tracked here for audit.",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "replan_id": {
+      "description": "Stable unique id for this replan attempt; D13 hierarchy: run_id > step_id > replan_id > event_id.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "const": "plan_schema.v1",
+      "description": "Wire schema version. Consumers MUST reject unknown versions.",
+      "type": "string"
+    },
+    "snapshot_id": {
+      "description": "Snapshot id the plan was built against; FR-P3.1-06 must match the live snapshot at execution time.",
+      "type": "string"
+    },
+    "transition_declarations": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Transition"
+      },
+      "description": "step_id -> Transition declaration. P3.1 spec: declare `transition.expected` and `on_error` per step.",
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "plan_id",
+    "snapshot_id",
+    "expected_actions"
+  ],
+  "title": "LLMPlannerPlan",
+  "type": "object"
+}

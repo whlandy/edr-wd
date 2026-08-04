@@ -1,0 +1,633 @@
+# P3.1 — Design Review Gate (Pre-Implementation)
+
+## Status
+
+- **State**: requirements (no implementation).
+- **Source contract**: `../architecture/01-action-trace-test-report-design.md` §18 Phase C/D; `../requirements/P3-llm-evaluation.md` §"Checkpoint P3.1"; `../requirements/P2-5-design-gate.md` (predecessor gate).
+- **Mapped checkpoints**: gate before **P3.1 implementation** begins.
+- **Completion state**: **APPROVED** (round 1; see "Reviewer Approval Log" below).
+- **Round 1 reviewer verdict**: ✅ APPROVED WITH MINOR NOTES (per review log 2026-08-02).
+- **Milestone**: this gate exists to lock the **behavioural contracts** that P3.1 must satisfy BEFORE any code lands. P3.1 is the first checkpoint that introduces an LLM, structured output, and a confirmation policy — these are non-trivial design surfaces that must not be locked by accident.
+
+P3.1 must NOT begin implementation until this gate closes.
+
+---
+
+## Why this gate exists
+
+P2.5 closed on contracts (D1..D10) but P2.5 deliberately did NOT
+prescribe the planner internals. P3.1's spec (`P3-llm-evaluation.md`)
+defines FR-P3.1-01..10 and acceptance criteria, but those are
+**what** the planner does, not **how the design holds together**
+across:
+
+- Structured output: which schema, which fields, what rejection
+  contract?
+- LLM interaction: which transport, which prompt structure, which
+  sanitisation boundary?
+- Replan trigger: what counts as "stale", and is the bound on
+  replans deterministic?
+- Confirmation policy: which actions require confirmation, and
+  how does the LLM-bypass attempt get caught?
+- Prompt sanitisation: how do D2 + D6 contracts apply here?
+- Persistence: which P1.3 event types, which sanitisation layer?
+
+P3.1 design gate locks the answers that P2.5 deferred, in the
+same 5-part contract form.
+
+---
+
+## What P3.1 design gate locks — and what it does not
+
+**Locks:**
+
+- Behavioural contracts for the planner surface.
+- Schema field shapes (which fields MUST / MUST NOT exist on
+  `LLMPlanRequest`, `LLMPlanResponse`, `PLAN_JSON_SCHEMA`).
+- Rejection codes (what MUST be returned when the LLM output
+  fails a check).
+- Replan contract (what counts as stale; how many replans are
+  permitted; what happens at the bound).
+- Confirmation contract (which actions require confirmation;
+  how the LLM-bypass attempt is detected).
+- Sanitisation boundary for the planner prompt (per D2 + D6).
+
+**Does NOT lock:**
+
+- Module names (`agent/planner/catalog_view.py` etc.) — the
+  spec names these but P3.1 may reorganise.
+- LLM provider SDK choice (P3.1 must work with any provider
+  that supports structured output; the provider itself is
+  per-deployment config).
+- Internal data structures beyond the externally-observable
+  schema.
+- Prompt wording (P3.1 may iterate on the wording; only the
+  sanitisation boundary is locked).
+
+---
+
+## Per-decision shape
+
+Each D item follows the same shape as P2.5:
+
+1. **Problem** — what was deferred or ambiguous.
+2. **Contract** — what MUST hold (the locked part).
+3. **Non-Goals** — what MUST NOT be assumed by the
+   implementation.
+4. **Implementation freedom** — concrete options left open.
+5. **Migration impact** — what existing P0..P2.x surfaces must
+   continue to work.
+
+---
+
+## Decision Items
+
+### D11. Structured-output schema contract
+
+**Problem.**
+
+P3.1's spec calls for a `PLAN_JSON_SCHEMA` "derived from the
+P0.2 models" with `additionalProperties: false` on every
+object. The exact field set, the rejection granularity, and
+the JSON-pointer contract for errors are deferred to P3.1.
+
+**Contract.**
+
+- `PLAN_JSON_SCHEMA` MUST be derived from the existing P0.2
+  dataclasses (`ActionSequence`, `ActionStep`, `TargetRef`,
+  `Expectation`, `Transition`, `EvidenceSpec`, `AtomicTestStep`,
+  `TestCase`) without redefining any field that already exists
+  in those models.
+- Every object-level field in the schema MUST set
+  `additionalProperties: false`. Unknown fields at any level
+  MUST be rejected at parse time.
+- Schema rejection MUST return:
+  - `code = "plan_schema_invalid"`
+  - `JSON_pointer` to the offending field (RFC 6901 format).
+  - `message` describing the rejection reason.
+- The schema MUST be exported to `test_case/schema/plan.schema.json`
+  for consumers to validate against.
+- **Schema versioning**: the schema MUST carry a `schema_version`
+  field (initial value `plan_schema.v1`). A version bump is a
+  major break (architecture §7.2): legacy consumers MUST be able
+  to read the new schema's `schema_version` and reject plans
+  whose version they don't recognise. P3.1 review records the
+  migration strategy for any future bump.
+
+**Non-goals.**
+
+- The schema MUST NOT introduce new fields that aren't already
+  in P0.2 models (unless explicitly added via a contract
+  change to P3.1 review).
+- The schema MUST NOT be lenient (e.g. "allow extra fields
+  silently"). Leniency breaks P2.5 D2 layer 2 sanitisation.
+
+**Implementation freedom.**
+
+- The schema may be generated by introspecting P0.2 dataclasses
+  (any mechanism: `dataclasses.fields`, a hand-written JSON
+  Schema, a generator). P3.1 picks.
+- The JSON-pointer computation may be done by a custom parser
+  or a third-party library. P3.1 picks.
+
+**Migration impact.**
+
+- Existing test cases (`test_case/fixtures/protocol/*.json`)
+  are NOT modified by P3.1.
+- P0.2 strict-mode rejection is unchanged.
+
+---
+
+### D12. Plan validation contract
+
+**Problem.**
+
+P3.1's spec calls for `parse_plan()` to validate against the
+live catalog, resolve `action_code` against `action_id`,
+validate `target_ref.snapshot_id`, and surface stable codes.
+The exact validation order, error precedence, and per-step
+granularity are deferred.
+
+**Contract.**
+
+- `parse_plan(payload, *, catalog, snapshot_id) -> (ActionSequence, list[ValidationError])`
+  MUST validate against **all 5 stages** below before the plan
+  is eligible for execution. **The implementation MAY execute
+  the stages in any order, including in parallel**; the
+  contract is that every stage MUST pass. Stable codes:
+  1. Schema-level (`additionalProperties: false`, type
+     mismatches) → `plan_schema_invalid`.
+  2. Catalog-level: each step's `action_id` MUST be in
+     `enabled_actions_for(backend, profile)` →
+     `backend_disabled`.
+  3. Action-code consistency: `action_code` MUST match the
+     catalog's `action_code` for the chosen `action_id` →
+     `action_code_mismatch`.
+  4. Target-ref consistency: `target_ref.snapshot_id` MUST
+     match the supplied `snapshot_id` →
+     `target_ref_snapshot_mismatch`.
+  5. Dependency DAG: cycle detection on `dependencies` →
+     `dependency_cycle` with the closed-loop `step_id` list.
+- **All 5 stages MUST pass** before execution eligibility;
+  the planner MUST NOT execute a plan that fails any stage.
+- Validation failures MUST NOT silently pass; the planner
+  MUST retry / replan / surface to the calling system.
+- Codes MUST be stable across releases (changing a code is a
+  major break per architecture §7.2).
+
+**Non-goals.**
+
+- The exact validation order is a P3.1 implementation choice
+  as long as all 5 checks fire.
+- `ValidationError` representation (dataclass vs dict) is
+  free; only the `code` + `JSON_pointer` fields are locked.
+
+**Implementation freedom.**
+
+- Reusing P0.2's `validate_plan` and adapting it is a valid
+  path (it already has the validator + DAG cycle detection).
+- Building a new planner-specific validator is also valid.
+
+**Migration impact.**
+
+- P0.2's validator is unchanged.
+- Existing test cases (positive_plan.json etc.) still pass.
+
+---
+
+### D13. Replan trigger and bound contract
+
+**Problem.**
+
+P3.1's spec says: "After any state-changing step, ... a
+single bounded replan — no arbitrary loops." The trigger
+conditions and the bound semantics are deferred.
+
+**Contract.**
+
+- Replan MUST be triggered when ANY of the following holds
+  after a state-changing step:
+  - The previous step's `target_ref` is stale (no longer
+    present in the fresh snapshot).
+  - The previous step's action succeeded but the snapshot
+    shows an unexpected transition (transition classification
+    ≠ what the step declared).
+  - The planner is invoked with a stale `snapshot_id`.
+- Replan MUST be bounded: the planner MUST NOT enter an
+  unbounded loop. The bound is **implementation-defined** but
+  the planner MUST surface the bound to the calling system
+  via the plan event (`replan_count` field).
+- When the bound is hit, the planner MUST emit
+  `code = "replan_budget_exhausted"` and stop.
+- **Replan attempt id for trace correlation**: every replan
+  MUST carry a stable `replan_id` (sortable unique id) so that
+  downstream trace correlation can link replan events to the
+  specific attempt that produced them. The hierarchy:
+  - `run_id`
+    - `step_id`
+      - `replan_id` (each attempt; monotonic within a
+        `step_id`)
+      - `event_id` (each event within the attempt)
+  This allows multiple replan attempts for the same step to be
+  distinguished without ambiguity. The `replan_id` format and
+  generator are P3.1 implementation choices (P3.1 may reuse
+  the P1.3 id helpers).
+
+**Non-goals.**
+
+- The exact bound value (default 3? configurable per
+  deployment?) is a P3.1 implementation choice. The contract
+  is the existence of the bound, not the number.
+- The replan algorithm (LLM-only, deterministic fallback,
+  hybrid) is free.
+
+**Implementation freedom.**
+
+- The bound may be configured via P0.1-style config or
+  hard-coded default.
+- The replan event schema is free (P3.1 picks; P1.3's
+  `replan_created` event is reused as the envelope).
+
+**Migration impact.**
+
+- P1.3's `replan_created` event is reused (P2.5 D10 contract).
+- Recovery executor (P2.2) consumes the event unchanged.
+
+---
+
+### D14. Confirmation policy contract
+
+**Problem.**
+
+P3.1's spec says: "High-risk actions (`risk ∈ {high,
+irreversible}`, `side_effect ∈ {gui_mutation, system_mutation}`
+when policy demands confirmation) require a deterministic
+policy gate; the LLM cannot bypass it." The exact gate, the
+LLM-bypass attempt detection, and the token protocol are
+deferred.
+
+**Contract.**
+
+- Confirmation MUST be required when:
+  - `action.risk ∈ {high, irreversible}`, OR
+  - `action.side_effect ∈ {gui_mutation, system_mutation}` AND
+    the active profile declares a confirmation requirement.
+- The gate MUST be **deterministic**: the same `(action,
+  profile, policy)` triple MUST produce the same confirmation
+  decision every time, regardless of LLM output.
+- **The confirmation gate lives at the executor boundary, NOT
+  in the planner.** The planner emits the plan; the executor
+  (or a dedicated `confirmation.py` module called by the
+  executor) enforces the gate before dispatch. This means the
+  LLM cannot bypass confirmation by emitting a different
+  `action_id`, omitting `requires`, or claiming "confirmed" in
+  the plan payload — the executor is the trust boundary, and
+  the plan payload is untrusted input to it.
+- The LLM MUST NOT bypass the gate by:
+  - Emitting a different `action_id` with the same effect
+    (catalog + dispatch MUST reject this with `unknown_action_id`
+    or `backend_disabled`).
+  - Omitting `requires` (dispatcher rejects with `precondition_failed`).
+  - Claiming "confirmed" in the plan payload (the plan payload
+    MUST NOT carry a confirmation field; the calling system
+    supplies it out-of-band).
+- When confirmation is required and missing, the planner
+  MUST return `code = "confirmation_required"` with the
+  `action_id`. The plan MUST NOT be dispatched.
+
+**Non-goals.**
+
+- The token protocol (HMAC, signed nonce, capability token) is
+  a P3.1 implementation choice. The contract is the existence
+  of an out-of-band token, not the protocol.
+- The profile-level policy is free (P3.1 may have a single
+  default policy or multiple profile policies).
+
+**Implementation freedom.**
+
+- The policy may be a static map, a config file, or a
+  registered capability. P3.1 picks.
+- The token may be opaque or structured. P3.1 picks.
+
+**Migration impact.**
+
+- Existing dispatcher codes (`unknown_action_id`,
+  `precondition_failed`) are reused. P3.1 does NOT add a
+  duplicate rejection path.
+- Existing HiSec `expected_process_name` checks are unchanged.
+
+---
+
+### D15. Prompt sanitisation contract (re-stating D6 in P3 context)
+
+**Problem.**
+
+D6 (P2.5) established that prompt sanitisation is
+transport-specific. P3.1 introduces a new transport (the
+LLM prompt) and needs the boundary spelled out concretely.
+
+**Contract.**
+
+- All values flowing into the planner prompt (system + user
+  messages) MUST be treated as untrusted, regardless of source:
+  - live target snapshot fields (`window_title`, `control_text`,
+    `process_name`)
+  - replayed trace fields (case_id, target, profile, history)
+  - user-supplied case descriptions / comments
+- Encoding MUST match the prompt transport:
+  - Markdown-table-cell prompts → reuse `escape_markdown` (P2.4.D).
+  - JSON-string prompts → use `json.dumps` (built-in escape).
+  - Structured-output-schema prompts → no extra escape needed
+    (LLM provider's JSON parser handles strings).
+  - Plain-text prompts → a transport-specific escaper in P3.1.
+- Renderer-generated structure (table separators, fixed
+  headings, action descriptions from the catalog, status
+  enums) MUST NOT be escaped — same boundary rule as
+  `trace.md`.
+- **Trust boundaries are NOT merged**: prompt sanitisation
+  (planner surface, per D15), markdown escape (trace.md
+  rendering, P2.4.D `escape_markdown`), and trace render
+  escape (P1.4 internal use) are three distinct trust
+  boundaries. A single helper that "does all escaping" is a
+  reject; per-boundary encoders are required. They MAY share
+  a common low-level primitive (e.g. the per-transport
+  encoding table) but the entry points MUST be separate so
+  that future P3.2 metrics or P4 prompts do not accidentally
+  reuse the wrong encoder.
+
+**Non-goals.**
+
+- P3.1 does NOT introduce a new universal escaper. Each
+  transport has its own.
+- P3.1 does NOT change `escape_markdown`.
+
+**Implementation freedom.**
+
+- A new `prompt_sanitize(value, transport)` helper is a valid
+  P3.1 addition. Or per-transport inline encoding is also
+  valid.
+- The audit (zero secret matches in any rendered prompt)
+  is the contract; the mechanism is free.
+
+**Migration impact.**
+
+- None. `escape_markdown` is unchanged.
+
+---
+
+### D16. Persistence + sanitisation contract
+
+**Problem.**
+
+P3.1's spec calls for `persist_plan_created` with "sanitized
+args (no secret arguments, no full selector text if it matches
+a redaction rule)". The sanitisation contract (which layer
+runs) and the audit contract are deferred.
+
+**Contract.**
+
+- Persisted plan events (`plan_created`, `plan_validated`,
+  `plan_rejected`, `replan_created`) MUST run their payload
+  through `RedactionRegistry.apply_text` BEFORE persistence.
+- The audit that P2.4 acceptance #4-5 requires (zero secret
+  matches across a trace directory) MUST continue to hold
+  after P3.1 lands.
+- Persisted plan events MUST be in the trace chain (P1.3)
+  and participate in the integrity chain — not in a side
+  channel.
+- **Event schema versioning**: planner-emitted events MUST
+  carry an explicit `schema_version` field. Initial values:
+  - `plan_created.v1`
+  - `plan_validated.v1`
+  - `plan_rejected.v1`
+  - `replan_created.v1` (carries `replan_id` from D13)
+  A version bump is a major break (architecture §7.2): future
+  P3.2 / P4 readers MUST be able to identify the event's
+  schema version and reject events whose version they don't
+  recognise. The P3.1 implementation records the migration
+  strategy.
+
+**Non-goals.**
+
+- The specific redaction rules are P3.1's choice (existing
+  P1.4 rules are the baseline; new rules may be added).
+- The persistence module name (`persist.py` vs another) is
+  free.
+
+**Implementation freedom.**
+
+- Reusing P1.4's `RedactionRegistry` directly is valid.
+- Building a planner-specific wrapper is also valid (must
+  call the same registry underneath).
+
+**Migration impact.**
+
+- P1.3 trace chain unchanged.
+- P1.4 redaction registry unchanged.
+- P2.4 metrics audit contract extends to planner events.
+
+---
+
+## Open Decisions From P2.5 Inherited
+
+P2.5 closed with three contracts pending option selection.
+P3.1 inherits the contracts but the option selection is P3.1's
+job:
+
+| P2.5 ID | Inherited by P3.1 | P3.1 review notes |
+|---------|--------------------|-------------------|
+| D1 (id format) | Yes — schema field types compatible | **Inherited; option chosen at P3.1 implementation review** (D11 references it) |
+| D3 (screenshot_bytes) | Yes — D11 / D14 inherit raw bytes contract | **Inherited; module chosen at P3.1 implementation review** (D11 uses snapshot_ref; no bytes in prompt) |
+| D4 (transport threshold) | Yes — D15 applies if image goes in prompt | **Inherited; threshold value recorded at P3.1 implementation review** (default 1 MiB post-encoding per D4) |
+
+These three contracts apply unchanged; P3.1's review records
+which implementation choice was made.
+
+---
+
+## Functional Requirements (P3.1 itself)
+
+This checkpoint has **no code-level functional requirements**
+for itself. P3.1 implementation's FR-P3.1-01..10 remain as
+defined in `P3-llm-evaluation.md`. P3.1 design gate's purpose
+is to lock the design contracts (D11..D16) BEFORE the
+implementation begins, so the implementation has stable
+targets.
+
+---
+
+## Acceptance Criteria (reviewer-side, P3.1 design gate)
+
+P3.1 design gate ships no code; the "tests" are reviewer
+approvals:
+
+1. Each D item has the 5-part structure (Problem / Contract /
+   Non-Goals / Implementation Freedom / Migration Impact).
+2. Contract vs implementation is separated (no "use module X"
+   wording in any D item).
+3. D11..D16 contracts cover the P3.1 spec surfaces that were
+   deferred (schema, validation, replan, confirmation,
+   sanitisation, persistence).
+4. D1 / D3 / D4 from P2.5 are inherited unchanged with P3.1
+   review notes appended.
+5. No D item re-implements a P0..P2.x contract without an
+   explicit migration-impact note.
+
+P3.1 design gate closes when all 5 criteria hold AND the
+reviewer signs off each D item (or formally defers each with
+owner + target milestone).
+
+### P3.1 design gate exit condition
+
+```
+P3.1 design gate closes when:
+- D11..D16 each have final state (resolved OR deferred)
+- Inherited D1 / D3 / D4 contracts carry P3.1 review notes
+- P3.1 implementation has no unresolved contract dependency
+- Reviewer signs off the design package as a whole
+```
+
+Until the exit condition holds, P3.1 implementation may NOT
+begin. P3.1 implementation produces its own review package
+that records the option choices (D1 / D3 / D4) made in code.
+
+---
+
+## Required Tests
+
+| Test | Purpose |
+|------|---------|
+| `none` | P3.1 design gate ships no code, no tests. |
+
+The "test" is reviewer approval of D11..D16.
+
+---
+
+## Deliverables
+
+- `docs/requirements/P3-1-design-gate.md` (this file).
+- `docs/requirements/DECISIONS.md` — append new D11..D16 rows.
+- `docs/requirements/CHANGELOG-P3-1.md` — checkpoint status.
+- Update `docs/requirements/P3-llm-evaluation.md` Status block.
+
+---
+
+## Review Stop Point
+
+Stop after the reviewer has:
+
+1. read this document,
+2. confirmed each D11..D16 item satisfies the 5-part structure,
+3. signed off on each D item's contract (or formally deferred
+   with owner + target milestone),
+4. confirmed the P3.1 implementation scope is unaffected by
+   any unresolved contract.
+
+After approval, **P3.1 implementation** may begin. P3.1
+implementation produces its own review package that records:
+
+- the option chosen for D1 (id format),
+- the module chosen for D3 (screenshot_bytes location),
+- the threshold value chosen for D4 (transport),
+- D11..D16 implementation details.
+
+This checkpoint is a **paper gate**. It produces no code, no
+tests, no commits beyond the docs above.
+
+---
+
+## P3.1 Design Gate Closed
+
+P3.1 design gate closes on this revision. **P3.1
+implementation** may begin. P3.1 implementation produces its
+own review package that records:
+
+- the option chosen for D1 (id format),
+- the module chosen for D3 (screenshot_bytes location),
+- the threshold value chosen for D4 (transport),
+- D11..D16 implementation details + review round findings.
+
+The next gate is **P3.1 implementation review**, not direct
+implementation.
+
+This file remains the audit trail for the gate; future
+checkpoints that surface deferred decisions MAY add new D
+items here but MUST NOT revise already-locked contracts
+without a fresh reviewer round.
+
+---
+
+## Status Of Existing Code (Reused / Carried Forward)
+
+| Area | Reusable in P3.1 |
+|------|------------------|
+| P0.1 catalog + capability index | Yes — D11 / D12 inherit `enabled_actions_for` contract |
+| P0.2 wire models + validator | Yes — D11 derives schema from P0.2 dataclasses; D12 reuses DAG cycle detection |
+| P0.3 snapshot + target identity | Yes — D12 uses `target_ref.snapshot_id` |
+| P1.1 dispatcher codes | Yes — D12 reuses `unknown_action_id`, `backend_disabled`, `precondition_failed` |
+| P1.3 trace events (`plan_created`, `replan_created`) | Yes — D13 / D16 reuse event envelope |
+| P1.4 redaction registry | Yes — D16 uses `apply_text` before persistence |
+| P2.4 limits | Yes — D13 bound is recorded in trace via limits |
+| P2.4.D markdown escape | Yes — D15 reuses `escape_markdown` for Markdown transport |
+| P2.5 contracts D1 / D3 / D4 | Yes — inherited unchanged |
+
+No P0..P2.x code is modified by P3.1 design gate.
+
+---
+
+## Reviewer Approval Log
+
+Append-only. Each entry records who closed which round of
+the gate, when, and which commit/version was approved.
+
+### Round 1 — APPROVED WITH MINOR NOTES
+
+- **Date**: 2026-08-02 (per P3.1 round 1 review log)
+- **Reviewer verdict**: ✅ APPROVED WITH MINOR NOTES
+- **Minor notes addressed in this revision**:
+  - **D11**: added `schema_version` field + migration strategy
+    note for future bumps.
+  - **D12**: rewritten to "all 5 stages MUST pass" instead of
+    "exact order" so future parallel validation is not
+    foreclosed.
+  - **D13**: added `replan_id` requirement + run_id / step_id
+    / replan_id / event_id hierarchy for trace correlation.
+  - **D14**: confirmed the confirmation gate lives at the
+    **executor boundary, not in the planner**.
+  - **D15**: explicitly stated that prompt sanitisation,
+    markdown escape, and trace render escape are three
+    distinct trust boundaries; a "do all escaping" helper is
+    a reject.
+  - **D16**: added per-event `schema_version` field
+    (`plan_created.v1`, `plan_validated.v1`,
+    `plan_rejected.v1`, `replan_created.v1`).
+- **Approved commit**: `1a5ffa0 docs(requirements): P3.1
+  design review gate (paper-only)` — APPROVED.
+- **Polish commit**: `6999de6 docs(requirements): add P2
+  retrospective` — APPROVED.
+
+---
+
+## Final Verdict
+
+```
+P3.1 — Design Review Gate (Pre-Implementation)
+
+Status: APPROVED (round 1; minor notes addressed)
+Implementation: NONE (docs only)
+Tests: NONE (paper gate)
+Decision items: D11..D16 (6 P3.1-specific deferred decisions)
+                  Plus 3 inherited from P2.5 (D1 / D3 / D4)
+                  All written in contract form (5-part structure)
+```
+
+Reviewer action items:
+
+1. Read D11..D16.
+2. Verify each has the 5-part structure.
+3. Confirm contracts (not implementations) describe the locked
+   behaviour.
+4. Confirm the 3 P2.5 inherited contracts (D1 / D3 / D4) carry
+   P3.1 review notes.
+5. Sign off the design package, or send Request Changes with
+   specific D items to revise.
