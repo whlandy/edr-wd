@@ -1,0 +1,1 @@
+"""P3.2 — Evaluation harness (datasets, runner, metrics, thresholds, CI gate)."""
