@@ -453,18 +453,23 @@ implementation's job.
 ## P3.2 Design Gate Closure
 
 - **2026-08-04 round 1** — ⚠️ CHANGES REQUESTED.
-- **2026-08-04 round 2** — ⏳ pending reviewer sign-off.
+- **2026-08-04 round 2** — ✅ APPROVED.
 - Round 2 addresses all 3 blockers (B0 D22 rewritten with
   determinism classes; B1 D20 separated ungated status; B2
   D21 sanitised expected/observed) and all 3 minors (M3 D19
   component + lifecycle; M4 D17 mutation policy; M5
   `evaluation_completeness_rate` added; M6 D23 taxonomy
   added).
-- Gate remains paper-only: no code, no tests, no runtime
-  changes.
-- **Next**: P3.2 implementation may begin once this gate
-  closes AND P3.2 implementation produces its own review
-  package that records the option choices (metric formulas,
-  threshold values, CI exit semantics, digest hash function,
-  model fingerprint scheme, stage → determinism class
-  mapping) made in code.
+- One non-blocking observation carried to implementation
+  phase: reviewer suggested P3.2 implementation add an
+  Efficiency cross-cutting metric (e.g.
+  `screenshot_cost_per_task` or `planner_latency_cost`) so
+  the cross-cutting suite spans 4 of 4 categories. This is
+  an implementation-phase observation, NOT a design-gate
+  requirement.
+- Gate closed 2026-08-04.
+- **Next**: P3.2 implementation may begin once it produces
+  its own review package that records the option choices
+  (metric formulas, threshold values, CI exit semantics,
+  digest hash function, model fingerprint scheme, stage →
+  determinism class mapping) made in code.

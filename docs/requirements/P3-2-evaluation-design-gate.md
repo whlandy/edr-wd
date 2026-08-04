@@ -7,10 +7,10 @@
   §21 Metrics; `../requirements/P3-llm-evaluation.md` §"Checkpoint P3.2";
   `../requirements/P3-1-design-gate.md` (predecessor gate).
 - **Mapped checkpoints**: gate before **P3.2 implementation** begins.
-- **Completion state**: **DRAFT — round 2** (round 1 = CHANGES REQUESTED;
-  see "Reviewer Approval Log" below).
+- **Completion state**: **APPROVED** (round 2; see "Reviewer Approval Log"
+  below). Implementation may begin.
 - **Round 1 reviewer verdict**: ⚠️ CHANGES REQUESTED (3 blockers, 3 minors).
-- **Round 2 reviewer verdict**: ⏳ pending.
+- **Round 2 reviewer verdict**: ✅ APPROVED.
 - **Milestone**: this gate exists to lock the **evaluation and
   metrics contracts** that P3.2 must satisfy BEFORE any code lands.
 
@@ -839,11 +839,69 @@ without a fresh reviewer round.
 - **Disposition**: Round 2 review required after all
   blockers and minors are addressed.
 
-### Round 2 — DRAFT
+### Round 2 — APPROVED (2026-08-04)
 
-- **Reviewer**: ⏳ pending
-- **Verdict**: ⏳ pending
-- **Notes**: ⏳ pending
+- **Reviewer verdict**: ✅ APPROVED.
+- **Blocker disposition**:
+  - B0 D22 determinism classes — APPROVED.
+  - B1 D20 ungated status separation — APPROVED.
+  - B2 D21 sanitised expected/observed — APPROVED.
+- **Minor disposition**:
+  - M3 D19 owner = component + lifecycle — APPROVED.
+  - M4 D17 mutation policy — APPROVED.
+  - M5 cross-cutting coverage metric — APPROVED.
+  - M6 D23 taxonomy — APPROVED.
+- **Non-blocking observation** (carried to implementation
+  phase, NOT to design gate): D23 currently has
+  cross-cutting metrics spanning 3 of 4 categories
+  (Quality × 3, Behaviour × 1, Coverage × 1, Efficiency × 0).
+  The reviewer noted this is acceptable per the gate's "≥3
+  categories" rule, but suggested P3.2 implementation add an
+  Efficiency cross-cutting metric (e.g.
+  `screenshot_cost_per_task` or `planner_latency_cost`). This
+  observation is recorded for the implementation review, not
+  the gate.
+- **Disposition**: Gate closed. P3.2 implementation may begin.
+
+---
+
+## Reviewer Final Note
+
+> "Round 2 已经把设计从「implementation preference」收敛
+> 到「behavioral contract」。可以进入
+> `feature/p3-2-evaluation` implementation。"
+>
+> — Reviewer, 2026-08-04
+
+---
+
+## P3.2 Design Gate Closed (2026-08-04)
+
+P3.2 design gate closes on this revision. **P3.2
+implementation** may begin. P3.2 implementation produces its
+own review package that records the option choices made in
+code:
+
+- The exact metric formulas chosen for the cross-cutting
+  metrics (D19 implementation freedom).
+- The exact threshold values chosen (D20 implementation
+  freedom).
+- The exact CI gate CLI exit semantics (D21 implementation
+  freedom).
+- The exact digest hash function (D22 implementation
+  freedom).
+- The exact model artifact fingerprint scheme (D22
+  implementation freedom).
+- The exact stage → determinism class mapping (D22
+  implementation freedom).
+
+The next gate is **P3.2 implementation review**, not direct
+implementation.
+
+This file remains the audit trail for the gate; future
+checkpoints that surface deferred decisions MAY add new D
+items here but MUST NOT revise already-locked contracts
+without a fresh reviewer round.
 
 ---
 

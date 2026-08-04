@@ -3,8 +3,8 @@
 ## Status
 
 - **Round 1**: ⚠️ CHANGES REQUESTED (3 blockers, 3 minors).
-- **Round 2**: ⏳ pending reviewer sign-off.
-- **Verdict (current)**: ⏳ pending.
+- **Round 2**: ✅ APPROVED (gate closed 2026-08-04).
+- **Verdict (current)**: ✅ APPROVED.
 - **Code written**: 0
 - **Tests added**: 0
 - **Branch**: `feature/p3-2-design`
