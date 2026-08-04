@@ -59,6 +59,13 @@ from protocol_models import (
     TestCase,
 )
 
+from .confirmation import (
+    ConfirmationDecision,
+    ConfirmationGate,
+    ConfirmationReason,
+    ExecutionContext,
+)
+
 from .expectations import (
     EVALUATORS_NOT_AVAILABLE,
     EXPECTATION_REGISTRY,
@@ -149,6 +156,8 @@ class AtomicExecutor:
         expectations: Mapping[str, Callable[..., ExpectationResult]]
             | None = None,
         config: ExecutorConfig | None = None,
+        confirmation_gate: ConfirmationGate | None = None,
+        risk_lookup: Callable[[str], tuple[str, str]] | None = None,
     ) -> None:
         self._dispatch = dispatch
         self._observations = observation_provider
@@ -161,6 +170,20 @@ class AtomicExecutor:
                 k: v for k, v in self._expectations.items()
                 if k != "visual_evidence_captured"
             }
+        # P3.1.E.B — confirmation boundary at the executor.
+        # The gate is OPTIONAL: when not wired, the executor
+        # behaves as before (no confirmation check). When wired,
+        # the gate runs before every dispatch.
+        self._confirmation_gate: ConfirmationGate | None = (
+            confirmation_gate
+        )
+        # risk_lookup: action_id -> (risk, side_effect).
+        # When None, the gate (if any) treats all actions as
+        # risk="low", side_effect="none" (no confirmation needed).
+        self._risk_lookup: Callable[[str], tuple[str, str]] = (
+            risk_lookup
+            or (lambda _action_id: ("low", "none"))
+        )
 
     # -----------------------------------------------------------------
     # Public API
@@ -172,13 +195,21 @@ class AtomicExecutor:
         *,
         target_selector: str = "",
         step_results_path: Path | None = None,
+        execution_context: ExecutionContext | None = None,
     ) -> CaseRunResult:
         """Execute every step in `case.steps`.
 
         Writes `step-results.json` to `step_results_path` after each
         step when provided (FR-P1.2-06). Backend availability is
         probed once; if unavailable, every step becomes `blocked`
-        (FR-P1.2-04)."""
+        (FR-P1.2-04).
+
+        `execution_context` carries profile + confirmation tokens
+        (P3.1.E.B). When the executor is configured with a
+        `confirmation_gate`, the context is required for steps
+        with risk/side_effect that triggers the gate. When the
+        context is None, the executor uses a default context
+        with profile="default" and no tokens."""
 
         started = _utcnow_iso()
         start_perf = time.perf_counter()
@@ -189,6 +220,11 @@ class AtomicExecutor:
         step_results: list[StepResult] = []
         aborted = False
         abort_reason = ""
+        # P3.1.E.B — execution context (profile + tokens).
+        # Stash on the executor so run_step() can read it.
+        self._execution_context: ExecutionContext = (
+            execution_context or ExecutionContext()
+        )
 
         if backend_unavailable:
             for step in steps:
@@ -337,6 +373,38 @@ class AtomicExecutor:
 
         # 3. OBSERVING -> PREPARING_STEP. Skip CAPTURING_BEFORE if no policy.
         state = next_state(state, StepState.PREPARING_STEP)
+
+        # P3.1.E.B — confirmation boundary (D14).
+        # The gate is OPTIONAL. When wired, it runs BEFORE
+        # EXECUTING. A required decision yields a blocked step
+        # with code="confirmation_required" + action_id, and
+        # the dispatcher is NEVER called (per D14: plan MUST
+        # NOT be dispatched).
+        if self._confirmation_gate is not None:
+            risk, side_effect = self._risk_lookup(step.action_id)
+            decision: ConfirmationDecision = (
+                self._confirmation_gate.check(
+                    action_id=step.action_id,
+                    risk=risk,
+                    side_effect=side_effect,
+                    context=self._execution_context,
+                )
+            )
+            if decision.required:
+                ended = _utcnow_iso()
+                return self._finalise_blocked(
+                    step, started, ended, start_perf,
+                    error_payload={
+                        "code": decision.reject_code,
+                        "action_id": decision.action_id,
+                        "reason": decision.reason.value,
+                        "risk": decision.risk,
+                        "side_effect": decision.side_effect,
+                        "profile": decision.profile,
+                    },
+                    transition_expected=transition_expected,
+                )
+
         skip_before = (
             transition_expected
             or step.evidence is None
