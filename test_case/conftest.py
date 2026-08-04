@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +26,124 @@ import pytest
 
 from agent.target_config import TargetConfig
 from agent.subagent import TargetSubAgentPool
+from agent.e2e_report import (
+    E2EEvidenceLifecycle,
+    create_run_dir,
+    sanitise_trace_value,
+    write_report,
+)
+
+
+_E2E_RUN: Optional[dict] = None
+
+
+def pytest_configure(config) -> None:
+    """Create an agent-local report directory whenever E2E is selected."""
+    global _E2E_RUN
+    markexpr = str(getattr(config.option, "markexpr", "") or "")
+    if "e2e" not in markexpr:
+        return
+    target = os.environ.get("EDR_WD_TARGET", "default")
+    run_dir = create_run_dir(target)
+    _E2E_RUN = {
+        "run_dir": run_dir,
+        "target": target,
+        "started_at": datetime.now().astimezone().isoformat(),
+        "tests": {},
+        "screenshots": [],
+        "evidence_steps": [],
+        "operation_trace": [],
+    }
+    config._edr_e2e_run_dir = run_dir
+    print(f"EDR-WD E2E report: {run_dir}")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if _E2E_RUN is None or report.when not in {"setup", "call"}:
+        return
+    # A setup skip has no call report; otherwise the call phase is definitive.
+    if report.when == "setup" and not report.skipped:
+        return
+    status = "passed" if report.passed else "failed" if report.failed else "skipped"
+    reason = ""
+    if report.skipped:
+        reason = str(report.longrepr[2] if isinstance(report.longrepr, tuple) else report.longrepr)
+    elif report.failed:
+        reason = str(report.longrepr)
+    _E2E_RUN["tests"][report.nodeid] = {
+        "nodeid": report.nodeid,
+        "outcome": status,
+        "duration_seconds": report.duration,
+        "reason": reason,
+    }
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    if _E2E_RUN is None:
+        return
+    tests = list(_E2E_RUN["tests"].values())
+    summary = {
+        outcome: sum(test["outcome"] == outcome for test in tests)
+        for outcome in ("passed", "failed", "skipped")
+    }
+    report = {
+        "schema_version": "edr-wd.e2e-report.v1",
+        "target": _E2E_RUN["target"],
+        "started_at": _E2E_RUN["started_at"],
+        "finished_at": datetime.now().astimezone().isoformat(),
+        "pytest_exit_status": int(exitstatus),
+        "summary": summary,
+        "tests": tests,
+        "screenshots": _E2E_RUN["screenshots"],
+        "evidence_steps": _E2E_RUN["evidence_steps"],
+        "operation_trace": _E2E_RUN["operation_trace"],
+    }
+    write_report(_E2E_RUN["run_dir"], report)
+    print(f"EDR-WD E2E report written: {_E2E_RUN['run_dir'] / 'report.md'}")
+
+
+@pytest.fixture(scope="session")
+def e2e_report_run_dir() -> Path:
+    if _E2E_RUN is None:
+        pytest.fail("e2e_report_run_dir requires pytest -m e2e")
+    return _E2E_RUN["run_dir"]
+
+
+def record_e2e_screenshot(metadata: dict) -> None:
+    if _E2E_RUN is None:
+        raise RuntimeError("no active E2E report")
+    _E2E_RUN["screenshots"].append(metadata)
+
+
+def _record_operation_trace(
+    *, name: str, arguments: dict, result: dict, started_at: str, duration_ms: int
+) -> int | None:
+    if _E2E_RUN is None:
+        return None
+    entries = _E2E_RUN["operation_trace"]
+    entries.append({
+        "sequence": len(entries) + 1,
+        "started_at": started_at,
+        "duration_ms": duration_ms,
+        "tool": name,
+        "arguments": sanitise_trace_value(arguments),
+        "result": sanitise_trace_value(result),
+    })
+    return len(entries)
+
+
+@pytest.fixture(scope="module")
+def e2e_evidence_lifecycle(e2e_report_run_dir) -> E2EEvidenceLifecycle:
+    if _E2E_RUN is None:
+        pytest.fail("e2e_evidence_lifecycle requires pytest -m e2e")
+    return E2EEvidenceLifecycle(
+        e2e_report_run_dir,
+        screenshot_sink=_E2E_RUN["screenshots"].append,
+        step_sink=_E2E_RUN["evidence_steps"].append,
+    )
 
 
 def pytest_collection_modifyitems(items) -> None:
@@ -144,6 +263,7 @@ class McpClient:
 
         self._session_id: Optional[str] = None
         self._base_url: Optional[str] = None
+        self._last_operation_sequence: Optional[int] = None
         # Fixed HTTP/1.1 transport: httpx streaming request path caused unstable SSE
         # handling with FastMCP; switch to regular POST + HTTP/1.1 transport.
         self._client = httpx.Client(
@@ -177,6 +297,10 @@ class McpClient:
     @property
     def mcp_url(self) -> str:
         return self._base_url or ""
+
+    @property
+    def last_operation_sequence(self) -> Optional[int]:
+        return self._last_operation_sequence
 
     def close(self):
         self._client.close()
@@ -244,21 +368,35 @@ class McpClient:
         return self._do_req("tools/list")
 
     def call_tool(self, name: str, arguments: dict = None) -> dict:
+        trace_started = datetime.now().astimezone().isoformat()
+        trace_perf = time.perf_counter()
         result = self._do_req("tools/call", {
             "name": name,
             "arguments": arguments or {},
         })
+        parsed = result
         if "result" in result:
             data = result["result"]
             if isinstance(data, dict) and "content" in data:
                 for block in data["content"]:
                     if block.get("type") == "text":
                         try:
-                            return json.loads(block["text"])
+                            parsed = json.loads(block["text"])
                         except Exception:
-                            return {"ok": False, "raw": block["text"]}
-            return data
-        return result
+                            parsed = {"ok": False, "raw": block["text"]}
+                        break
+                else:
+                    parsed = data
+            else:
+                parsed = data
+        self._last_operation_sequence = _record_operation_trace(
+            name=name,
+            arguments=arguments or {},
+            result=parsed,
+            started_at=trace_started,
+            duration_ms=round((time.perf_counter() - trace_perf) * 1000),
+        )
+        return parsed
 
 
 def live_mcp_client_or_skip() -> McpClient:

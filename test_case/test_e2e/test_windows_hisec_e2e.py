@@ -9,10 +9,12 @@ test_windows_hisec_e2e.py — Windows HiSec EDR 端到端测试。
   5. wait_window(process_name="EDRClient.exe")      # 等待目标窗口出现
   6. is_window_open 检测两个窗口都在桌面上
   7. connect(process_name="EDRClient.exe")          # 连接到目标窗口
-  8. dump_tree()                                   # 枚举控件树
-  9. screenshot()                                   # 截图
-  10. restore_edr()                                 # 还原窗口（如最小化）
-  11. is_window_open(process_name="EDRClient.exe")  # 再次验证
+  8. dump_tree()                                    # 枚举控件树
+  9. restore_edr()                                  # 还原窗口（如最小化）
+  10. is_window_open(process_name="EDRClient.exe")  # 再次验证
+
+截图由 E2EEvidenceLifecycle 自动处理：INIT 拍 baseline，每个变更动作
+拍 after，下一步的 before 引用上一步 after，不在测试中显式调用 screenshot。
 
 前置条件：
   - Windows 目标机已有已登录的本地/RDP 桌面会话
@@ -63,17 +65,32 @@ def windows_backend(client, tools):
 class TestWindowsHisecE2E:
     """完整 EDR GUI 自动化工作流"""
 
-    def test_0_check_edr_already_open(self, client, windows_backend):
+    def test_0_check_edr_already_open(
+        self, client, windows_backend, e2e_evidence_lifecycle
+    ):
         """Step 0: 检查 EDR 窗口是否已打开"""
         result = client.call_tool("is_window_open", {"process_name": "EDRClient.exe"})
         print(f"\n[Step0 is_window_open] found={result.get('found')}, count={result.get('count')}")
         print(f"  windows: {result.get('windows', [])}")
         # 不强制要求已打开，只记录状态
         assert result.get("ok") is True
+        if result.get("found") is True:
+            e2e_evidence_lifecycle.initialize(
+                client, process_name="EDRClient.exe"
+            )
 
-    def test_1_open_hisec_agent_entry_window(self, client, windows_backend):
+    def test_1_open_hisec_agent_entry_window(
+        self, client, windows_backend, e2e_evidence_lifecycle
+    ):
         """Step 1: 通过 activate_edr 预热入口窗口，避免依赖 PowerShell"""
-        result = client.call_tool("activate_edr", {"wait": True, "timeout": 15.0})
+        result = e2e_evidence_lifecycle.run_action(
+            client,
+            step_id="001-open-hisec-agent",
+            tool="activate_edr",
+            arguments={"wait": True, "timeout": 15.0},
+            before_process_name="EDRClient.exe",
+            after_process_name="HisecEndpointAgent.exe",
+        )
         print(f"\n[Step1 activate window pair] {result}")
         assert result.get("ok") is True, f"activate_edr failed while opening HisecEndpointAgent: {result}"
         main = result.get("main", {})
@@ -90,9 +107,18 @@ class TestWindowsHisecE2E:
         assert result.get("ok") is not False, f"wait_window failed: {result}"
         assert result.get("found") is True, "HisecEndpointAgent.exe desktop window not found"
 
-    def test_3_activate_edr(self, client, windows_backend):
+    def test_3_activate_edr(
+        self, client, windows_backend, e2e_evidence_lifecycle
+    ):
         """Step 1: 激活 EDR（启动或唤醒窗口）"""
-        result = client.call_tool("activate_edr", {"wait": True, "timeout": 15.0})
+        result = e2e_evidence_lifecycle.run_action(
+            client,
+            step_id="002-activate-edr-client",
+            tool="activate_edr",
+            arguments={"wait": True, "timeout": 15.0},
+            before_process_name="HisecEndpointAgent.exe",
+            after_process_name="EDRClient.exe",
+        )
         print(f"\n[Step3 activate_edr] {result}")
         assert result.get("ok") is True, f"activate_edr failed: {result}"
         # 具体窗口是否出现在桌面上由后续 wait_window/is_window_open 验证。
@@ -126,14 +152,14 @@ class TestWindowsHisecE2E:
             f"EDRClient.exe desktop window not found: {edr}"
         )
 
-    def test_6_connect(self, client, windows_backend):
-        """Step 3: 连接到 EDR 窗口"""
+    def test_6_connect_edr_client(self, client, windows_backend):
+        """连接到 EDRClient 窗口。"""
         result = client.call_tool("connect", {"process_name": "EDRClient.exe", "timeout": 10.0})
-        print(f"\n[Step6 connect] {result}")
+        print(f"\n[Step6 connect EDRClient] {result}")
         assert result.get("ok") is True, f"connect failed: {result}"
 
     def test_7_dump_tree(self, client, windows_backend):
-        """Step 4: 导出控件树"""
+        """导出 EDRClient 控件树。"""
         result = client.call_tool("dump_tree", {"max_depth": 10})
         print(f"\n[Step7 dump_tree] ok={result.get('ok')}")
         assert result.get("ok") is True, f"dump_tree failed: {result}"
@@ -147,16 +173,19 @@ class TestWindowsHisecE2E:
         # 断言有控件（EDR 窗口不可能控件树为空）
         assert len(controls) > 0, "EDR window control tree is empty"
 
-    def test_8_screenshot(self, client, windows_backend):
-        """Step 5: 截图"""
-        result = client.call_tool("screenshot", {})
-        print(f"\n[Step8 screenshot] ok={result.get('ok')}, has_data={'image' in result or 'path' in result}")
-        assert result.get("ok") is True, f"screenshot failed: {result}"
-
-    def test_9_restore_edr(self, client, windows_backend):
+    def test_8_restore_edr(
+        self, client, windows_backend, e2e_evidence_lifecycle
+    ):
         """Step 6: 还原 EDR 窗口（如最小化）"""
-        result = client.call_tool("restore_edr", {})
-        print(f"\n[Step9 restore_edr] {result}")
+        result = e2e_evidence_lifecycle.run_action(
+            client,
+            step_id="003-restore-edr-client",
+            tool="restore_edr",
+            arguments={},
+            before_process_name="EDRClient.exe",
+            after_process_name="EDRClient.exe",
+        )
+        print(f"\n[Step8 restore_edr] {result}")
         # restore_edr 需要先 connect，所以可能失败
         # 这里只要连接成功，就要求返回结构完整
         assert "ok" in result
@@ -165,9 +194,9 @@ class TestWindowsHisecE2E:
             assert isinstance(rect, dict), f"restore_edr missing rectangle: {result}"
             assert all(k in rect for k in ("x", "y", "w", "h")), f"restore_edr rectangle incomplete: {result}"
 
-    def test_10_verify_still_open(self, client, windows_backend):
+    def test_9_verify_still_open(self, client, windows_backend):
         """Step 7: 操作后再次验证窗口仍打开"""
         result = client.call_tool("is_window_open", {"process_name": "EDRClient.exe"})
-        print(f"\n[Step10 is_window_open after ops] {result}")
+        print(f"\n[Step9 is_window_open after ops] {result}")
         assert result.get("ok") is True
         assert result.get("found") is True, "EDR window disappeared after operations"

@@ -41,6 +41,8 @@ Thumbs.db
 
 # Test
 .pytest_cache/
+artifacts/
+result-report/
 
 # Local scratch copies; runtime target scripts belong under target/scripts/
 scripts/macos/
