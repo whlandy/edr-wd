@@ -10,7 +10,7 @@ Layering:
     agent/trace             — events, evidence, projections
     agent/planner           — THIS package (P3.1)
 
-Public re-exports (P3.1 Commit A + B + C + D + F):
+Public re-exports (P3.1 Commit A + B + C + D + F + G):
 
   * `enabled_actions_for` / `planner_tool_list` —
     planner-side catalog view (Commit A).
@@ -26,9 +26,10 @@ Public re-exports (P3.1 Commit A + B + C + D + F):
   * `needs_replan` / `ReplanBudget` / `ReplanDecision` /
     `ReplanBudgetError` / `check_replan_budget` —
     replan trigger and bound (Commit F).
-
-Subsequent P3.1 commit (G = prompt) will add to this
-surface.
+  * `PromptTransport` / `render_prompt` /
+    `render_system_prompt` / `render_user_prompt` /
+    `RenderedPrompt` / `hash_prompt` / `audit_prompt` —
+    planner prompt + per-transport sanitisation (Commit G).
 
 Note: Commit E (confirmation) lives in
 `agent.execution.confirmation` per the D14 contract that
@@ -79,6 +80,16 @@ from .post_step import (
     check_replan_budget,
     generate_replan_id,
     needs_replan,
+)
+from .prompt import (
+    PLANNER_PROMPT_TEMPLATE_VERSION,
+    PromptTransport,
+    RenderedPrompt,
+    audit_prompt,
+    hash_prompt,
+    render_prompt,
+    render_system_prompt,
+    render_user_prompt,
 )
 from .schema import (
     LLMPlanRequest,
@@ -136,4 +147,13 @@ __all__ = [
     "REPLAN_REASON_STALE_SNAPSHOT",
     "REPLAN_REASON_NO_PREVIOUS_STEP",
     "REPLAN_REASON_NO_REPLAN_NEEDED",
+    # prompt (G)
+    "PromptTransport",
+    "RenderedPrompt",
+    "PLANNER_PROMPT_TEMPLATE_VERSION",
+    "render_prompt",
+    "render_system_prompt",
+    "render_user_prompt",
+    "hash_prompt",
+    "audit_prompt",
 ]
