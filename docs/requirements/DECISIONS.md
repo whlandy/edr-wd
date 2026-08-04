@@ -326,9 +326,9 @@ implementation's job.
 
 ---
 
-## P3.2 Design Review (D17..D22)
+## P3.2 Design Review (D17..D23)
 
-### P3.2-specific (D17..D22)
+### P3.2-specific (D17..D23)
 
 #### D17. Dataset identity and versioning contract
 
@@ -337,8 +337,13 @@ implementation's job.
   content-stable and embedded in the report; old dataset
   versions remain runnable for at least one major P3.2
   release after supersession; dataset version bumps on
-  contract change (not content change).
-- Resolution: contract locked.
+  contract change (not content change); semantic change to a
+  fixture requires `fixture_id` change OR `dataset_version`
+  bump; `fixture_id` MUST NOT be reused with different
+  semantics across dataset versions; fixture change log MUST
+  record any semantic shift.
+- Resolution: contract locked (round 2 added mutation
+  policy).
 - Source: P3.2 spec §Checkpoint P3.2.
 
 #### D18. Evaluation result schema contract
@@ -351,59 +356,89 @@ implementation's job.
   `(dataset_version, planner_version)` pair; no observed
   text / args / selectors / confirmation tokens; schema
   version `report_schema.v1` initial.
-- Resolution: contract locked.
+- Resolution: contract locked (round 2 unchanged).
 - Source: P3.2 spec §Checkpoint P3.2.
 
 #### D19. Metric ownership contract
 
-- Contract: each metric has a single owner with
-  responsibility for definition / formula / unit / expected
-  range; declaration includes `metric_id`, `owner`,
-  `definition`, `unit`, `direction`; cross-cutting metrics
-  defined at the gate (not at implementation); cross-cutting
-  metric set locked at the gate; per-subsystem metrics MAY
-  be added at implementation review.
-- Resolution: contract locked.
+- Contract: each metric has a single owner (definition /
+  formula / unit / expected range); owner MUST be an
+  accountable component (not an individual person); owner
+  deprecation requires successor in same release; metric id
+  MUST NOT be reused for different formula; declaration
+  includes `metric_id`, `owner`, `definition`, `unit`,
+  `direction`, `category`; cross-cutting metrics defined at
+  the gate (not at implementation); cross-cutting metric
+  set locked at the gate; per-subsystem metrics MAY be
+  added at implementation review.
+- Resolution: contract locked (round 2 added component +
+  lifecycle rule).
 - Source: P3.2 spec §Checkpoint P3.2.
 
 #### D20. Threshold policy contract
 
-- Contract: each metric has a threshold declaration
-  (separate from metric definition); declaration includes
+- Contract: each metric MUST have a threshold declaration
+  OR an explicit "ungated" marker; declaration includes
   `metric_id`, `direction`, `pass_if`, `threshold`,
-  `rationale`; CI gate fails on threshold violation only;
-  no warning levels; threshold values are implementation
-  freedom; hardcoded thresholds PROHIBITED for cross-cutting
-  metrics; missing thresholds treated as CI fail; no live GUI
-  availability in unit CI.
-- Resolution: contract locked.
+  `rationale`; ungated metrics contribute NO pass / fail
+  decision; CI policy (not the gate) decides whether
+  ungated metrics are allowed; threshold violations of
+  thresholded metrics fail CI; threshold values are
+  implementation freedom; hardcoded thresholds PROHIBITED
+  for cross-cutting metrics; missing threshold AND missing
+  ungated marker = CI fail; no live GUI availability in
+  unit CI.
+- Resolution: contract locked (round 2 separated ungated
+  status from thresholded pass/fail).
 - Source: P3.2 spec §Checkpoint P3.2.
 
 #### D21. CI failure semantics contract
 
-- Contract: machine-readable output (JSON or equivalent)
-  in addition to human-readable summary; each failure
-  carries `metric_id`, `(dataset_id, dataset_version,
-  fixture_id)`, `expected`, `observed`, `direction`; non-zero
-  exit on any threshold violation; no `args` / observed
-  screen text / selectors / confirmation tokens / LLM
-  prompts or responses in failure output; deterministic
-  output (modulo run identifier).
-- Resolution: contract locked.
+- Contract: machine-readable output (JSON or equivalent) in
+  addition to human-readable summary; each failure carries
+  `metric_id`, `(dataset_id, dataset_version, fixture_id)`,
+  `expected` (structured expectation identifier, NOT
+  free-form), `observed` (sanitised structured outcome
+  summary, NOT raw observed text), `direction`; non-zero
+  exit on any thresholded metric's threshold violation; no
+  `args` / observed screen text / selectors / confirmation
+  tokens / LLM prompts or responses in failure output;
+  deterministic output (modulo run identifier).
+- Resolution: contract locked (round 2 sanitised expected
+  /observed contract).
 - Source: P3.2 spec §Checkpoint P3.2.
 
-#### D22. Reproducibility boundary contract
+#### D22. Reproducibility boundary contract (determinism classes)
 
-- Contract: byte-for-byte reproducible given same
-  `(dataset_version, planner_version, execution_profile)`
-  triple and frozen inputs; reproducibility digest includes
-  content-hash of dataset fixtures, planner prompt template,
-  action catalog, and threshold declarations; digest
-  excludes timestamps, run identifiers, environment-specific
-  paths, host / user info; digest embedded in the report
-  (computed before write); CI gate warns on digest mismatch
-  but still emits pass / fail decision.
-- Resolution: contract locked.
+- Contract: each evaluation stage declares its determinism
+  class explicitly (D0 = evaluator-only byte-identical; D1
+  = planner + model artifact reproducible given fixed
+  `(planner_artifact, model_artifact)` pair; D2 = byte-
+  identical required only for non-LLM stages); stages
+  without declaration assumed D1; reproducibility digest
+  includes content-hash of dataset fixtures, planner
+  prompt template, planner artifact (when D1), model
+  artifact fingerprint (when D1), action catalog, and
+  threshold declarations; digest excludes timestamps, run
+  identifiers, environment-specific paths, host / user
+  info; digest embedded in the report (computed before
+  write); CI gate warns on digest mismatch but still emits
+  pass / fail decision.
+- Resolution: contract locked (round 2 rewritten with
+  determinism classes; byte-identical no longer required).
+- Source: P3.2 spec §Checkpoint P3.2.
+
+#### D23. Evaluation metric taxonomy contract
+
+- Contract: metrics classified into fixed taxonomy with
+  four categories (Coverage / Quality / Efficiency /
+  Behaviour); every metric declares category; new metrics
+  MUST join existing category (introducing new category
+  requires fresh reviewer round); cross-cutting metrics
+  MUST span at least three of the four categories;
+  per-metric category assignment is implementation
+  freedom (locked at implementation review).
+- Resolution: contract locked (added round 2 per M6).
 - Source: P3.2 spec §Checkpoint P3.2.
 
 ### Inherited from P3.1 (unchanged contracts; P3.2 reuse)
@@ -411,16 +446,25 @@ implementation's job.
 | ID | Contract | P3.2 reuse |
 |----|----------|------------|
 | D15 (P3.1) | Per-transport prompt sanitisation | D22 references the planner prompt template for the reproducibility digest |
-| D16 (P3.1) | Plan event redaction; secret audit | D18 reuses D16 redaction contract (no observed text / args / selectors / tokens in reports) |
+| D16 (P3.1) | Plan event redaction; secret audit | D18 reuses D16 redaction contract (no observed text / args / selectors / tokens in reports); D21 reuses for sanitised expected/observed |
 
 ---
 
 ## P3.2 Design Gate Closure
 
-- **2026-08-04 round 1** — ⏳ pending reviewer sign-off.
-- Gate is paper-only: no code, no tests, no runtime changes.
+- **2026-08-04 round 1** — ⚠️ CHANGES REQUESTED.
+- **2026-08-04 round 2** — ⏳ pending reviewer sign-off.
+- Round 2 addresses all 3 blockers (B0 D22 rewritten with
+  determinism classes; B1 D20 separated ungated status; B2
+  D21 sanitised expected/observed) and all 3 minors (M3 D19
+  component + lifecycle; M4 D17 mutation policy; M5
+  `evaluation_completeness_rate` added; M6 D23 taxonomy
+  added).
+- Gate remains paper-only: no code, no tests, no runtime
+  changes.
 - **Next**: P3.2 implementation may begin once this gate
   closes AND P3.2 implementation produces its own review
   package that records the option choices (metric formulas,
-  threshold values, CI exit semantics, digest hash function)
-  made in code.
+  threshold values, CI exit semantics, digest hash function,
+  model fingerprint scheme, stage → determinism class
+  mapping) made in code.
