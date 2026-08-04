@@ -229,6 +229,34 @@ def test_windows_task_integrity_valid(monkeypatch):
     assert result["data"]["logon_type"] == "Interactive"
 
 
+def test_windows_task_integrity_accepts_script_in_powershell_arguments(monkeypatch):
+    """Export-ScheduledTask commonly puts powershell.exe in Command and the
+    tracked script path in Arguments; validate the combined action."""
+    from agent.lifecycle.windows import WindowsLifecycle
+
+    monkeypatch.setattr(
+        "agent.lifecycle.windows.run_ssh",
+        lambda *_args, **_kwargs: (
+            0,
+            "cmd=powershell.exe\n"
+            "args=-NoProfile -File \"C:\\edr-wd\\target\\scripts\\start_server.ps1\"\n"
+            "logonType=InteractiveToken",
+        ),
+    )
+    result = WindowsLifecycle()._task_integrity(
+        {
+            "ssh": {"host": "127.0.0.1"},
+            "windows": {
+                "target_root": "C:\\edr-wd\\target",
+                "task_name": "StartEDRMCP",
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["logon_type"] == "InteractiveToken"
+
+
 # ── macOS: _target_integrity ──────────────────────────────────────────────────
 
 

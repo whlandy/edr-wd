@@ -393,7 +393,7 @@ class WindowsLifecycle:
                 'Write-Output \'found\' '
                 '} else { '
                 'Write-Output \'missing\' '
-                '}}"'
+                '}"'
             )
             try:
                 rc, out = run_ssh(ssh_cfg, ps_cmd, timeout=10)
@@ -485,12 +485,14 @@ class WindowsLifecycle:
             'if ($null -eq $t) { '
             'Write-Output \'task_missing\' '
             '} else { '
-            '$xml = ([xml]$t.Xml).Task; '
-            '$cmd = $xml.Actions.Exec.Command; '
+            '$xml = ([xml]($t | Export-ScheduledTask)).Task; '
+            '$cmd = [string]$xml.Actions.Exec.Command; '
+            '$args = [string]$xml.Actions.Exec.Arguments; '
             '$logonType = [string]$xml.Principals.Principal.LogonType; '
             'Write-Output (\'cmd=\' + $cmd) '
+            'Write-Output (\'args=\' + $args) '
             'Write-Output (\'logonType=\' + $logonType) '
-            '}}"'
+            '}"'
         )
         try:
             rc, out = run_ssh(ssh_cfg, ps_cmd, timeout=15)
@@ -536,7 +538,9 @@ class WindowsLifecycle:
                 k, _, v = line.partition("=")
                 info[k.strip()] = v.strip()
 
-        cmd = info.get("cmd", "")
+        command = info.get("cmd", "")
+        arguments = info.get("args", "")
+        cmd = f"{command} {arguments}".strip()
         logon_type = info.get("logonType", "")
 
         failures: list[str] = []
