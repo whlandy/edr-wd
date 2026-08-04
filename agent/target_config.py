@@ -35,7 +35,9 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -166,9 +168,40 @@ def _default_config_path() -> Path:
     return base / "config" / "targets.local.json"
 
 
+def _secure_mode(path: Path) -> None:
+    """Restrict a credential-bearing config file to the current user on POSIX."""
+    if os.name != "nt":
+        path.chmod(0o600)
+
+
+def _atomic_write_json(path: Path, data: dict, *, backup: bool) -> None:
+    """Durably replace a JSON config and optionally retain the previous version."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if backup and path.exists():
+        backup_path = path.with_suffix(path.suffix + ".bak")
+        shutil.copy2(path, backup_path)
+        _secure_mode(backup_path)
+
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        _secure_mode(tmp_path)
+        os.replace(tmp_path, path)
+        _secure_mode(path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 # ── Minimal skeleton (used by --init) ───────────────────────────────────────
 
 SKELETON = {
+    "$schema": "./targets.schema.json",
     "default_target": "2.26-edr-win26-win11",
     "targets": {
         "2.26-edr-win26-win11": {
@@ -328,6 +361,10 @@ def _normalize_target(raw: dict) -> dict:
 # ── Platform validation helpers ─────────────────────────────────────────────
 
 SUPPORTED_PLATFORMS = ("windows", "macos")
+SUPPORTED_PROFILES = {
+    "windows": {"windows_hisec"},
+    "macos": {"macos_hisec", "macos_generic"},
+}
 
 
 def _validate_platform_specific(t: dict) -> list[str]:
@@ -373,7 +410,7 @@ def _print_guide() -> None:
     print("EDR-WD config guide")
     print("=" * 60)
     print("1. Generate a skeleton config:")
-    print("   python -m agent.target_config --init")
+    print("   edr-wd config --init")
     print("")
     print("2. Edit config/targets.local.json with real values:")
     print("   - default_target")
@@ -385,14 +422,15 @@ def _print_guide() -> None:
     print("   - macos.* for platform=macos")
     print("")
     print("3. Preview or migrate target names:")
-    print("   python -m agent.target_config --suggest-names")
-    print("   python -m agent.target_config --rename-target <OLD_TARGET_NAME>")
+    print("   edr-wd config --suggest-names")
+    print("   edr-wd config --rename-target <OLD_TARGET_NAME> --dry-run")
+    print("   edr-wd config --rename-target <OLD_TARGET_NAME>")
     print("")
     print("4. Validate the file:")
-    print("   python -m agent.target_config --validate")
+    print("   edr-wd config --validate")
     print("")
     print("5. Inspect targets:")
-    print("   python -m agent.target_config --list")
+    print("   edr-wd config --list")
     print("")
     print("6. Use the deployment entrypoints:")
     print("   Windows agent: agent/deploy.ps1")
@@ -405,7 +443,7 @@ def _print_guide() -> None:
     print("   - Inline password auth is preferred; password_env/key auth are compatibility paths.")
     print("   - TODO security hardening: move secrets out of local JSON when needed.")
     print("   - Use scripts/redact_config.py to inspect a config without secrets.")
-    print("   - Use agent.target_config --list to verify per-target platform/profile fields.")
+    print("   - Use edr-wd config --list to verify per-target platform/profile fields.")
 
 
 # ── TargetConfig class ────────────────────────────────────────────────────────
@@ -438,9 +476,7 @@ class TargetConfig:
     def save(self) -> None:
         if not self._path:
             raise RuntimeError("No config path set")
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, indent=2, ensure_ascii=False)
+        _atomic_write_json(self._path, self._data, backup=True)
 
     @property
     def path(self) -> Path | None:
@@ -629,7 +665,13 @@ class TargetConfig:
             "_canonical_name": canonical_name,
         }
 
-    def rename_target(self, old_name: str, new_name: str | None = None) -> str:
+    def rename_target(
+        self,
+        old_name: str,
+        new_name: str | None = None,
+        *,
+        dry_run: bool = False,
+    ) -> str:
         """Rename a target key and update default_target, then save the config."""
         targets = self._data.get("targets", {})
         if old_name not in targets:
@@ -638,7 +680,7 @@ class TargetConfig:
         if canonical_name != old_name and canonical_name in targets:
             raise ConfigError(f"Target '{canonical_name}' already exists")
 
-        if canonical_name != old_name:
+        if canonical_name != old_name and not dry_run:
             items = []
             for name, target in targets.items():
                 items.append((canonical_name if name == old_name else name, target))
@@ -660,9 +702,7 @@ class TargetConfig:
         p = Path(path) if path else _default_config_path()
         if p.exists() and not force:
             raise FileExistsError(f"{p} already exists. Use --force to overwrite.")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(SKELETON, f, indent=2, ensure_ascii=False)
+        _atomic_write_json(p, SKELETON, backup=force and p.exists())
         return p
 
     # ── Validate ─────────────────────────────────────────────────────────────
@@ -709,6 +749,9 @@ class TargetConfig:
                 errors.append(f"[{name}] ssh.host is required")
             if not ssh.get("user"):
                 errors.append(f"[{name}] ssh.user is required")
+            ssh_port = ssh.get("port", 22)
+            if not isinstance(ssh_port, int) or not (1 <= ssh_port <= 65535):
+                errors.append(f"[{name}] ssh.port must be an integer 1-65535")
             auth = ssh.get("auth", {})
             if auth.get("type") == "password":
                 if auth.get("password"):
@@ -760,6 +803,26 @@ class TargetConfig:
             path = mcp.get("path", "/mcp")
             if not path.startswith("/"):
                 errors.append(f"[{name}] mcp.path must start with '/'")
+            connect_mode = mcp.get("connect_mode", "direct")
+            if connect_mode not in {"direct", "local", "tunnel"}:
+                errors.append(
+                    f"[{name}] mcp.connect_mode must be 'direct', 'local', or 'tunnel'"
+                )
+            if connect_mode == "tunnel":
+                local_port = mcp.get("tunnel", {}).get("local_port")
+                if not isinstance(local_port, int) or not (1 <= local_port <= 65535):
+                    errors.append(
+                        f"[{name}] mcp.tunnel.local_port must be an integer 1-65535"
+                    )
+
+            platform = t.get("platform", "windows")
+            profile = t.get("app_profile")
+            if profile and profile not in SUPPORTED_PROFILES.get(platform, set()):
+                allowed = ", ".join(sorted(SUPPORTED_PROFILES.get(platform, set())))
+                errors.append(
+                    f"[{name}] app_profile='{profile}' is invalid for platform={platform}; "
+                    f"expected one of: {allowed or '(none)'}"
+                )
 
             # Platform-specific required fields
             errors.extend(_validate_platform_specific(t))
@@ -769,9 +832,14 @@ class TargetConfig:
 
 # ── CLI entry point ─────────────────────────────────────────────────────────
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="EDR-WD target config tools")
-    parser.add_argument("--config", help="Path to config file")
+def add_config_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_config_path: bool = True,
+) -> None:
+    """Register the shared config command arguments on a parser."""
+    if include_config_path:
+        parser.add_argument("--config", help="Path to config file")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--list", action="store_true", help="List all targets")
     group.add_argument("--validate", action="store_true", help="Validate config")
@@ -780,22 +848,25 @@ def main() -> None:
     group.add_argument("--suggest-names", action="store_true", help="Show canonical target-name suggestions")
     group.add_argument("--rename-target", metavar="NAME", help="Rename one target to its canonical name")
     parser.add_argument("--force", action="store_true", help="Overwrite existing config with --init")
-    args = parser.parse_args()
+    parser.add_argument("--dry-run", action="store_true", help="Preview a config mutation without writing")
 
-    tc = TargetConfig(args.config) if args.config else TargetConfig()
+
+def run_config_command(args: argparse.Namespace) -> int:
+    """Execute a parsed config command and return its process exit code."""
+    if args.guide:
+        _print_guide()
+        return 0
 
     if args.init:
         try:
-            p = tc.init_config(args.config, force=args.force)
+            p = TargetConfig.init_config(args.config, force=args.force)
             print(f"Created: {p}")
-            print("Next: run 'python -m agent.target_config --guide' for the setup walkthrough.")
+            print("Next: run 'edr-wd config --guide' for the setup walkthrough.")
         except FileExistsError as e:
             print(f"SKIP: {e}")
-        sys.exit(0)
+        return 0
 
-    if args.guide:
-        _print_guide()
-        sys.exit(0)
+    tc = TargetConfig(args.config) if args.config else TargetConfig()
 
     if args.suggest_names:
         failed = False
@@ -805,16 +876,17 @@ def main() -> None:
             except ValueError as exc:
                 failed = True
                 print(f"{name} -> ERROR: {exc}")
-        sys.exit(1 if failed else 0)
+        return 1 if failed else 0
 
     if args.rename_target:
         try:
-            new_name = tc.rename_target(args.rename_target)
+            new_name = tc.rename_target(args.rename_target, dry_run=args.dry_run)
         except (ConfigError, KeyError, ValueError) as exc:
             print(f"ERROR: {exc}")
-            sys.exit(1)
-        print(f"Renamed: {args.rename_target} -> {new_name}")
-        sys.exit(0)
+            return 1
+        verb = "Would rename" if args.dry_run else "Renamed"
+        print(f"{verb}: {args.rename_target} -> {new_name}")
+        return 0
 
     if args.list:
         targets = tc.list_targets()
@@ -840,20 +912,28 @@ def main() -> None:
                 print("  (no targets.local.json found — showing targets.example.json for reference)")
                 print(f"  Copy '{example}' to 'config/targets.local.json' and edit it.")
                 print("  Then run: python -m agent.target_config --list")
-        sys.exit(0)
+        return 0
 
     if args.validate:
         errs = tc.validate()
         if not errs:
             print("OK: config is valid")
-            sys.exit(0)
+            return 0
         for e in errs:
             print(f"ERROR: {e}")
-        sys.exit(1)
+        return 1
 
     # No action — show help
     parser.print_help()
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="EDR-WD target config tools")
+    add_config_arguments(parser)
+    args = parser.parse_args()
+    return run_config_command(args)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

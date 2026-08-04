@@ -23,11 +23,10 @@ import sys
 
 
 _REGISTRY: dict[str, str] = {
-    # name -> module path (relative to target/ runtime root)
-    # server.py is deployed inside target/ and runs with target/ as CWD,
-    # so 'automation' is on the path but 'target.automation' is not.
-    "windows_pywinauto":   "automation.windows_pywinauto",
-    "macos_accessibility": "automation.macos_accessibility",
+    # Relative paths work both as `automation` in a target-local deployment and
+    # as `target.automation` from the installed package entry point.
+    "windows_pywinauto":   ".windows_pywinauto",
+    "macos_accessibility": ".macos_accessibility",
 }
 
 # class name inside the module
@@ -81,7 +80,7 @@ def create_backend(name: str | None = None) -> "object":
             f"automation backend '{name}' is not registered. "
             f"Known: {sorted(_REGISTRY)}"
         )
-    module = importlib.import_module(_REGISTRY[name])
+    module = importlib.import_module(_REGISTRY[name], package=__package__)
     cls = getattr(module, _CLASS_NAME[name])
     return cls()
 

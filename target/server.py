@@ -4,13 +4,13 @@ server.py — fastmcp HTTP Server for cross-platform EDR GUI Automation
 
 Usage:
     # Local stdio
-    python -m edr_wd.server
+    edr-wd-target
 
     # HTTP mode (for SSH tunnel / remote access)
-    python -m edr_wd.server --http --port 8765
+    edr-wd-target --http --port 8765
 
     # Expose beyond localhost only when direct LAN access is required
-    python -m edr_wd.server --http --host 0.0.0.0 --port 8765
+    edr-wd-target --http --host 0.0.0.0 --port 8765
 
 Backend selection:
     EDR_WD_AUTOMATION_BACKEND=windows_pywinauto    (default; legacy behavior)
@@ -31,14 +31,24 @@ import uuid
 
 from fastmcp import FastMCP
 
-from automation import create_backend
-from automation.base import AutomationBackend
-from action_catalog import (
-    CATALOG_VERSION,
-    catalog_digest,
-    get_action_catalog as _get_action_catalog_dict,
-    status_action_space,
-)
+try:  # Installed package / `python -m target.server`.
+    from .automation import create_backend
+    from .automation.base import AutomationBackend
+    from .action_catalog import (
+        CATALOG_VERSION,
+        catalog_digest,
+        get_action_catalog as _get_action_catalog_dict,
+        status_action_space,
+    )
+except ImportError:  # Target-local `python server.py` deployment compatibility.
+    from automation import create_backend
+    from automation.base import AutomationBackend
+    from action_catalog import (
+        CATALOG_VERSION,
+        catalog_digest,
+        get_action_catalog as _get_action_catalog_dict,
+        status_action_space,
+    )
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1075,7 +1085,10 @@ def diagnose_windows() -> str:
             "backend": backend_name,
         }, ensure_ascii=False)
 
-    from automation.macos_accessibility import diagnose_windows as _diag
+    try:
+        from .automation.macos_accessibility import diagnose_windows as _diag
+    except ImportError:
+        from automation.macos_accessibility import diagnose_windows as _diag
     result = _diag()
     return json.dumps(result, ensure_ascii=False)
 
@@ -1085,16 +1098,6 @@ def diagnose_windows() -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(
-    name="execute_action",
-    description=(
-        "Unified dispatcher entry point (P1.1). Routes action_id to "
-        "the corresponding backend method, validates preconditions, "
-        "checks ownership, normalises the result into an "
-        "ActionReceipt, and returns the cached receipt on duplicate "
-        "request_id (FR-P1.1-01..02)."
-    ),
-)
 def execute_action(
     action_id: str,
     action_code: str | None = None,
@@ -1109,7 +1112,10 @@ def execute_action(
     tools remain byte-compatible with their previous return shape.
     """
     # Lazy import to keep the module import surface stable.
-    from action_dispatcher import dispatch
+    try:
+        from .action_dispatcher import dispatch
+    except ImportError:
+        from action_dispatcher import dispatch
 
     receipt = dispatch(
         action_id=action_id,
@@ -1119,6 +1125,37 @@ def execute_action(
         request_id=request_id,
     )
     return receipt.to_json()
+
+
+# Register without replacing the module-level function. FastMCP versions differ
+# in whether decorator syntax returns the original callable or a FunctionTool;
+# keeping the callable stable preserves direct Python and compatibility tests.
+mcp.tool(
+    name="execute_action",
+    description=(
+        "Unified dispatcher entry point (P1.1). Routes action_id to "
+        "the corresponding backend method, validates preconditions, "
+        "checks ownership, normalises the result into an ActionReceipt, and "
+        "returns the cached receipt on duplicate request_id (FR-P1.1-01..02)."
+    ),
+)(execute_action)
+
+
+def _restore_python_tool_callables() -> None:
+    """Keep direct Python calls stable across FastMCP decorator versions.
+
+    FastMCP already retains each ``FunctionTool`` in ``mcp``. Some releases
+    return that object from decorator syntax while older releases return the
+    original function. Restore only module globals that expose a callable
+    ``.fn``; MCP registration remains unchanged.
+    """
+    for name, value in list(globals().items()):
+        fn = getattr(value, "fn", None)
+        if callable(fn):
+            globals()[name] = fn
+
+
+_restore_python_tool_callables()
 
 
 # ---------------------------------------------------------------------------

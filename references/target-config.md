@@ -13,15 +13,20 @@ Use this reference when adding a target, changing `connect_mode`, or editing
 `config/targets.example.json` is for `--init` and documentation only. It must
 not be used as a real target source.
 
+`config/targets.schema.json` is the editor schema. The example and generated
+config include `$schema`, so compatible editors provide completion and validate
+required fields and enums while the file is edited.
+
 Useful commands:
 
 ```bash
-python -m agent.target_config --init
-python -m agent.target_config --validate
-python -m agent.target_config --list
-python -m agent.target_config --guide
-python -m agent.target_config --suggest-names
-python -m agent.target_config --rename-target <OLD_TARGET_NAME>
+edr-wd config --init
+edr-wd config --guide
+edr-wd config --validate
+edr-wd config --list
+edr-wd config --suggest-names
+edr-wd config --rename-target <OLD_TARGET_NAME> --dry-run
+edr-wd config --rename-target <OLD_TARGET_NAME>
 ```
 
 ## Minimal Target Shape
@@ -42,8 +47,9 @@ To migrate an existing local config after adding `identity`, preview and apply
 the key rename without printing credentials:
 
 ```bash
-python -m agent.target_config --suggest-names
-python -m agent.target_config --rename-target <OLD_TARGET_NAME>
+edr-wd config --suggest-names
+edr-wd config --rename-target <OLD_TARGET_NAME> --dry-run
+edr-wd config --rename-target <OLD_TARGET_NAME>
 ```
 
 `probe_target()` reads the live hostname and OS major version through SSH and
@@ -122,6 +128,10 @@ and key auth remain compatibility paths, but are not the default workflow. Do
 not print real credentials in assistant responses, logs intended for sharing, or
 docs committed to the repository. Keep real values in `config/targets.local.json`
 or the file pointed to by `EDR_WD_CONFIG`, and make sure those files stay local.
+
+Config mutations use an atomic replace, create a user-only `.bak`, and enforce
+mode `0600` on POSIX. Preview target renames with `--dry-run`. Keep these
+protections when extending config editing.
 
 ## Connect Modes
 

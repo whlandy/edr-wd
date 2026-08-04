@@ -1,7 +1,7 @@
 [project]
 name = "edr-wd"
 version = "0.1.0"
-description = "MCP server for Windows EDR GUI automation via pywinauto"
+description = "Cross-platform EDR GUI automation, test execution, traces, and reports"
 requires-python = ">=3.9"
 dependencies = [
     "fastmcp>=3.1.0",
@@ -32,8 +32,13 @@ markers = [
 ]
 
 [project.scripts]
-edr-wd = "edr_wd.server:main"
+edr-wd = "agent.cli:main"
+edr-wd-config = "agent.target_config:main"
+edr-wd-target = "target.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent", "target", "test_case"]

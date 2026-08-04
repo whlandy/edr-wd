@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# edr-wd.sh — Agent side control plane for Windows EDR-WD target.
+# edr-wd.sh — Legacy shell facade for the cross-platform EDR-WD agent.
+# Prefer the installed `edr-wd` Python CLI for new workflows.
 #
 # Commands:
 #   up       Start the MCP server and prepare connection mode if needed

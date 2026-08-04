@@ -102,7 +102,6 @@ from .projection import (
     load_projection_payload,
     write_projection,
 )
-from .trace_md import TraceMarkdownProjection
 from .trace_payload import TracePayload
 from .trace_adapter import TraceStoreAdapter
 from .step_results import load_step_results, write_atomic
@@ -229,3 +228,12 @@ __all__ = [
     # trace.md writer (P2.2 — Commit G.2)
     "TraceMarkdownProjection",
 ]
+
+
+def __getattr__(name: str):
+    """Lazily expose trace-owned compatibility symbols without import cycles."""
+    if name == "TraceMarkdownProjection":
+        from agent.trace.recovery_markdown import TraceMarkdownProjection
+
+        return TraceMarkdownProjection
+    raise AttributeError(name)

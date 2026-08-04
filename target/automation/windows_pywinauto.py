@@ -36,7 +36,10 @@ class WindowsPywinautoBackend:
     def __init__(self) -> None:
         # Lazy import: Windows-only dependency. macOS targets never
         # instantiate this backend.
-        from pywinauto_client import WindowsGUI
+        try:
+            from ..pywinauto_client import WindowsGUI
+        except ImportError:
+            from pywinauto_client import WindowsGUI
         self._gui = WindowsGUI()
         self._window_lock: dict | None = None
 

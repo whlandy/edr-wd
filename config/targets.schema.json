@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edr-wd.local/schemas/targets.schema.json",
+  "title": "EDR-WD target configuration",
+  "type": "object",
+  "required": ["default_target", "targets"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "_comment": {"type": "string"},
+    "_comment2": {"type": "string"},
+    "default_target": {"type": "string", "minLength": 1},
+    "targets": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"$ref": "#/$defs/target"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "target": {
+      "type": "object",
+      "required": ["platform", "app_profile", "identity", "ssh", "mcp"],
+      "properties": {
+        "description": {"type": "string"},
+        "platform": {"enum": ["windows", "macos"]},
+        "app_profile": {"enum": ["windows_hisec", "macos_hisec", "macos_generic"]},
+        "identity": {
+          "type": "object",
+          "required": ["hostname", "os_version"],
+          "properties": {
+            "hostname": {"type": "string", "minLength": 1},
+            "os_version": {"type": "string", "pattern": "^(win|macos)[0-9]{1,2}$"}
+          },
+          "additionalProperties": false
+        },
+        "ssh": {"$ref": "#/$defs/ssh"},
+        "mcp": {"$ref": "#/$defs/mcp"},
+        "windows": {"$ref": "#/$defs/windows"},
+        "macos": {"$ref": "#/$defs/macos"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"platform": {"const": "windows"}}},
+          "then": {
+            "required": ["windows"],
+            "properties": {"app_profile": {"const": "windows_hisec"}}
+          }
+        },
+        {
+          "if": {"properties": {"platform": {"const": "macos"}}},
+          "then": {
+            "required": ["macos"],
+            "properties": {"app_profile": {"enum": ["macos_hisec", "macos_generic"]}}
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "ssh": {
+      "type": "object",
+      "required": ["host", "port", "user", "auth"],
+      "properties": {
+        "host": {"type": "string", "minLength": 1},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "user": {"type": "string", "minLength": 1},
+        "auth": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["type"],
+              "properties": {
+                "type": {"const": "password"},
+                "password": {"type": "string"},
+                "password_env": {"type": "string"}
+              },
+              "oneOf": [
+                {"required": ["password"], "not": {"required": ["password_env"]}},
+                {"required": ["password_env"], "not": {"required": ["password"]}}
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["type", "key_path"],
+              "properties": {
+                "type": {"const": "key"},
+                "key_path": {"type": "string", "minLength": 1},
+                "passphrase_env": {"type": "string"}
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "mcp": {
+      "type": "object",
+      "required": ["host", "port", "path", "connect_mode"],
+      "properties": {
+        "host": {"type": "string", "minLength": 1},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "path": {"type": "string", "pattern": "^/"},
+        "connect_mode": {"enum": ["direct", "local", "tunnel"]},
+        "tunnel": {
+          "type": "object",
+          "required": ["enabled", "local_port"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "local_port": {"type": "integer", "minimum": 1, "maximum": 65535}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "windows": {
+      "type": "object",
+      "required": ["python_path", "target_root", "task_name"],
+      "properties": {
+        "python_path": {"type": "string", "minLength": 1},
+        "target_root": {"type": "string", "minLength": 1},
+        "task_name": {"type": "string", "minLength": 1},
+        "run_with_highest_privileges": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "macos": {
+      "type": "object",
+      "required": ["python_path", "root", "backend", "launch_name"],
+      "properties": {
+        "python_path": {"type": "string", "minLength": 1},
+        "root": {"type": "string", "minLength": 1},
+        "backend": {"const": "macos_accessibility"},
+        "launch_name": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    }
+  }
+}

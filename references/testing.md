@@ -34,8 +34,8 @@ existing profile-resolution code. Do not silently fall back to Windows tests.
 # Default fast gate: core deterministic tests, excluding exhaustive matrices.
 python3 -m pytest -q
 
-# PR/full offline gate, including evaluation/report/regression matrices.
-python3 -m pytest -q -m unit
+# Full offline gate, including evaluation/report/regression matrices.
+python3 -m pytest -q -m "unit or regression"
 
 # Only the exhaustive offline matrices.
 python3 -m pytest -q -m regression
@@ -47,7 +47,7 @@ python3 -m pytest -q -m integration
 python3 -m pytest -q -m e2e
 
 # Everything, useful only when a live target is intentionally available.
-python3 -m pytest -q -m "unit or integration or e2e"
+python3 -m pytest -q -m "unit or regression or integration or e2e"
 ```
 
 Every collected test receives one primary marker from its directory:

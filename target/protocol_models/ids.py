@@ -2,7 +2,7 @@
 ids.py — Cross-process sortable ID generators (P0.2 Open Decision #3
 revised after P0.2 review).
 
-Decision (recorded in CHANGELOG.md):
+Decision record: ``docs/archive/changelogs/target-protocol-models.md``.
 
     P0.1 review was satisfied with stdlib `uuid.uuid4()` because P0.1
     catalog is immutable and does not need runtime IDs. P0.2 review

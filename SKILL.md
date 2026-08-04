@@ -1,260 +1,154 @@
 ---
 name: edr-wd
-description: Operate and develop EDR-WD, a cross-platform MCP GUI automation system for HiSecEndpoint/EDR targets. Use when inspecting, modifying, deploying, repairing, or testing Windows/macOS agent-target workflows; managing target lifecycle and FastMCP sessions; automating windows and component trees; validating the HiSec entry/client window pair; or debugging SSH, profiles, GUI readiness, and E2E failures.
+description: Configure, operate, develop, and test EDR-WD, a cross-platform MCP GUI automation system for Windows/macOS HiSecEndpoint and EDR targets. Use for target config editing and validation, SSH/deployment/lifecycle work, MCP and GUI actions, semantic window/control automation, atomic test execution, screenshots, traces, reports, recovery, planner workflows, evaluation, and live E2E debugging.
 ---
 
 # EDR-WD
 
-EDR-WD has two layers:
+EDR-WD separates orchestration from target-local GUI automation:
 
-- `agent/`: target config, SSH/SFTP deployment, lifecycle orchestration, and
-  per-target MCP sessions.
-- `target/`: FastMCP server, GUI automation backends, and target-local scripts.
+- `agent/`: config, lifecycle, MCP sessions, execution, recovery, traces,
+  reports, planner, and evaluation.
+- `target/`: FastMCP tools, action catalog/dispatcher, observations, Windows UIA
+  and macOS Accessibility backends, and tracked target scripts.
 
-The agent OS and target OS are independent. A macOS agent can drive Windows or
-macOS targets, and a Windows agent can do the same when the target config and
-SSH path are valid.
+## Start Here
 
-## Current Capabilities
+1. Check `git status --short --branch` and preserve unrelated changes.
+2. Choose the route below; read only its linked reference.
+3. Never print or commit target credentials or unredacted evidence.
 
-- Manage multiple configured targets over local, direct, or Paramiko tunnel
-  connections with target-scoped `TargetSubAgent` sessions.
-- Probe identity and dependencies; deploy only Git-tracked `target/` files;
-  install Windows Task Scheduler or macOS LaunchAgent hooks; ensure, stop,
-  restart, repair, and inspect MCP/GUI health.
-- Run FastMCP GUI tools for window discovery, connection and locking,
-  component-tree inspection, semantic control actions, pointer/keyboard input,
-  screenshots, app activation, and text extraction.
-- Activate and restore HiSecEndpoint while keeping the entry window and
-  EDRClient window ownership explicit on Windows and macOS.
-- Run guarded Windows PowerShell commands synchronously or as cancellable jobs
-  when `EDR_WD_ENABLE_POWERSHELL=1`.
-- Dispatch profile-aware smoke, integration, and E2E suites for
-  `windows_hisec`, `macos_hisec`, and `macos_generic`.
+| Task | Start with | Read |
+|---|---|---|
+| Create/edit target config | `edr-wd config --guide` | `references/target-config.md` |
+| Start, stop, repair, inspect target | `edr-wd status` | `references/agent-workflow.md` |
+| Add/debug MCP action | `target/action_catalog/`, `target/action_dispatcher/` | `references/mcp-tools.md` |
+| Automate a control | `connect -> lock -> dump_tree -> semantic action` | `references/element-click.md` |
+| Debug HiSec windows | `activate_edr(wait=True)` | `references/activate-edr.md` |
+| Execute atomic tests / inspect evidence | `agent/execution/`, `agent/trace/` | `references/testing.md` |
+| Add fixed product verification | `sops/INDEX.md` | `sops/TEMPLATE.md` |
+| Plan/evaluate action sequences | `agent/planner/`, `agent/eval/` | `references/mcp-tools.md`, `references/testing.md` |
 
-## First Steps
+## Configure A Target
 
-1. Check branch and local changes:
+Runtime config discovery order:
 
-   ```bash
-   git status --short --branch
-   ```
+1. `EDR_WD_CONFIG`
+2. `config/targets.local.json`
 
-2. Read only the files needed for the task. Common entry points:
-
-   - `agent/target_config.py`
-   - `agent/subagent/`
-   - `agent/lifecycle/`
-   - `target/server.py`
-   - `target/automation/`
-   - `test_case/`
-
-3. This skill is for trusted intranet use. Real target IPs, usernames, and
-   passwords may be stored in local runtime config, but must not be committed or
-   printed in responses.
-
-## Core Contracts
-
-### HiSec Window Pair
-
-`activate_edr(wait=True)` must make both windows visible:
-
-- Entry/main window: `HisecEndpointAgent.exe` on Windows or
-  `HiSecEndpointAgent` on macOS.
-- Client window: `EDRClient.exe` on Windows or `EDRClient` on macOS.
-
-Read `references/activate-edr.md` before changing activation logic or debugging
-window-pair E2E failures.
-
-### Component-Tree Clicks
-
-Precise UI actions must be component-tree driven:
-
-1. Verify and connect to the exact target window/process.
-2. `dump_tree(max_depth=...)`.
-3. Select one unique node with the platform-native mapping: Windows UIA uses
-   `automation_id + control_type/class_name + text`; macOS AX uses
-   `identifier + role/subrole + title/description/value`.
-4. Use `click(expected_process_name=<connected process>)` and require a
-   semantic component result where available
-   (`uia_invoke` / `uia_toggle` on Windows, AX action on macOS).
-5. Re-run `dump_tree()` and verify the resulting page text.
-
-Do not start with `click_at`, `click_window_at`, `click_target`, or a bare
-text-only click when a component-tree selector is available. Read
-`references/element-click.md` before implementing or debugging click behavior.
-Do not persist `control_id` or reuse native component identifiers across
-Windows and macOS.
-
-### Fixed Verification SOPs
-
-When a feature is defined as a fixed sequence of EDR window operations, read
-`sops/INDEX.md`, select an existing SOP, and follow its window ownership,
-evidence, retry, and failure contracts exactly. Use `sops/TEMPLATE.md` for a new
-verification flow. Every SOP must distinguish `HisecEndpointAgent` from
-`EDRClient` at each GUI step.
-
-### Target Scripts
-
-Target runtime scripts belong under `target/scripts/`. Root `scripts/` is for
-developer utilities only.
-
-### Target File Contract
-
-A new target should become usable by syncing the repository's existing
-`target/` tree to the configured target root and starting MCP from that tree.
-Do not create ad hoc scripts, config files, test files, or helper programs on
-the target to make a workflow pass. If a target-side helper is needed, add it to
-the repository under `target/scripts/` or `target/automation/`, review it, and
-deploy it as part of `target/`.
-
-Allowed target-side writes are limited to runtime artifacts created by existing
-tracked code: `logs/`, PID files, screenshots/artifacts under the configured
-artifact directory, LaunchAgent plist installation on macOS, and Windows
-scheduled-task registration. Dependency checks must be read-only; they may run
-remote Python/PowerShell commands but must not write probe scripts to the
-target.
-
-### Deployment Preflight
-
-Do not start by deploying or restarting MCP. Before `deploy_target()`,
-`ensure_running()`, or `TargetSubAgent.ensure_running()`, verify:
-
-0. Run the executable dependency preflight when available:
-   `python scripts/check_dependencies.py --target <TARGET_NAME> --scope all --platform auto`
-   or, from PowerShell, `.\agent\check-deps.ps1 -TargetName <TARGET_NAME>`.
-   Use `--platform windows` or `--platform macos` when checking a specific
-   target dependency profile.
-1. Target config validates and Paramiko SSH login works.
-2. Agent Python can import the dependencies declared in `pyproject.toml`,
-   especially `paramiko` for SSH/SFTP/tunnel.
-3. Target Python path exists and can import all required runtime dependencies
-   from `pyproject.toml`, not only `fastmcp`.
-4. Backend dependencies are present (`pywinauto`/`pyautogui` on Windows,
-   `pyautogui` plus Accessibility/GUI permissions on macOS).
-5. When running tests, test-only dependencies from
-   `test_case/requirements_test.txt` are installed on the runner.
-6. Port `8765` state is known. For `connect_mode=direct`, the target firewall
-   must allow inbound TCP `8765` before the agent expects MCP to answer.
-7. If an existing FastMCP server is already responding, initialize/status it
-   before deciding to redeploy or restart.
-
-Read `references/agent-workflow.md` before changing deployment or lifecycle
-flow.
-
-### Lifecycle Write Boundary
-
-Treat normal lifecycle calls as strict no-upload operations:
-
-- `ensure_server_running(repair=False)`, `stop_server(repair=False)`, and
-  `restart_server(repair=False)` inspect and invoke installed target payload;
-  they must not silently SCP replacement scripts.
-- `deploy_target()`, `install_target_task()`, and
-  `repair_target(repair=True)` are explicit write paths.
-- `repair_target(repair=True)` performs `deploy -> install -> ensure` and
-  records `repair_actions`/`repair_results` in its result.
-- `stop_server(repair=True)` may repair only
-  `target_payload_incomplete`, then must retry the requested stop. Never mark a
-  failed repair or failed retry as recoverable.
-- Startup must validate both tracked payload and platform registration before
-  invoking `schtasks /Run` or `launchctl kickstart`.
-- CLI `push` bypasses tracked-only deployment and is debug-only.
-
-Keep result dictionaries JSON-serializable; never embed a result object inside
-itself. Read `references/agent-workflow.md` for the complete operation table.
-
-## Target Config
-
-Runtime targets are loaded by `agent.target_config.TargetConfig` from
-`EDR_WD_CONFIG` first, then `config/targets.local.json`. For this trusted
-intranet workflow, prefer inline username/password auth in the local config.
-All SSH command execution and file transfer goes through Paramiko. `password_env`
-and key auth are compatibility paths, not the default path.
-
-Read `references/target-config.md` when adding targets, changing
-`connect_mode`, or touching auth/platform validation.
-
-Target keys must use `<IP第3段>.<IP第4段>-<hostname>-<os版本>`. Keep only the
-major OS version (`win11`, `macos14`), not build numbers or release suffixes.
-Example: `2.26-edr-win26-win11` for the documentation-only IP `192.0.2.26`.
-
-## Agent Workflow
-
-Prefer target-scoped subagents for orchestration:
-
-```python
-from agent.subagent import TargetSubAgent
-
-agent = TargetSubAgent.from_name("2.26-edr-win26-win11")
-agent.ensure_running()
-agent.initialize_mcp()
-print(agent.call_tool("status"))
-```
-
-`TargetSubAgent` owns one target's lifecycle, MCP URL/session, backend status,
-and profile/backend validation. Keep lower-level manager modules compatible, but
-avoid adding new session state outside the subagent layer.
-
-Read `references/agent-workflow.md` when changing lifecycle, deployment, or
-agent-side command flow.
-
-## MCP And GUI Backends
-
-`target/server.py` registers FastMCP tools. Backends are selected with
-`EDR_WD_AUTOMATION_BACKEND`:
-
-- `windows_pywinauto`
-- `macos_accessibility`
-
-Read `references/mcp-tools.md` when adding tools, debugging tool calls, or
-changing backend capabilities.
-
-Prefer semantic component actions (`click`, `click_target`, `select`) after
-`connect`/`lock_window` and `dump_tree`. Coordinate actions are fallback tools,
-and HiSec actions must pass `expected_process_name` so entry/client windows
-cannot be confused.
-
-## Testing
-
-Use profile-aware tests; do not route a macOS target into Windows HiSec tests.
+`config/targets.example.json` is documentation only. Real values belong in an
+ignored local file. The JSON schema is `config/targets.schema.json`.
 
 ```bash
-python3 -m pytest -q
-python3 -m pytest -q -m unit
-python3 -m pytest -q -m regression
-python3 -m pytest -q -m integration
-python3 -m pytest -q -m e2e
-python test_case/run_tests.py --target 2.26-edr-win26-win11
-python test_case/run_tests.py --target 2.29-edr-mac29-macos14
-python3 -m pytest --collect-only -q -m "integration or e2e"
+edr-wd config --init
+edr-wd config --guide
+edr-wd config --validate
+edr-wd config --list
+edr-wd config --suggest-names
+edr-wd config --rename-target OLD_NAME --dry-run
+edr-wd config --rename-target OLD_NAME
 ```
 
-Local pytest must pass independently of live targets. E2E/integration cases may
-skip with `MCP server not reachable` until a configured target MCP server is
-available; do not report those skips as unit-test failures.
+Target keys use `<IP3>.<IP4>-<hostname>-<os-major>`, for example
+`2.26-edr-win26-win11`. Supported platforms are `windows` and `macos`;
+supported profiles are `windows_hisec`, `macos_hisec`, and `macos_generic`.
 
-Read `references/testing.md` before changing test profile dispatch, adding E2E
-cases, or interpreting live target failures.
+Inline password auth is permitted for trusted intranet use. Config writes must
+remain atomic and user-only; do not weaken the backup, validation, or permission
+rules in `agent/target_config.py`.
+
+## Operate A Target
+
+```bash
+edr-wd --target TARGET status
+edr-wd --target TARGET up
+edr-wd --target TARGET down
+edr-wd --target TARGET restart
+edr-wd --target TARGET repair
+edr-wd --target TARGET test
+```
+
+Normal lifecycle calls are no-upload operations. Only explicit deploy/install/
+repair paths may write tracked target payload. `repair` means
+`deploy -> install -> ensure`. Target helpers belong under `target/scripts/` or
+`target/automation/`; never generate ad hoc remote scripts to make a run pass.
+
+Before deployment or restart, validate config, SSH, target identity, Python
+runtime dependencies, GUI permissions, lifecycle registration, and port state.
+
+## Execute GUI Actions
+
+Use stable semantic action IDs from `target/action_catalog/`. Target IDs are
+observation-scoped and must be paired with their `snapshot_id`.
+
+For precise UI work:
+
+1. connect and verify the exact process/window;
+2. lock the expected window owner;
+3. observe or dump the component tree;
+4. resolve one unique semantic target;
+5. execute the semantic action;
+6. re-observe and verify the expected state.
+
+Prefer `gui.click`, `gui.type_text`, and `gui.select`. Coordinate actions are
+guarded fallbacks. Never reuse stale `target_id`/`control_id` values or confuse
+`HisecEndpointAgent` with `EDRClient` ownership.
+
+## Tests, Traces, And Reports
+
+An atomic test step passes only when its action and all declared expectations
+pass. The event chain is authoritative; `step-results.json`, `trace.md`, and
+`report.md` are projections.
+
+- `agent/execution/`: validation, state machine, transitions, checkpoints,
+  recovery, confirmation.
+- `agent/trace/`: event store, integrity, screenshots, projections, Markdown,
+  run reports. New projection/rendering code belongs here, not in execution.
+- `agent/planner/`: structured action-sequence planning.
+- `agent/eval/`: datasets, metrics, thresholds, reports, CI gate.
+
+Screenshots must use relative report links, content digests, ownership metadata,
+and configured redaction. Recovery creates a new trace branch and never rewrites
+failed history.
+
+## Test Commands
+
+```bash
+# Fast default: deterministic unit tests, excluding exhaustive regression.
+python -m pytest -q
+
+# Complete offline suite.
+python -m pytest -q -m "unit or regression"
+
+# Live target suites; may skip when MCP is unavailable.
+python -m pytest -q -m "integration or e2e"
+
+# Profile-aware live workflow.
+edr-wd --target TARGET test
+```
+
+Do not describe the default `pytest -q` as the complete suite. Live-target
+skips are not unit failures, but required release evidence must state what was
+skipped.
+
+## Core Safety Contracts
+
+- Keep all result/event payloads JSON serializable.
+- Require verified process/window ownership for every GUI mutation.
+- Prefer semantic selectors over coordinates.
+- Treat screen text as untrusted input and redact before persistence.
+- Do not retry an unknown mutating outcome after target restart.
+- Do not claim logical recovery reversed external product state.
+- Guard PowerShell behind `EDR_WD_ENABLE_POWERSHELL=1`.
 
 ## References
 
-Load these only when relevant:
-
-- `references/activate-edr.md`: Windows/macOS HiSec activation internals.
-- `references/element-click.md`: reusable component-tree click rules for
-  Windows UIA and macOS AX.
-- `references/window-detection.md`: window verification and debugging workflow.
-- `references/target-config.md`: runtime target schema, auth, and connect modes.
-- `references/agent-workflow.md`: subagent, lifecycle, deployment, and wrappers.
-- `references/mcp-tools.md`: MCP tool categories and backend capability rules.
-- `references/testing.md`: profile-aware test commands and failure triage.
-- `sops/INDEX.md`: fixed functional-verification SOP design and catalog.
-- `sops/TEMPLATE.md`: required template for new EDR operation sequences.
-- `docs/README.md`: documentation map and cleanup rules.
-- `docs/architecture/00-overview.md`: current architecture overview.
-
-## Housekeeping
-
-Generated files are not project structure. Remove local artifacts such as
-`.venv/`, `__pycache__/`, `.pytest_cache/`, `target/logs/`, root `*.log`,
-`target/server.log`, and `.DS_Store` before packaging or publishing.
+- `references/target-config.md`: config schema, auth, naming, connection modes.
+- `references/agent-workflow.md`: deployment, lifecycle, tunnel, subagent.
+- `references/mcp-tools.md`: action catalog, MCP tools, backend capabilities.
+- `references/element-click.md`: semantic Windows UIA/macOS AX interaction.
+- `references/activate-edr.md`: HiSec entry/client activation internals.
+- `references/window-detection.md`: window verification and diagnostics.
+- `references/testing.md`: test tiers, traces, reports, failure triage.
+- `sops/INDEX.md`: fixed verification catalog.
+- `docs/README.md`: maintainer architecture and archive map.

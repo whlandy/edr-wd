@@ -23,6 +23,8 @@ target/config/test_machines.json
 .env
 .env.*
 *.local.json
+*.local.json.bak
+config/*.json.bak
 *.secret
 *.secrets
 
