@@ -97,15 +97,17 @@ def test_windows_ensure_proceeds_when_payload_complete(monkeypatch):
 
     calls: list[str] = []
     scp_calls: list[tuple] = []
+    task_started = False
 
     def fake_run_ssh(_ssh_cfg, command, **_kwargs):
+        nonlocal task_started
         calls.append(command)
         if "Get-NetFirewallRule" in command:
             return (0, "exists")
         if "Get-NetTCPConnection -LocalPort" in command and "exit 0" in command:
             return (0, "closed")
         if "Get-NetTCPConnection -LocalPort" in command and "exit 1" in command:
-            return (1, "closed")
+            return (0, "open") if task_started else (1, "closed")
         if "Test-Path" in command:
             return (0, "found")
         if "Get-ScheduledTask" in command:
@@ -115,6 +117,7 @@ def test_windows_ensure_proceeds_when_payload_complete(monkeypatch):
                 "logonType=Interactive",
             )
         if "schtasks" in command:
+            task_started = True
             return (0, "SUCCESS")
         if "Get-CimInstance" in command or "SessionId" in command:
             return (1, "no_connection")
@@ -134,6 +137,7 @@ def test_windows_ensure_proceeds_when_payload_complete(monkeypatch):
     monkeypatch.setattr("agent.lifecycle.windows.run_ssh", fake_run_ssh)
     monkeypatch.setattr("agent.lifecycle.windows.scp_to", fake_scp_to)
     monkeypatch.setattr("agent.lifecycle.windows.scp_dir_to", fake_scp_dir_to)
+    monkeypatch.setattr("agent.lifecycle.windows.time.sleep", lambda _seconds: None)
 
     lifecycle = WindowsLifecycle()
     cfg = {

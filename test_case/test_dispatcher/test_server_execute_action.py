@@ -20,6 +20,7 @@ We exercise:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -55,26 +56,26 @@ def _reset_state():
 
 
 def test_server_exposes_execute_action_tool():
-    """The tool must be defined on `server` and must be a FastMCP
-    tool (i.e. expose `.fn` and `.name`)."""
-    tool = getattr(server, "execute_action", None)
+    """FastMCP 3.4 keeps the decorated symbol callable and stores the
+    FunctionTool in the server registry."""
+    assert callable(server.execute_action)
+    tool = asyncio.run(server.mcp.get_tool("execute_action"))
     assert tool is not None
-    assert hasattr(tool, "fn"), "execute_action must be a FastMCP tool"
-    assert callable(tool.fn)
+    assert tool.fn is server.execute_action
 
 
 def test_execute_action_tool_name_is_execute_action():
     """The FastMCP `name` attribute is the canonical MCP tool name."""
-    tool = server.execute_action
-    name = getattr(tool, "name", None)
-    assert name == "execute_action"
+    tool = asyncio.run(server.mcp.get_tool("execute_action"))
+    assert tool is not None
+    assert tool.name == "execute_action"
 
 
 def test_execute_action_signature_has_canonical_params():
     """Inspecting the underlying function signature keeps the
     MCP contract stable."""
     import inspect
-    sig = inspect.signature(server.execute_action.fn)
+    sig = inspect.signature(server.execute_action)
     params = sig.parameters
     for required in ("action_id",):
         assert required in params, (
@@ -95,7 +96,7 @@ def test_execute_action_returns_action_receipt_json():
     """Without a backend resolver, the receipt is
     dispatch_target_missing — wrapped as a JSON string."""
     tool = server.execute_action
-    result = tool.fn(
+    result = tool(
         action_id="gui.click",
         args={"control_id": "btn-ok"},
         target_ref={
@@ -116,7 +117,7 @@ def test_execute_action_returns_action_receipt_json():
 
 def test_execute_action_unknown_action_id():
     tool = server.execute_action
-    result = tool.fn(action_id="foo.bar")
+    result = tool(action_id="foo.bar")
     parsed = json.loads(result)
     assert parsed["code"] == ad.CODE_UNKNOWN_ACTION_ID
     assert parsed["ok"] is False
@@ -130,7 +131,7 @@ def test_execute_action_disabled_action():
             return {"ok": True, "process_name": "X.exe"}
     ad.set_backend_resolver(lambda: _Stub())
     tool = server.execute_action
-    result = tool.fn(
+    result = tool(
         action_id="gui.type_text",
         args={"control_id": "tb"},
         target_ref={
@@ -146,7 +147,7 @@ def test_execute_action_disabled_action():
 def test_execute_action_invalid_request_id():
     tool = server.execute_action
     # request_id must be a non-empty string; pass an int.
-    result = tool.fn(action_id="gui.click", request_id=123)
+    result = tool(action_id="gui.click", request_id=123)
     parsed = json.loads(result)
     assert parsed["code"] == ad.CODE_INVALID_REQUEST_ID
 
@@ -170,13 +171,13 @@ def test_execute_action_idempotent_through_tool():
         "selector_hint": {"control_id": "btn-ok"},
     }
     tool = server.execute_action
-    r1 = json.loads(tool.fn(
+    r1 = json.loads(tool(
         action_id="gui.click",
         args={"control_id": "btn-ok"},
         target_ref=target,
         request_id="R-MCP",
     ))
-    r2 = json.loads(tool.fn(
+    r2 = json.loads(tool(
         action_id="gui.click",
         args={"control_id": "btn-ok"},
         target_ref=target,
@@ -204,7 +205,7 @@ def test_execute_action_invalidates_active_snapshot():
     mark_live("SNAP-X")
     ob.set_active_snapshot("SNAP-X")
     tool = server.execute_action
-    parsed = json.loads(tool.fn(
+    parsed = json.loads(tool(
         action_id="gui.click",
         args={"control_id": "btn-ok"},
         target_ref={
@@ -230,5 +231,5 @@ def test_execute_action_server_inline_routes_to_dispatch_target_missing():
             return {"ok": True, "process_name": "X.exe"}
     ad.set_backend_resolver(lambda: _Stub())
     tool = server.execute_action
-    parsed = json.loads(tool.fn(action_id="hisec.restore_edr"))
+    parsed = json.loads(tool(action_id="hisec.restore_edr"))
     assert parsed["code"] == ad.CODE_DISPATCH_TARGET_MISSING

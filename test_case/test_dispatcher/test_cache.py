@@ -180,23 +180,23 @@ def test_inflight_lock_concurrent_caller_blocks_then_succeeds():
     after A, and that the inflight map is empty afterwards.
     """
     a_inflight = threading.Event()
-    a_acquired_lock = threading.Event()
+    b_attempting = threading.Event()
     b_acquired = threading.Event()
 
     def caller_a():
         with ad.inflight_lock("R-pair"):
             a_inflight.set()
-            # Hold the lock long enough that B is guaranteed to
-            # be queued waiting for it.
-            assert a_acquired_lock.wait(timeout=2.0), "B never acquired"
+            assert b_attempting.wait(timeout=2.0), "B never attempted to acquire"
+            # Give B time to block on the same request-id lock before A exits.
+            time.sleep(0.05)
         # Exiting the block; B should now be able to acquire.
 
     def caller_b():
         assert a_inflight.wait(timeout=2.0), "A never entered"
+        b_attempting.set()
         with ad.inflight_lock("R-pair"):
             # We acquired the lock; signal completion.
             b_acquired.set()
-            a_acquired_lock.set()
 
     tb = threading.Thread(target=caller_b)
     tb.start()
@@ -205,36 +205,6 @@ def test_inflight_lock_concurrent_caller_blocks_then_succeeds():
     ta.join(timeout=3.0)
     tb.join(timeout=3.0)
     assert b_acquired.is_set(), "B never acquired the lock"
-    assert ad.inflight_count() == 0
-    assert not ta.is_alive()
-    assert not tb.is_alive()
-
-
-    def caller_a():
-        with ad.inflight_lock("R-pair"):
-            a_started.set()
-            # Wait until caller B has actually entered the lock
-            # acquire; if our lock is released too early B would
-            # already have entered.
-            assert barrier_b_entered.wait(timeout=2.0),                 "B never tried to acquire"
-            # Give B a moment to actually block (no real wait needed,
-            # but be explicit).
-            time.sleep(0.05)
-            barrier_a_done.set()
-
-    def caller_b():
-        a_started.wait(timeout=2.0)
-        with ad.inflight_lock("R-pair"):
-            # If we reached here, A had already exited its block.
-            assert barrier_a_done.is_set(),                 "A had not finished when B entered"
-            barrier_b_entered.set()
-
-    tb = threading.Thread(target=caller_b)
-    tb.start()
-    ta = threading.Thread(target=caller_a)
-    ta.start()
-    ta.join(timeout=3.0)
-    tb.join(timeout=3.0)
     assert ad.inflight_count() == 0
     assert not ta.is_alive()
     assert not tb.is_alive()

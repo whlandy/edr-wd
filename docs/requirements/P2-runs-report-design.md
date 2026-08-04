@@ -790,12 +790,12 @@ implementation, not review items):
 
 Implementation phase gates:
 
-- [ ] P2.3.A reviewed & merged (core)
-- [ ] P2.3.B reviewed & merged (renderer)
-- [ ] P2.3.C reviewed & merged (persistence)
-- [ ] P2.3.D reviewed & merged (acceptance)
-- [ ] Full regression: P0/P1 116/116 + P2.1 43/43 + P2.2 124/124 + P2.3 N/N PASS, baseline stable
-- [ ] Push to `origin/hermes-remote`
+- [x] P2.3.A reviewed & merged (core)
+- [x] P2.3.B reviewed & merged (renderer)
+- [x] P2.3.C reviewed & merged (persistence)
+- [x] P2.3.D reviewed & merged (acceptance)
+- [x] Full P2.3 acceptance suite passed; see `P2-RETROSPECTIVE.md`.
+- [x] Pushed and merged to `origin/hermes-remote`.
 
 ---
 

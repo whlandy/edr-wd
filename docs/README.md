@@ -13,17 +13,17 @@ completed design plans after their rules are represented in code, tests,
   detailed implementation contract for versioned action IDs, atomic test
   execution, chained traces, screenshots, recovery, and Markdown reports.
 
-## Todo Designs
+## Design Records And Remaining Acceptance
 
 - [`todo/target-sync-without-ad-hoc-scripts.md`](todo/target-sync-without-ad-hoc-scripts.md):
-  lifecycle cleanup record for making normal connect/test/SOP flows avoid
-  implicit target-side script uploads after the tracked `target/` payload is
-  deployed.
+  completed lifecycle cleanup record; normal connect/test/SOP flows avoid
+  implicit target-side script uploads.
 - [`todo/llm-action-id-sequences.md`](todo/llm-action-id-sequences.md):
   versioned action IDs, observation-scoped target references, and validated LLM
-  action-sequence planning/execution, including chained test traces, screenshot
-  evidence, and generated Markdown test reports. Contains the Phase 1-7 →
-  P0.1-P3.2 checkpoint mapping.
+  completed implementation design for action-sequence planning/execution,
+  including chained traces, screenshot evidence, reports, and the Phase 1-7 →
+  P0.1-P3.2 mapping. Only environment-gated live HiSec planner acceptance
+  remains; packaging is tracked separately.
 
 ## Requirements (P-level Review Packages)
 

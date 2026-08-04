@@ -19,7 +19,7 @@ macOS:
 
 import pytest
 
-from test_case.conftest import McpClient, is_server_online
+from test_case.conftest import is_server_online, live_mcp_client_or_skip
 
 
 WINDOWS_BACKEND = "windows_pywinauto"
@@ -35,10 +35,7 @@ MACOS_EDR_TITLE_RE = "华为HiSec Endpoint"
 
 @pytest.fixture(scope="module")
 def client():
-    c = McpClient()
-    resp = c.initialize()
-    assert "error" not in resp, f"initialize failed: {resp}"
-    return c
+    return live_mcp_client_or_skip()
 
 
 @pytest.fixture(scope="module")

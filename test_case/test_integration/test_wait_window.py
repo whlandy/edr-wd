@@ -3,14 +3,12 @@ test_wait_window.py — 集成测试：wait_window MCP tool
 """
 
 import pytest
-from test_case.conftest import McpClient, is_server_online
+from test_case.conftest import is_server_online, live_mcp_client_or_skip
 
 
 @pytest.fixture(scope="module")
 def client():
-    c = McpClient()
-    c.initialize()
-    return c
+    return live_mcp_client_or_skip()
 
 
 @pytest.mark.skipif(not is_server_online(), reason="MCP server not reachable")

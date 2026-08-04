@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_real_waits(monkeypatch):
+    """Unit contracts mock remote state, so production backoff is unnecessary."""
+    monkeypatch.setattr("agent.target_manager.time.sleep", lambda _seconds: None)
+
 
 def test_kill_ports_uses_powershell_for_windows(monkeypatch):
     from agent import target_manager

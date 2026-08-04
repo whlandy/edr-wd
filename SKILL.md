@@ -219,10 +219,14 @@ cannot be confused.
 Use profile-aware tests; do not route a macOS target into Windows HiSec tests.
 
 ```bash
-python3 -m pytest -q test_case
+python3 -m pytest -q
+python3 -m pytest -q -m unit
+python3 -m pytest -q -m regression
+python3 -m pytest -q -m integration
+python3 -m pytest -q -m e2e
 python test_case/run_tests.py --target 2.26-edr-win26-win11
 python test_case/run_tests.py --target 2.29-edr-mac29-macos14
-python3 -m pytest --collect-only -q test_case/test_integration test_case/test_e2e
+python3 -m pytest --collect-only -q -m "integration or e2e"
 ```
 
 Local pytest must pass independently of live targets. E2E/integration cases may

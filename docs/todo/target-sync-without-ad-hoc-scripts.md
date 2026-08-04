@@ -2,27 +2,14 @@
 
 ## Status
 
-Design todo. The target filesystem contract is agreed, but the current code is
-not fully compliant yet.
+Completed and retained as a design record.
 
-Observed current gaps in `hermes`:
-
-- `WindowsLifecycle.ensure_server_running()` still uploads
-  `target/scripts/start_server.ps1` before starting the scheduled task.
-- `WindowsLifecycle.stop_server()` still uploads
-  `target/scripts/stop_server.ps1` before executing it.
-- `MacOSLifecycle.ensure_server_running()` still uploads
-  `target/scripts/macos/start_server.sh` before kickstarting LaunchAgent.
-- `MacOSLifecycle.stop_server()` still uploads
-  `target/scripts/macos/stop_server.sh` before executing it.
-- `MacOSLifecycle.deploy()` still uses generic `scp_to()` for the whole
-  `target/` directory instead of tracked-only `scp_dir_to()`.
-- `TargetSubAgent.ensure_running()` and `target_manager.ensure_server_running()`
-  do not yet expose a `repair=False` / `repair=True` mode.
-- The documented regression file
-  `test_case/test_lifecycle_no_implicit_uploads.py` does not exist yet.
-
-This document is the detailed implementation design for closing those gaps.
+The Windows and macOS lifecycle normal paths no longer upload scripts,
+deploy uses tracked-only directory sync, and repair is an explicit opt-in
+propagated through `TargetSubAgent` and `target_manager`. The contracts are
+covered by `test_lifecycle_no_adhoc_scp.py`,
+`test_lifecycle_target_integrity.py`, and
+`test_macos_deploy_tracked_only.py`.
 
 ## Goal
 

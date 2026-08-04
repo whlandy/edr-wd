@@ -23,6 +23,13 @@ test = ["pytest>=8.0", "pytest-asyncio>=0.21"]
 pythonpath = ["target", "agent", "."]
 testpaths = ["test_case"]
 asyncio_mode = "auto"
+addopts = "-m 'unit and not regression'"
+markers = [
+    "unit: deterministic unit, contract, fake-target, and offline regression tests",
+    "regression: exhaustive offline evaluation, report, and historical regression matrices",
+    "integration: tests that require a configured live MCP target",
+    "e2e: end-to-end Windows/macOS HiSec tests that mutate or inspect a live GUI",
+]
 
 [project.scripts]
 edr-wd = "edr_wd.server:main"

@@ -20,7 +20,7 @@ profile runner and are more sensitive to macOS GUI permissions.
 """
 
 import pytest
-from test_case.conftest import McpClient, is_server_online
+from test_case.conftest import is_server_online, live_mcp_client_or_skip
 
 
 HISEC_MAIN_TITLE_RE = "华为智能终端安全系统"
@@ -30,10 +30,7 @@ MACOS_BACKEND = "macos_accessibility"
 
 @pytest.fixture(scope="module")
 def client():
-    c = McpClient()
-    resp = c.initialize()
-    assert "error" not in resp, f"initialize failed: {resp}"
-    return c
+    return live_mcp_client_or_skip()
 
 
 def _tool_names(result: dict) -> list[str]:

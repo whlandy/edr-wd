@@ -720,26 +720,26 @@ implementation discovers a new blocker.
 R1 implementation gating checklist (these are now MANDATORY in the
 implementation, not review items):
 
-- [ ] D11: `TestCase.cleanup_outcome_critical` field added; strict mode accepts.
-- [ ] D11: `ManifestRecord.cleanup_status` + `cleanup_outcome_critical` fields added; from_dict backward-compat default.
-- [ ] D12: `compute_display_status(m)` implements cascade rule; called from headline / first-final / aggregate / per-case.
-- [ ] D12: cleanup cascade does NOT mutate manifest.json on disk.
-- [ ] D13: missing `cleanup_*` fields → `"unknown"` / `False` → no cascade.
-- [ ] D14: `escape_markdown()` helper applied to every **user-controlled value** before markdown serialization (M1: boundary → user-controlled).
-- [ ] D14.1: Escape table covers `|`, backtick, newline, control chars.
-- [ ] D15: 4-commit topology A/B/C/D with per-commit review gate.
-- [ ] D16: `schema_version` unchanged; cleanup fields are additive.
-- [ ] D17: On-disk manifest preserved (cascade is read-time only).
+- [x] D11: `TestCase.cleanup_outcome_critical` field added; strict mode accepts.
+- [x] D11: `ManifestRecord.cleanup_status` + `cleanup_outcome_critical` fields added; from_dict backward-compat default.
+- [x] D12: `compute_display_status(m)` implements cascade rule; called from headline / first-final / aggregate / per-case.
+- [x] D12: cleanup cascade does NOT mutate manifest.json on disk.
+- [x] D13: missing `cleanup_*` fields → `"unknown"` / `False` → no cascade.
+- [x] D14: `escape_markdown()` helper applied to every **user-controlled value** before markdown serialization (M1: boundary → user-controlled).
+- [x] D14.1: Escape table covers `|`, backtick, newline, control chars.
+- [x] D15: 4-commit topology A/B/C/D with per-commit review gate.
+- [x] D16: `schema_version` unchanged; cleanup fields are additive.
+- [x] D17: On-disk manifest preserved (cascade is read-time only).
 
 Implementation phase gates:
 
-- [ ] P2.4.A reviewed & pushed (schema)
-- [ ] P2.4.B reviewed & pushed (runner contract)
-- [ ] P2.4.C reviewed & pushed (cascade + Cleanup Warnings)
-- [ ] P2.4.D reviewed & pushed (escape + acceptance)
-- [ ] `TestFR07CleanupCascadeDeferred` (P2.3.D) **deleted**; replaced by `TestFR07CleanupCascadeImplemented`
-- [ ] Full regression: P0/P1 116/116 + P2.1 43/43 + P2.2 124/124 + P2.3 148/148 + P2.4 N/N PASS, baseline stable
-- [ ] Push to `origin/hermes-remote`
+- [x] P2.4.A reviewed & pushed (schema)
+- [x] P2.4.B reviewed & pushed (runner contract)
+- [x] P2.4.C reviewed & pushed (cascade + Cleanup Warnings)
+- [x] P2.4.D reviewed & pushed (escape + acceptance)
+- [x] `TestFR07CleanupCascadeDeferred` (P2.3.D) **deleted**; replaced by `TestFR07CleanupCascadeImplemented`
+- [x] Full P2.4 acceptance suite passed; see `P2-RETROSPECTIVE.md`.
+- [x] Pushed and merged to `origin/hermes-remote`.
 
 ---
 

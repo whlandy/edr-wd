@@ -242,7 +242,8 @@ implementation's job.
 
 ### Time line (append-only)
 
-- **2026-08-02 P3.1 round 1** — pending reviewer.
+- **2026-08-02 P3.1 round 1** — approved with minor notes; notes addressed
+  and implementation subsequently closed.
 
 ### Round 1 — contracts (current)
 

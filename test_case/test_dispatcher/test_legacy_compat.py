@@ -140,7 +140,7 @@ def test_legacy_click_byte_compatible(stub_backend):
     `click()` forwards arguments positionally; our stub preserves
     that by mapping positional args back to names.
     """
-    raw = server.click.fn(42, expected_process_name="X.exe")
+    raw = server.click(42, expected_process_name="X.exe")
     parsed = json.loads(raw)
     assert parsed["ok"] is True
     assert parsed["data"]["clicked"] is True
@@ -148,7 +148,7 @@ def test_legacy_click_byte_compatible(stub_backend):
 
 
 def test_legacy_click_target_byte_compatible(stub_backend):
-    raw = server.click_target.fn(control_id=42, x_offset=1, y_offset=2,
+    raw = server.click_target(control_id=42, x_offset=1, y_offset=2,
                                expected_process_name="X.exe")
     parsed = json.loads(raw)
     assert parsed == stub_backend.click_target(
@@ -158,7 +158,7 @@ def test_legacy_click_target_byte_compatible(stub_backend):
 
 
 def test_legacy_dump_tree_byte_compatible(stub_backend):
-    raw = server.dump_tree.fn(window_title_re="Main.*", max_depth=5)
+    raw = server.dump_tree(window_title_re="Main.*", max_depth=5)
     parsed = json.loads(raw)
     # Backends return a dict; the legacy tool JSON-encodes it verbatim.
     assert parsed == stub_backend.dump_tree(
@@ -170,14 +170,14 @@ def test_legacy_dump_tree_byte_compatible(stub_backend):
 
 
 def test_legacy_find_control_byte_compatible(stub_backend):
-    raw = server.find_control.fn(text="OK")
+    raw = server.find_control(text="OK")
     parsed = json.loads(raw)
     assert parsed == stub_backend.find_control(text="OK")
     assert "matches" in parsed
 
 
 def test_legacy_list_windows_byte_compatible(stub_backend):
-    raw = server.list_windows.fn()
+    raw = server.list_windows()
     parsed = json.loads(raw)
     assert parsed == stub_backend.list_windows()
     assert "windows" in parsed
@@ -195,7 +195,7 @@ def test_dispatcher_does_not_intercept_legacy_calls(stub_backend):
     dispatch)."""
     import action_dispatcher as ad
     ad.cache_clear()
-    raw = server.click.fn(control_id=42)
+    raw = server.click(control_id=42)
     parsed = json.loads(raw)
     assert parsed["ok"] is True
     # Legacy path must NOT cache anything.
@@ -215,7 +215,7 @@ def test_legacy_tool_call_count_independent_of_dispatcher(stub_backend):
 
     stub_backend.click = counting_click
     for _ in range(5):
-        server.click.fn(control_id=1)
+            server.click(control_id=1)
     assert call_count["n"] == 5
 
 
@@ -229,7 +229,7 @@ def test_dispatcher_and_legacy_call_have_independent_state(stub_backend):
     """
     import action_dispatcher as ad
     ad.get_server_instance_id()  # populate cache
-    raw = server.list_windows.fn()
+    raw = server.list_windows()
     parsed = json.loads(raw)
     assert "windows" in parsed
     assert "server_instance_id" not in parsed  # legacy shape unchanged
@@ -243,6 +243,6 @@ def test_dispatcher_and_legacy_call_have_independent_state(stub_backend):
 def test_legacy_get_window_lock_byte_compatible(stub_backend):
     """`get_window_lock` is a legacy tool; the dispatcher must NOT
     inject server_instance_id into its return shape."""
-    raw = server.get_window_lock.fn()
+    raw = server.get_window_lock()
     parsed = json.loads(raw)
     assert parsed == stub_backend.get_window_lock()

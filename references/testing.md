@@ -31,18 +31,48 @@ existing profile-resolution code. Do not silently fall back to Windows tests.
 ## Pytest Suites
 
 ```bash
-python3 -m pytest -q test_case
-python3 -m pytest --collect-only -q test_case/test_integration test_case/test_e2e
-python3 -m pytest -q test_case/test_integration test_case/test_e2e
+# Default fast gate: core deterministic tests, excluding exhaustive matrices.
+python3 -m pytest -q
+
+# PR/full offline gate, including evaluation/report/regression matrices.
+python3 -m pytest -q -m unit
+
+# Only the exhaustive offline matrices.
+python3 -m pytest -q -m regression
+
+# Configured live MCP target, without the full GUI workflow.
+python3 -m pytest -q -m integration
+
+# Explicit Windows/macOS HiSec GUI workflow.
+python3 -m pytest -q -m e2e
+
+# Everything, useful only when a live target is intentionally available.
+python3 -m pytest -q -m "unit or integration or e2e"
 ```
 
-The full local suite includes lifecycle, repair sequencing, registration gates,
-configuration/profile, integration, and E2E tests. Unit tests must pass without
-a live endpoint. Integration/E2E cases may skip with `MCP server not reachable`
-when no configured target MCP server is running; inspect skips with:
+Every collected test receives one primary marker from its directory:
+
+- `unit`: everything outside the two live directories, including fake-target
+  integration and regression contracts;
+- `integration`: `test_case/test_integration/`, requiring a configured MCP
+  target but not necessarily a complete HiSec workflow;
+- `e2e`: `test_case/test_e2e/`, requiring the real Windows/macOS GUI workflow.
+
+The high-volume `test_eval/`, `test_runs/`, and `test_regression/` matrices also
+receive `regression`. They remain part of `unit` and therefore run in the PR
+gate, but are excluded from the default fast gate.
+
+`test_planner_e2e/` is also an offline `regression` suite. It uses a stub LLM
+and fake observation snapshots while crossing the real catalog, structured
+parser, target resolver, and replan policy. This validates planner safety
+without clicking a live GUI.
+
+The default configured in `pyproject.toml` runs `unit and not regression`.
+Integration/E2E cases skip when TCP is open but MCP initialization or the
+required backend is unavailable. Inspect skip reasons with:
 
 ```bash
-python3 -m pytest -q -rs test_case
+python3 -m pytest -q -rs -m "integration or e2e"
 ```
 
 Do not convert an unreachable live target into a local unit-test failure, but

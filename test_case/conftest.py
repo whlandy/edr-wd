@@ -19,11 +19,34 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
+import pytest
 
 # ── Target resolution (Phase 4) ───────────────────────────────────────────────
 
 from agent.target_config import TargetConfig
 from agent.subagent import TargetSubAgentPool
+
+
+def pytest_collection_modifyitems(items) -> None:
+    """Assign one execution tier plus optional offline regression scope."""
+    for item in items:
+        path = item.path.as_posix()
+        if "/test_case/test_e2e/" in path:
+            item.add_marker(pytest.mark.e2e)
+        elif "/test_case/test_integration/" in path:
+            item.add_marker(pytest.mark.integration)
+        else:
+            item.add_marker(pytest.mark.unit)
+            if any(
+                segment in path
+                for segment in (
+                    "/test_case/test_eval/",
+                    "/test_case/test_planner_e2e/",
+                    "/test_case/test_runs/",
+                    "/test_case/test_regression/",
+                )
+            ):
+                item.add_marker(pytest.mark.regression)
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +259,24 @@ class McpClient:
                             return {"ok": False, "raw": block["text"]}
             return data
         return result
+
+
+def live_mcp_client_or_skip() -> McpClient:
+    """Create and initialize a live MCP client or skip the device-gated test.
+
+    A listening TCP port is not sufficient readiness evidence: the remote MCP
+    process may be restarting, have a stale tunnel, or reset initialization.
+    Unit CI must report that external state as a skip, not a code failure.
+    """
+    try:
+        client = McpClient()
+        response = client.initialize()
+    except Exception as exc:
+        pytest.skip(f"live MCP target unavailable during initialize: {exc}")
+    if "error" in response or response.get("ok") is False:
+        client.close()
+        pytest.skip(f"live MCP initialize failed: {response}")
+    return client
 
 
 # ---------------------------------------------------------------------------

@@ -638,7 +638,7 @@ def test_server_status_metadata_nests_catalog_version_and_digest():
     server = _import_server()
     server._backend = _make_stub_backend()
     server._backend_kind = "windows_pywinauto"
-    payload = json.loads(server.status.fn())
+    payload = json.loads(server.status())
     # Nested under `metadata`, not at the top level (review feedback).
     assert "metadata" in payload
     md = payload["metadata"]
@@ -653,7 +653,7 @@ def test_server_status_action_space_driven_by_catalog():
     server = _import_server()
     server._backend = _make_stub_backend()
     server._backend_kind = "windows_pywinauto"
-    payload = json.loads(server.status.fn())
+    payload = json.loads(server.status())
     assert payload["action_space"] == status_action_space("windows_pywinauto")
     assert payload["action_space"] == _load_fixture("status_windows_v0.json")["action_space"]
 
@@ -662,7 +662,7 @@ def test_server_get_action_catalog_tool_present_and_callable():
     server = _import_server()
     server._backend = _make_stub_backend()
     server._backend_kind = "windows_pywinauto"
-    raw = server.get_action_catalog.fn(backend="windows_pywinauto")
+    raw = server.get_action_catalog(backend="windows_pywinauto")
     payload = json.loads(raw)
     assert payload["catalog_version"] == CATALOG_VERSION
     assert payload["catalog_digest"] == catalog_digest()
@@ -683,7 +683,7 @@ def test_server_get_action_catalog_tool_no_backend_uses_current():
     server._backend_kind = "macos_accessibility"
     # Stub implements type_text, but BACKEND_NOT_IMPLEMENTED says
     # macOS doesn't — catalog wins.
-    payload = json.loads(server.get_action_catalog.fn(include_disabled=True))
+    payload = json.loads(server.get_action_catalog(include_disabled=True))
     by_id = {a["action_id"]: a for a in payload["actions"]}
     assert by_id["gui.type_text"]["enabled"] is False
     assert by_id["gui.select"]["enabled"] is False
@@ -860,7 +860,7 @@ def test_get_action_catalog_tool_signature_no_backend_obj():
     """Server-level: the MCP tool body no longer accepts backend_obj."""
     server = _import_server()
     import inspect
-    sig = inspect.signature(server.get_action_catalog.fn)
+    sig = inspect.signature(server.get_action_catalog)
     assert "backend_obj" not in sig.parameters, (
         "get_action_catalog MCP tool still accepts backend_obj; "
         "P0.1 is purely static."

@@ -5,9 +5,11 @@
 - **Round 1**: ⚠️ CHANGES REQUESTED (3 blockers, 3 minors).
 - **Round 2**: ✅ APPROVED (gate closed 2026-08-04).
 - **Verdict (current)**: ✅ APPROVED.
-- **Code written**: 0
-- **Tests added**: 0
-- **Branch**: `feature/p3-2-design`
+- **Implementation**: ✅ COMPLETE and reviewed.
+- **Code**: `agent/eval/` dataset, metrics, thresholds, runner, reports,
+  sanitisation, and CI gate.
+- **Tests**: `test_case/test_eval/` offline evaluation suite.
+- **Merged branch**: `hermes-remote`
 
 ## Round 1 → Round 2 Changelog
 

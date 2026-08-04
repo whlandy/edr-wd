@@ -4,9 +4,10 @@
 
 - **Round**: 1 — APPROVED WITH MINOR NOTES (notes addressed).
 - **Verdict**: gate closed.
-- **Code written**: 0
-- **Tests added**: 0
-- **Branch**: `codex/hermes-p31-design`
+- **Implementation**: ✅ COMPLETE and reviewed.
+- **Code**: `agent/planner/` plus the executor confirmation boundary.
+- **Tests**: `test_case/test_planner/` and confirmation integration tests.
+- **Merged branch**: `hermes-remote`
 
 ## Round 1 review notes addressed
 

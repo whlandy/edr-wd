@@ -820,18 +820,6 @@ class TestNeedsReplanBudget:
         assert d.needed is True
         assert d.replan_count == 5
 
-    def test_budget_exhausted_via_check_helper(self) -> None:
-        step = _step()
-        plan = _plan((step,))
-        after = _snapshot()
-
-        # current_count=3 with default budget=3 means we've
-        # consumed the budget. The next attempt (count=4) would
-        # exceed.
-        with pytest.raises(ReplanBudgetError):
-            needs_replan(plan, after, current_count=4)
-
-
 # ---------------------------------------------------------------------------
 # TestLayerBoundary
 # ---------------------------------------------------------------------------

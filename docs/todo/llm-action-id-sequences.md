@@ -1,5 +1,20 @@
 # TODO: Versioned Action IDs And LLM Action Sequences
 
+## Implementation Status
+
+The original Phase 1–7 checklist below is retained as the design baseline.
+Implementation through P3.2 is complete for the catalog, observations,
+protocol models, dispatcher, executor, trace/evidence, recovery, reports,
+planner, and offline evaluation pipeline.
+
+Remaining external acceptance work is limited to live HiSec planner scenarios
+(stale tree, ambiguous target, wrong ownership, and a mid-sequence dialog).
+Those behaviours now have a deterministic stub-LLM E2E acceptance suite in
+`test_case/test_planner_e2e/test_todo_scenarios.py`; the equivalent live tests
+remain environment-gated. Packaging/PyInstaller is tracked separately under
+`packaging/` and environment-snapshot restoration remains explicitly out of
+scope for V1.
+
 ## Goal
 
 Turn the current backend capability map into a versioned, machine-readable

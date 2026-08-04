@@ -3,8 +3,7 @@
 ## Status
 
 - **Round**: 2 (round 1 was CHANGES REQUESTED).
-- **Verdict**: contracts rewritten per round 1 feedback;
-  awaiting round 2 reviewer sign-off.
+- **Verdict**: ✅ APPROVED; paper-only gate closed after round 2.
 - **Code written**: 0
 - **Tests added**: 0
 - **Branch**: `codex/hermes-p25-design`
