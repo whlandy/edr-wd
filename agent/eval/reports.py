@@ -2,46 +2,67 @@
 reports.py — P3.2.B evaluation result schema.
 
 Implements P3.2 design gate contract **D18** (Evaluation
-result schema contract):
+result schema contract), with strict layer separation:
 
-    * Every report is parseable from JSON.
+    * This module owns ONLY the structural schema. It does
+      NOT do security heuristics or content taxonomy.
+    * The D21 sanitisation kinds (`EXPECTATION_KINDS` /
+      `OBSERVED_KINDS`) and structured payload types
+      (`StructuredExpectation` / `SanitisedObserved`) live
+      in `sanitisation.py` and are out of scope here.
+    * The sensitive-content audit (selector / token /
+      prompt detection) lives in `sanitisation_audit.py`
+      and is invoked separately by the caller, not from
+      `to_dict` / `from_dict`.
+
+D18 contract items satisfied by this module:
+
+    * Initial schema version `report_schema.v1`.
     * Required top-level fields:
-      `dataset_id`, `dataset_version`, `planner_version`,
-      `execution_profile`, `started_at`, `ended_at`,
-      `metrics`, `threshold_decisions`,
-      `reproducibility_digest`, `schema_version`.
-    * Within a `(dataset_version, planner_version)` pair,
-      schema evolves additively only.
-    * Initial schema is `report_schema.v1`.
-    * No observed screen text / args / selectors /
-      confirmation tokens / LLM prompts in reports.
+      `schema_version`, `dataset_id`, `dataset_version`,
+      `planner_version`, `execution_profile`, `started_at`,
+      `ended_at`, `metrics`, `threshold_decisions`,
+      `reproducibility_digest`, `fixture_results`,
+      `run_id`.
+    * JSON-parseable round-trip (to_dict / from_dict /
+      to_json / from_json). Deterministic output
+      (`sort_keys=True`) for D22 digest computation.
+    * UTC timezone-aware datetimes; `ended_at >= started_at`.
+    * Additive schema evolution: `SUPPORTED_SCHEMA_VERSIONS`
+      is a frozen set; adding a version is a code change.
+    * Top-level anti-raw-text rule: `expected` and
+      `observed` MUST be `Mapping`, NOT a raw string /
+      screenshot / prompt.
+
+Layer-boundary notes:
+
+    * The schema does NOT validate direction values,
+      decision values, or status enum membership —
+      those are domain taxonomy, owned by P3.2.C/D.
+    * The schema does NOT call any security heuristic.
+      Historical artefacts that happen to contain a long
+      hex string in a `metric_id` MUST remain parseable.
+    * `to_dict` and `from_dict` perform structural
+      conversion only. Sensitive-content auditing is a
+      separate step; see `sanitisation_audit.py`.
 
 Public API:
 
     * REPORT_SCHEMA_VERSION — schema version constant.
     * SUPPORTED_SCHEMA_VERSIONS — set of supported versions.
-    * MetricValue — single metric reading.
-    * ThresholdDecision — single threshold decision.
-    * FixtureResult — single fixture outcome.
-    * StructuredExpectation — D21 expected-payload type.
-    * SanitisedObserved — D21 observed-payload type.
+    * MetricValue — single metric reading (placeholder
+      shape; expanded in P3.2.C).
+    * ThresholdDecision — single threshold decision
+      (placeholder shape; rules in P3.2.D).
+    * FixtureResult — per-fixture outcome.
     * EvaluationReport — full report.
-    * SensitiveContentError — raised on schema-level content
-      violation.
-    * validate_no_sensitive_content(report_dict) — walks a
-      serialised report and rejects sensitive patterns.
-
-This module is D18-only. The exact metric formulas (D19),
-threshold declarations (D20), digest scheme (D22), and CI
-output shape (D21) are introduced by their respective
-implementation reviews; the placeholder dataclasses here are
-the minimum needed for the schema to round-trip.
+    * RawTextPayloadError — raised when `expected` /
+      `observed` is a raw string at the top level.
 """
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from json import dumps, loads
 from typing import Any, FrozenSet, Mapping
@@ -65,42 +86,19 @@ rejected by `from_dict`."""
 
 
 # ---------------------------------------------------------------------------
-# Sensitive content detection (D18 + D21)
+# Anti-raw-text rule (D18)
 # ---------------------------------------------------------------------------
 
-# Maximum length for any string field in a report. Fields
-# longer than this are flagged as likely observed screen text
-# or LLM prompt leakage.
-_MAX_STRING_LENGTH = 256
 
-# Pattern classes that MUST NOT appear in reports. These are
-# deliberately conservative — false positives err on the side
-# of rejecting the report rather than emitting sensitive
-# content.
-_FORBIDDEN_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # DOM / XPath selectors.
-    re.compile(r"//[A-Za-z]+(\[@[A-Za-z]+=)?"),
-    re.compile(r"/html/body/"),
-    re.compile(r"document\.querySelector\("),
-    # Confirmation tokens: hex/base64 strings longer than 32
-    # chars that look like a random token.
-    re.compile(r"\b[a-f0-9]{40,}\b", re.IGNORECASE),
-    re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"),
-    # LLM prompt leakage markers.
-    re.compile(r"You are an AI", re.IGNORECASE),
-    re.compile(r"^system:\s", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^assistant:\s", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"<\|.*?\|>"),
-)
+class RawTextPayloadError(ValueError):
+    """Raised when an `expected` or `observed` field is a
+    raw string at the top level.
 
-
-class SensitiveContentError(ValueError):
-    """Raised when a serialised report contains content that
-    D18 forbids (observed screen text, args, selectors,
-    confirmation tokens, LLM prompts).
-
-    The error message identifies the offending path and the
-    matched pattern so audit logs are actionable.
+    Per D18, `expected` and `observed` MUST be a `Mapping`,
+    NOT a raw string / screenshot / prompt. This is the
+    only content-shape rule the schema enforces. Sub-pattern
+    detection (selectors, tokens, prompts) lives in
+    `sanitisation_audit.py` and is invoked separately.
     """
 
     def __init__(self, message: str, *, path: str) -> None:
@@ -108,133 +106,8 @@ class SensitiveContentError(ValueError):
         self.path = path
 
 
-def _walk_strings(
-    value: Any, path: str
-) -> list[tuple[str, str]]:
-    """Walk a (possibly nested) JSON-safe structure and
-    collect every (path, string) pair.
-
-    Strings inside `dict` values are walked; non-string types
-    are skipped. The path is a `/`-separated index path (e.g.
-    `metrics/parse_success_rate/value`).
-    """
-    found: list[tuple[str, str]] = []
-    if isinstance(value, str):
-        found.append((path, value))
-    elif isinstance(value, Mapping):
-        for k, v in value.items():
-            found.extend(_walk_strings(v, f"{path}/{k}"))
-    elif isinstance(value, (list, tuple)):
-        for i, v in enumerate(value):
-            found.extend(_walk_strings(v, f"{path}/{i}"))
-    return found
-
-
-def validate_no_sensitive_content(report_dict: Mapping[str, Any]) -> None:
-    """Walk a serialised report and reject sensitive
-    content.
-
-    Raises `SensitiveContentError` if any string field:
-      1. Exceeds `_MAX_STRING_LENGTH` characters, OR
-      2. Matches any `_FORBIDDEN_PATTERNS` pattern.
-
-    The check is structural — it walks the entire serialised
-    report dict, not just the top-level fields. The
-    `_forbidden_patterns` set is conservative; legitimate
-    report data that happens to contain a long hex string
-    SHOULD be encoded as a digest instead (per D21).
-    """
-    for path, string in _walk_strings(report_dict, ""):
-        if len(string) > _MAX_STRING_LENGTH:
-            raise SensitiveContentError(
-                f"string at {path!r} exceeds "
-                f"{_MAX_STRING_LENGTH} chars "
-                f"(len={len(string)}); likely observed screen "
-                f"text or LLM prompt leakage",
-                path=path,
-            )
-        for pattern in _FORBIDDEN_PATTERNS:
-            if pattern.search(string):
-                raise SensitiveContentError(
-                    f"string at {path!r} matches forbidden "
-                    f"pattern {pattern.pattern!r}; likely "
-                    f"selectors / confirmation tokens / LLM "
-                    f"prompt leakage",
-                    path=path,
-                )
-
-
 # ---------------------------------------------------------------------------
-# D21 sanitised payload types
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class StructuredExpectation:
-    """Structured expectation identifier (per D21).
-
-    `kind` is one of the fixed kinds below. The payload is
-    structured (dict), not a free-form string. This is the
-    ONLY allowed shape for an `expected` field.
-    """
-
-    kind: str  # one of EXPECTATION_KINDS
-    value: Mapping[str, Any]
-
-    def __post_init__(self) -> None:
-        if self.kind not in EXPECTATION_KINDS:
-            raise ValueError(
-                f"kind MUST be one of {sorted(EXPECTATION_KINDS)}; "
-                f"got {self.kind!r}"
-            )
-
-
-@dataclass(frozen=True)
-class SanitisedObserved:
-    """Sanitised structured outcome summary (per D21).
-
-    `kind` is one of the fixed kinds below. The summary is
-    structured (dict), not a free-form string. The summary
-    MUST NOT include screen text, args, selectors, or raw
-    confirmation tokens — only structured markers and
-    digests.
-    """
-
-    kind: str  # one of OBSERVED_KINDS
-    summary: Mapping[str, Any]
-
-    def __post_init__(self) -> None:
-        if self.kind not in OBSERVED_KINDS:
-            raise ValueError(
-                f"kind MUST be one of {sorted(OBSERVED_KINDS)}; "
-                f"got {self.kind!r}"
-            )
-
-
-# Kinds for StructuredExpectation (per D21 sanitisation).
-EXPECTATION_KINDS: FrozenSet[str] = frozenset(
-    {
-        "threshold",  # {"value": 0.95}
-        "stage_reached",  # {"name": "validation"}
-        "match_target",  # {"category": "semantic_button"}
-    }
-)
-
-# Kinds for SanitisedObserved (per D21 sanitisation).
-OBSERVED_KINDS: FrozenSet[str] = frozenset(
-    {
-        "value",  # {"value": 0.92}
-        "mismatch",  # {"category": "wrong_target", "digest": "..."}
-        "stage_reached",  # {"name": "validation"}
-        "stage_missed",  # {"name": "validation"}
-        "aborted",  # {"reason": "timeout"}
-        "errored",  # {"kind": "exception"}
-    }
-)
-
-
-# ---------------------------------------------------------------------------
-# Minimal placeholder payloads (extended in P3.2.C / P3.2.D)
+# Placeholder payload shapes (extended in P3.2.C / D / E)
 # ---------------------------------------------------------------------------
 
 
@@ -244,19 +117,16 @@ class MetricValue:
 
     Minimum shape needed for the report to round-trip. The
     full registry and formula shape arrive in P3.2.C (D19).
+    `direction` is kept as a free-form string here so D18
+    does not constrain D19 taxonomy. Callers that need to
+    validate the direction MUST do so at the metric
+    registry layer, not the report layer.
     """
 
     metric_id: str
     value: float
     unit: str  # "ratio", "count", "ms", "bytes"
-    direction: str  # "higher_is_better" | "lower_is_better"
-
-    def __post_init__(self) -> None:
-        if self.direction not in {"higher_is_better", "lower_is_better"}:
-            raise ValueError(
-                f"direction MUST be 'higher_is_better' or "
-                f"'lower_is_better'; got {self.direction!r}"
-            )
+    direction: str  # convention is "higher_is_better" | "lower_is_better"
 
 
 @dataclass(frozen=True)
@@ -264,53 +134,68 @@ class ThresholdDecision:
     """Single threshold decision (per D20).
 
     Minimum shape needed for the report to round-trip. The
-    full registry and declaration shape arrive in P3.2.D (D20).
+    full declaration semantics arrive in P3.2.D (D20). D18
+    does NOT enforce cross-field invariants (e.g.
+    thresholded=True requires threshold) so D20 can evolve
+    without modifying D18.
     """
 
     metric_id: str
-    thresholded: bool  # False = ungated (per D20 round 2)
-    decision: str  # "pass" | "fail" | "ungated"
+    thresholded: bool
+    decision: str  # convention: "pass" | "fail" | "ungated"
     observed: float
-    threshold: float | None  # None when ungated
-
-    def __post_init__(self) -> None:
-        if self.decision not in {"pass", "fail", "ungated"}:
-            raise ValueError(
-                f"decision MUST be 'pass' | 'fail' | 'ungated'; "
-                f"got {self.decision!r}"
-            )
-        if self.thresholded and self.threshold is None:
-            raise ValueError(
-                "thresholded=True requires threshold; use "
-                "thresholded=False for ungated metrics"
-            )
-        if not self.thresholded and self.threshold is not None:
-            raise ValueError(
-                "thresholded=False (ungated) MUST NOT carry a "
-                "threshold; set threshold=None"
-            )
+    threshold: float | None  # convention: None when ungated
 
 
 @dataclass(frozen=True)
 class FixtureResult:
     """Per-fixture outcome.
 
-    `expected` MUST be a `StructuredExpectation`; `observed`
-    MUST be a `SanitisedObserved`. Free-form strings are
-    forbidden by the schema.
+    `expected` and `observed` MUST be `Mapping` (per D18
+    anti-raw-text rule). Free-form strings at the TOP LEVEL
+    are rejected by `__post_init__`. The kind taxonomy
+    (e.g. threshold / stage_reached / mismatch) belongs to
+    P3.2.D and is not constrained here.
+
+    `status` is a free-form string so future statuses
+    (`skipped`, `timeout`, `infrastructure_error`, etc.)
+    can be added without a schema bump.
     """
 
     fixture_id: str
-    status: str  # "completed" | "aborted" | "errored"
-    expected: StructuredExpectation
-    observed: SanitisedObserved
+    status: str
+    expected: Mapping[str, Any]
+    observed: Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        if self.status not in {"completed", "aborted", "errored"}:
-            raise ValueError(
-                f"status MUST be 'completed' | 'aborted' | "
-                f"'errored'; got {self.status!r}"
-            )
+        if not self.fixture_id:
+            raise ValueError("fixture_id MUST be non-empty")
+        _assert_mapping_not_raw_text(self.expected, "expected")
+        _assert_mapping_not_raw_text(self.observed, "observed")
+
+
+def _assert_mapping_not_raw_text(
+    value: Mapping[str, Any] | Any, path: str
+) -> None:
+    """Enforce the D18 anti-raw-text rule at the top level.
+
+    A `Mapping[str, Any]` is required. A raw string (or any
+    other non-mapping type) at the TOP LEVEL is rejected.
+    The rule applies ONLY to the top level — values inside
+    the mapping may be strings, since short identifiers
+    (`metric_id`, `name`, `category`, etc.) are legitimate.
+    """
+    if isinstance(value, str):
+        raise RawTextPayloadError(
+            f"{path!r} MUST be a Mapping, not a raw string "
+            f"(per D18 anti-raw-text rule)",
+            path=path,
+        )
+    if not isinstance(value, Mapping):
+        raise RawTextPayloadError(
+            f"{path!r} MUST be a Mapping; got {type(value).__name__}",
+            path=path,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -326,19 +211,17 @@ class EvaluationReport:
       `schema_version`, `dataset_id`, `dataset_version`,
       `planner_version`, `execution_profile`, `started_at`,
       `ended_at`, `metrics`, `threshold_decisions`,
-      `reproducibility_digest`, plus `fixture_results` for
-      per-fixture outcomes and `run_id` for identification.
+      `fixture_results`, `reproducibility_digest`, `run_id`.
 
-    `started_at` and `ended_at` MUST be timezone-aware
-    UTC datetimes. JSON serialisation uses ISO 8601 with a
-    `+00:00` UTC suffix.
+    `started_at` and `ended_at` MUST be timezone-aware UTC
+    datetimes. JSON serialisation uses ISO 8601.
 
     `metrics` is keyed by `metric_id`; values are
     `MetricValue`.
 
     `threshold_decisions` is a tuple of `ThresholdDecision`,
     one per metric (or a subset if some metrics are ungated
-    and contribute no decision).
+    per D20 round 2).
 
     `reproducibility_digest` is set by P3.2.E (D22). It MAY
     be the empty string in D18-only contexts; consumers
@@ -358,8 +241,8 @@ class EvaluationReport:
     ended_at: datetime
     metrics: Mapping[str, MetricValue]
     threshold_decisions: tuple[ThresholdDecision, ...]
-    reproducibility_digest: str
     fixture_results: tuple[FixtureResult, ...]
+    reproducibility_digest: str
     run_id: str
 
     def __post_init__(self) -> None:
@@ -377,34 +260,37 @@ class EvaluationReport:
             raise ValueError("planner_version MUST be non-empty")
         if not self.execution_profile:
             raise ValueError("execution_profile MUST be non-empty")
+        if not self.run_id:
+            raise ValueError("run_id MUST be non-empty")
         if self.started_at.tzinfo is None:
             raise ValueError("started_at MUST be timezone-aware")
         if self.ended_at.tzinfo is None:
             raise ValueError("ended_at MUST be timezone-aware")
-        if self.started_at.tzinfo != timezone.utc and (
-            self.started_at.utcoffset() != timezone.utc.utcoffset(None)
+        if (
+            self.started_at.utcoffset()
+            != timezone.utc.utcoffset(None)
         ):
             raise ValueError("started_at MUST be UTC")
-        if self.ended_at.tzinfo != timezone.utc and (
-            self.ended_at.utcoffset() != timezone.utc.utcoffset(None)
+        if (
+            self.ended_at.utcoffset()
+            != timezone.utc.utcoffset(None)
         ):
             raise ValueError("ended_at MUST be UTC")
         if self.ended_at < self.started_at:
             raise ValueError("ended_at MUST be >= started_at")
-        if not self.run_id:
-            raise ValueError("run_id MUST be non-empty")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a JSON-safe dict.
 
-        The serialised form is `validate_no_sensitive_content`
-        -safe (sanitised types only), but the validator is
-        still called to catch mistakes.
+        Pure structural conversion — no security heuristics.
+        Callers that need sensitive-content auditing MUST
+        invoke `audit_report_sensitive_content` from
+        `sanitisation_audit.py` separately.
 
         Round-trip guarantee: `EvaluationReport.from_dict(
         report.to_dict()) == report`.
         """
-        payload: dict[str, Any] = {
+        return {
             "schema_version": self.schema_version,
             "dataset_id": self.dataset_id,
             "dataset_version": self.dataset_version,
@@ -431,35 +317,34 @@ class EvaluationReport:
                 }
                 for td in self.threshold_decisions
             ],
-            "reproducibility_digest": self.reproducibility_digest,
-            "run_id": self.run_id,
             "fixture_results": [
                 {
                     "fixture_id": fr.fixture_id,
                     "status": fr.status,
-                    "expected": {
-                        "kind": fr.expected.kind,
-                        "value": dict(fr.expected.value),
-                    },
-                    "observed": {
-                        "kind": fr.observed.kind,
-                        "summary": dict(fr.observed.summary),
-                    },
+                    "expected": dict(fr.expected),
+                    "observed": dict(fr.observed),
                 }
                 for fr in self.fixture_results
             ],
+            "reproducibility_digest": self.reproducibility_digest,
+            "run_id": self.run_id,
         }
-        validate_no_sensitive_content(payload)
-        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "EvaluationReport":
         """Deserialise from a JSON-parsed dict.
 
-        Validates the schema version, required fields, and
-        sensitive content. Raises `ValueError` on schema
-        mismatch; raises `SensitiveContentError` on forbidden
-        patterns.
+        Pure structural deserialisation. Validates the
+        schema version and required fields. Does NOT call
+        sensitive-content auditing — see
+        `sanitisation_audit.audit_report_sensitive_content`.
+        Historical artefacts that happen to contain a
+        long hex string in `metric_id` MUST remain
+        parseable here.
+
+        Raises `ValueError` on schema mismatch. Raises
+        `RawTextPayloadError` when `expected` / `observed`
+        is a raw string at the top level.
         """
         schema_version = data.get("schema_version")
         if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
@@ -468,7 +353,6 @@ class EvaluationReport:
                 f"{sorted(SUPPORTED_SCHEMA_VERSIONS)}; got "
                 f"{schema_version!r}"
             )
-        validate_no_sensitive_content(data)
 
         started_at = _parse_datetime(data["started_at"])
         ended_at = _parse_datetime(data["ended_at"])
@@ -502,14 +386,8 @@ class EvaluationReport:
             FixtureResult(
                 fixture_id=fr["fixture_id"],
                 status=fr["status"],
-                expected=StructuredExpectation(
-                    kind=fr["expected"]["kind"],
-                    value=dict(fr["expected"]["value"]),
-                ),
-                observed=SanitisedObserved(
-                    kind=fr["observed"]["kind"],
-                    summary=dict(fr["observed"]["summary"]),
-                ),
+                expected=_parse_mapping(fr["expected"], "expected"),
+                observed=_parse_mapping(fr["observed"], "observed"),
             )
             for fr in data["fixture_results"]
         )
@@ -524,10 +402,29 @@ class EvaluationReport:
             ended_at=ended_at,
             metrics=metrics,
             threshold_decisions=threshold_decisions,
-            reproducibility_digest=data["reproducibility_digest"],
             fixture_results=fixture_results,
+            reproducibility_digest=data["reproducibility_digest"],
             run_id=data["run_id"],
         )
+
+
+def _parse_mapping(value: Any, path: str) -> Mapping[str, Any]:
+    """Parse a top-level expected/observed Mapping.
+
+    Enforces the D18 anti-raw-text rule at the top level.
+    """
+    if isinstance(value, str):
+        raise RawTextPayloadError(
+            f"{path!r} MUST be a Mapping, not a raw string "
+            f"(per D18 anti-raw-text rule)",
+            path=path,
+        )
+    if not isinstance(value, Mapping):
+        raise RawTextPayloadError(
+            f"{path!r} MUST be a Mapping; got {type(value).__name__}",
+            path=path,
+        )
+    return dict(value)
 
 
 def _parse_datetime(value: Any) -> datetime:
@@ -575,16 +472,11 @@ def from_json(text: str) -> EvaluationReport:
 __all__ = [
     "REPORT_SCHEMA_VERSION",
     "SUPPORTED_SCHEMA_VERSIONS",
+    "RawTextPayloadError",
     "MetricValue",
     "ThresholdDecision",
     "FixtureResult",
-    "StructuredExpectation",
-    "SanitisedObserved",
-    "EXPECTATION_KINDS",
-    "OBSERVED_KINDS",
     "EvaluationReport",
-    "SensitiveContentError",
-    "validate_no_sensitive_content",
     "to_json",
     "from_json",
 ]

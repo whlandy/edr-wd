@@ -1,17 +1,18 @@
 """
-P3.2.B — Evaluation result schema unit tests.
+P3.2.B round 2 — Evaluation result schema unit tests.
 
-Covers D18 invariants:
-  * Required top-level fields.
-  * JSON-parseable round-trip.
-  * Initial schema version `report_schema.v1`.
-  * No observed screen text / args / selectors /
-    confirmation tokens / LLM prompts.
-  * UTC timezone-aware datetimes.
-  * Within (dataset_version, planner_version) pair, schema
-    evolves additively only (enforced by SUPPORTED_SCHEMA_VERSIONS
-    being a frozen set with version increment required).
-  * Sanitised types only for expected/observed (D21 contract).
+Layer separation per round 2 review:
+
+  * D18 reports.py only owns STRUCTURAL schema (required
+    fields, types, format, JSON round-trip).
+  * D21 sanitisation kinds live in
+    `agent/eval/sanitisation.py` (P3.2.D scope).
+  * Sensitive-content audit lives in
+    `agent/eval/sanitisation_audit.py` and is NOT invoked
+    by to_dict / from_dict.
+
+This file covers only the structural layer. Audit
+coverage is in `test_sanitisation_audit.py`.
 """
 
 from __future__ import annotations
@@ -22,21 +23,15 @@ from typing import Any
 import pytest
 
 from agent.eval.reports import (
-    EXPECTATION_KINDS,
-    OBSERVED_KINDS,
+    REPORT_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
     EvaluationReport,
     FixtureResult,
     MetricValue,
-    REPORT_SCHEMA_VERSION,
-    REPORT_SCHEMA_VERSION as _RSV,
-    SanitisedObserved,
-    SensitiveContentError,
-    StructuredExpectation,
-    SUPPORTED_SCHEMA_VERSIONS,
+    RawTextPayloadError,
     ThresholdDecision,
     from_json,
     to_json,
-    validate_no_sensitive_content,
 )
 
 
@@ -83,8 +78,8 @@ def make_report(
         ended_at=ended_at,
         metrics=metrics,
         threshold_decisions=threshold_decisions,
-        reproducibility_digest=reproducibility_digest,
         fixture_results=fixture_results,
+        reproducibility_digest=reproducibility_digest,
         run_id=run_id,
     )
 
@@ -99,8 +94,6 @@ class TestSchemaVersion:
         assert REPORT_SCHEMA_VERSION == "report_schema.v1"
 
     def test_supported_versions_is_frozen_set(self) -> None:
-        """SUPPORTED_SCHEMA_VERSIONS MUST be a frozen set
-        so callers cannot mutate it."""
         assert isinstance(SUPPORTED_SCHEMA_VERSIONS, frozenset)
         assert REPORT_SCHEMA_VERSION in SUPPORTED_SCHEMA_VERSIONS
 
@@ -153,7 +146,6 @@ class TestDatetimes:
             make_report(started_at=aware, ended_at=aware.replace(tzinfo=None))
 
     def test_non_utc_timezone_rejected(self) -> None:
-        # UTC+8.
         tz_plus8 = timezone(timedelta(hours=8))
         with pytest.raises(ValueError, match="started_at MUST be UTC"):
             make_report(
@@ -213,8 +205,6 @@ class TestJsonRoundTrip:
         assert restored == report
 
     def test_deterministic_json_keys(self) -> None:
-        """Same report → same JSON bytes (sort_keys=True
-        for digest computation in P3.2.E)."""
         report = make_report()
         text_a = to_json(report)
         text_b = to_json(report)
@@ -224,231 +214,230 @@ class TestJsonRoundTrip:
         with pytest.raises(ValueError, match="MUST be a JSON object"):
             from_json("[1, 2, 3]")
 
+    def test_no_security_heuristic_on_round_trip(self) -> None:
+        """D18 must NOT invoke security heuristics during
+        to_dict / from_dict. A historical artefact with a
+        long hex string in metric_id MUST remain
+        parseable."""
+        report = make_report(
+            metrics={
+                "aabbccddeeff00112233445566778899aabbccddeeff": (
+                    MetricValue(
+                        metric_id="aabbccddeeff00112233445566778899aabbccddeeff",
+                        value=0.95,
+                        unit="ratio",
+                        direction="higher_is_better",
+                    )
+                )
+            }
+        )
+        text = to_json(report)
+        restored = from_json(text)
+        assert restored == report
+
 
 # ---------------------------------------------------------------------------
-# Sensitive content detection (D18 + D21)
+# Anti-raw-text rule (D18 layer boundary)
 # ---------------------------------------------------------------------------
 
 
-class TestSensitiveContentDetection:
-    def test_validate_clean_dict_passes(self) -> None:
-        report = make_report()
-        validate_no_sensitive_content(report.to_dict())
+class TestAntiRawTextRule:
+    """Per D18, expected / observed MUST be a Mapping, not
+    a raw string / screenshot / prompt. The schema enforces
+    this at the top level only — nested strings are
+    legitimate identifiers."""
 
-    def test_observed_screen_text_rejected(self) -> None:
-        """Long string fields are flagged as likely observed
-        screen text or LLM prompt leakage."""
-        long_text = "x" * 300
-        d = make_report().to_dict()
-        d["metrics"]["smuggled"] = {"smuggled_value": long_text}
-        with pytest.raises(
-            SensitiveContentError, match="exceeds.*chars"
-        ):
-            validate_no_sensitive_content(d)
+    def test_fixture_result_expected_must_be_mapping(self) -> None:
+        with pytest.raises(RawTextPayloadError, match="MUST be a Mapping"):
+            FixtureResult(
+                fixture_id="x",
+                status="completed",
+                expected="click login button",  # type: ignore[arg-type]
+                observed={},
+            )
 
-    def test_xpath_selector_rejected(self) -> None:
-        d = make_report().to_dict()
-        d["metrics"]["smuggled"] = {"xpath": "//button[@id='submit']"}
-        with pytest.raises(
-            SensitiveContentError, match="forbidden pattern"
-        ):
-            validate_no_sensitive_content(d)
+    def test_fixture_result_observed_must_be_mapping(self) -> None:
+        with pytest.raises(RawTextPayloadError, match="MUST be a Mapping"):
+            FixtureResult(
+                fixture_id="x",
+                status="completed",
+                expected={},
+                observed="You are an AI assistant",  # type: ignore[arg-type]
+            )
 
-    def test_long_hex_token_rejected(self) -> None:
-        d = make_report().to_dict()
-        # 40 hex chars — D14 token shape.
-        d["metrics"]["smuggled"] = {"token": "a" * 40 + "bcdef12345"}
-        with pytest.raises(
-            SensitiveContentError, match="forbidden pattern"
-        ):
-            validate_no_sensitive_content(d)
+    def test_fixture_result_accepts_mapping_with_nested_strings(self) -> None:
+        """Nested strings are legitimate identifiers (e.g.
+        {'name': 'login'}); only TOP-LEVEL raw strings are
+        rejected by the anti-raw-text rule."""
+        fr = FixtureResult(
+            fixture_id="x",
+            status="completed",
+            expected={"kind": "threshold", "value": 0.95},
+            observed={"kind": "value", "summary": {"name": "login"}},
+        )
+        assert fr.expected == {
+            "kind": "threshold",
+            "value": 0.95,
+        }
 
-    def test_base64_token_rejected(self) -> None:
+    def test_from_dict_rejects_raw_string_expected(self) -> None:
         d = make_report().to_dict()
-        d["metrics"]["smuggled"] = {"token": "Q" * 50}
-        with pytest.raises(
-            SensitiveContentError, match="forbidden pattern"
-        ):
-            validate_no_sensitive_content(d)
-
-    def test_llm_prompt_leakage_rejected(self) -> None:
-        d = make_report().to_dict()
-        d["metrics"]["smuggled"] = {"prompt": "You are an AI assistant"}
-        with pytest.raises(
-            SensitiveContentError, match="forbidden pattern"
-        ):
-            validate_no_sensitive_content(d)
-
-    def test_system_role_marker_rejected(self) -> None:
-        d = make_report().to_dict()
-        d["metrics"]["smuggled"] = {"prompt": "system: do thing"}
-        with pytest.raises(
-            SensitiveContentError, match="forbidden pattern"
-        ):
-            validate_no_sensitive_content(d)
-
-    def test_query_selector_rejected(self) -> None:
-        d = make_report().to_dict()
-        d["metrics"]["smuggled"] = {"sel": "document.querySelector('.x')"}
-        with pytest.raises(
-            SensitiveContentError, match="forbidden pattern"
-        ):
-            validate_no_sensitive_content(d)
-
-    def test_error_path_is_actionable(self) -> None:
-        """The error message MUST identify the offending
-        path so audit logs are actionable."""
-        d = make_report().to_dict()
-        d["metrics"]["smuggled"] = {"xpath": "//button"}
-        with pytest.raises(SensitiveContentError) as exc_info:
-            validate_no_sensitive_content(d)
-        assert exc_info.value.path  # non-empty path
-
-    def test_from_dict_rejects_sensitive_content(self) -> None:
-        """A report dict with smuggled selectors MUST be
-        rejected at deserialisation."""
-        d = make_report().to_dict()
-        d["metrics"]["smuggled"] = {"xpath": "//button[@id='x']"}
-        with pytest.raises(SensitiveContentError):
+        d["fixture_results"] = [
+            {
+                "fixture_id": "x",
+                "status": "completed",
+                "expected": "click login button",
+                "observed": {},
+            }
+        ]
+        with pytest.raises(RawTextPayloadError):
             from_json(_safe_dumps(d))
 
 
 def _safe_dumps(d: dict[str, Any]) -> str:
-    """json.dumps wrapper that round-trips through the
-    report schema. Used in tests where we need to construct
-    a JSON string containing forbidden content."""
-    from json import dumps as _dumps
+    from json import dumps
 
-    return _dumps(d, sort_keys=True)
+    return dumps(d, sort_keys=True)
 
 
 # ---------------------------------------------------------------------------
-# Sanitised payload types (D21)
+# False-positive tests (M3 — legitimate data must not be
+# rejected by the schema)
 # ---------------------------------------------------------------------------
 
 
-class TestSanitisedPayloads:
-    def test_structured_expectation_kinds(self) -> None:
-        assert "threshold" in EXPECTATION_KINDS
-        assert "stage_reached" in EXPECTATION_KINDS
-        assert "match_target" in EXPECTATION_KINDS
+class TestNoFalsePositivesInSchema:
+    """The schema layer MUST remain permissive enough that
+    legitimate artefacts with content that LOOKS like a
+    sensitive pattern (but isn't) parse without error.
 
-    def test_sanitised_observed_kinds(self) -> None:
-        assert "value" in OBSERVED_KINDS
-        assert "mismatch" in OBSERVED_KINDS
-        assert "stage_missed" in OBSERVED_KINDS
+    The audit layer (separately tested) handles real
+    detection; this class ensures the schema does NOT
+    bleed detection logic in."""
 
-    def test_invalid_expectation_kind_rejected(self) -> None:
-        with pytest.raises(ValueError, match="kind MUST be one of"):
-            StructuredExpectation(kind="free_form", value={})
-
-    def test_invalid_observed_kind_rejected(self) -> None:
-        with pytest.raises(ValueError, match="kind MUST be one of"):
-            SanitisedObserved(kind="raw_text", summary={})
-
-    def test_structured_expectation_accepts_valid(self) -> None:
-        exp = StructuredExpectation(
-            kind="threshold", value={"value": 0.95}
+    def test_metric_id_with_system_word_allowed(self) -> None:
+        report = make_report(
+            metrics={
+                "system_latency": MetricValue(
+                    metric_id="system_latency",
+                    value=42.0,
+                    unit="ms",
+                    direction="lower_is_better",
+                )
+            }
         )
-        assert exp.kind == "threshold"
-        assert exp.value == {"value": 0.95}
+        text = to_json(report)
+        restored = from_json(text)
+        assert "system_latency" in restored.metrics
+
+    def test_long_dataset_description_allowed(self) -> None:
+        """D18 schema does NOT enforce a max string length
+        on arbitrary fields. A 500-char dataset_id is
+        permitted (the schema only enforces non-empty)."""
+        long_id = "x" * 500
+        report = make_report(dataset_id=long_id)
+        text = to_json(report)
+        restored = from_json(text)
+        assert restored.dataset_id == long_id
+
+    def test_hex_identifier_in_dataset_id_allowed(self) -> None:
+        """A 64-char hex dataset_id MUST be parseable; the
+        schema does not flag token-shaped fields."""
+        hex_id = "aabbccddeeff00112233445566778899" * 2
+        report = make_report(dataset_id=hex_id)
+        text = to_json(report)
+        restored = from_json(text)
+        assert restored.dataset_id == hex_id
+
+    def test_metric_id_with_xpath_like_word_allowed(self) -> None:
+        """A metric_id that mentions a path-like substring
+        MUST NOT be flagged by the schema (audit is
+        separate)."""
+        report = make_report(
+            metrics={
+                "test_xpath_perf": MetricValue(
+                    metric_id="test_xpath_perf",
+                    value=1.0,
+                    unit="count",
+                    direction="lower_is_better",
+                )
+            }
+        )
+        text = to_json(report)
+        restored = from_json(text)
+        assert "test_xpath_perf" in restored.metrics
 
 
 # ---------------------------------------------------------------------------
-# MetricValue + ThresholdDecision + FixtureResult invariants
+# Placeholder dataclass flexibility (M1, M2 — D20 / status
+# extension belong elsewhere)
 # ---------------------------------------------------------------------------
 
 
-class TestMetricValue:
-    def test_invalid_direction_rejected(self) -> None:
-        with pytest.raises(ValueError, match="direction MUST be"):
-            MetricValue(
-                metric_id="x", value=1.0, unit="ratio", direction="unknown"
-            )
+class TestPlaceholderFlexibility:
+    """D18 must NOT freeze D20 or status taxonomy. The
+    placeholder dataclasses accept any string values so
+    D20 (P3.2.D) and the runner (P3.2.E) can evolve
+    without schema changes."""
 
-    def test_valid_directions_accepted(self) -> None:
-        MetricValue(
-            metric_id="x", value=1.0, unit="ratio", direction="higher_is_better"
-        )
-        MetricValue(
-            metric_id="x", value=1.0, unit="ratio", direction="lower_is_better"
-        )
-
-
-class TestThresholdDecision:
-    def test_invalid_decision_rejected(self) -> None:
-        with pytest.raises(ValueError, match="decision MUST be"):
-            ThresholdDecision(
-                metric_id="x",
-                thresholded=True,
-                decision="unknown",
-                observed=0.5,
-                threshold=0.95,
-            )
-
-    def test_thresholded_requires_threshold(self) -> None:
-        with pytest.raises(ValueError, match="thresholded=True requires threshold"):
-            ThresholdDecision(
-                metric_id="x",
-                thresholded=True,
-                decision="pass",
-                observed=0.5,
-                threshold=None,
-            )
-
-    def test_ungated_must_not_have_threshold(self) -> None:
-        with pytest.raises(ValueError, match="ungated"):
-            ThresholdDecision(
-                metric_id="x",
-                thresholded=False,
-                decision="ungated",
-                observed=0.5,
-                threshold=0.95,
-            )
-
-    def test_thresholded_pass(self) -> None:
+    def test_threshold_decision_accepts_free_decision(self) -> None:
+        """Per M1, thresholded-vs-decision cross-field
+        validation is removed. D20 owns that rule."""
         td = ThresholdDecision(
             metric_id="x",
             thresholded=True,
-            decision="pass",
-            observed=0.96,
+            decision="unknown_decision_value",
+            observed=0.5,
             threshold=0.95,
         )
-        assert td.decision == "pass"
+        assert td.decision == "unknown_decision_value"
 
-    def test_ungated(self) -> None:
+    def test_threshold_decision_ungated_threshold_set(self) -> None:
+        """The cross-field invariant is removed; both
+        shapes (thresholded+threshold, ungated+None,
+        thresholded+None, ungated+threshold) are accepted
+        by D18. P3.2.D enforces the canonical rule."""
         td = ThresholdDecision(
             metric_id="x",
             thresholded=False,
             decision="ungated",
             observed=0.5,
-            threshold=None,
+            threshold=0.95,
         )
-        assert td.decision == "ungated"
+        assert td.thresholded is False
+        assert td.threshold == 0.95
 
+    def test_metric_value_accepts_arbitrary_direction(self) -> None:
+        """D19 owns direction taxonomy. D18 is permissive."""
+        mv = MetricValue(
+            metric_id="x", value=1.0, unit="ratio", direction="custom_dir"
+        )
+        assert mv.direction == "custom_dir"
 
-class TestFixtureResult:
-    def test_invalid_status_rejected(self) -> None:
-        with pytest.raises(ValueError, match="status MUST be"):
-            FixtureResult(
-                fixture_id="x",
-                status="unknown",
-                expected=StructuredExpectation(kind="stage_reached", value={"name": "x"}),
-                observed=SanitisedObserved(kind="stage_reached", summary={"name": "x"}),
-            )
+    def test_fixture_result_accepts_unknown_status(self) -> None:
+        """Per M2, status MUST accept extension. Future
+        statuses (skipped, timeout, infrastructure_error)
+        do not require a D18 change."""
+        fr = FixtureResult(
+            fixture_id="x",
+            status="skipped",
+            expected={"kind": "stage_reached", "name": "validation"},
+            observed={"kind": "stage_missed", "name": "validation"},
+        )
+        assert fr.status == "skipped"
 
-    def test_valid_statuses(self) -> None:
-        for s in ("completed", "aborted", "errored"):
-            FixtureResult(
-                fixture_id="x",
-                status=s,
-                expected=StructuredExpectation(kind="stage_reached", value={"name": "x"}),
-                observed=SanitisedObserved(kind="stage_reached", summary={"name": "x"}),
-            )
+    def test_fixture_result_accepts_infrastructure_error_status(self) -> None:
+        fr = FixtureResult(
+            fixture_id="x",
+            status="infrastructure_error",
+            expected={},
+            observed={"kind": "errored", "reason": "ci_outage"},
+        )
+        assert fr.status == "infrastructure_error"
 
 
 # ---------------------------------------------------------------------------
-# End-to-end report round-trip with sanitised payloads
+# End-to-end report round-trip with sanitised-shape payloads
 # ---------------------------------------------------------------------------
 
 
@@ -493,24 +482,17 @@ class TestEndToEndReport:
                 FixtureResult(
                     fixture_id="click_login",
                     status="completed",
-                    expected=StructuredExpectation(
-                        kind="stage_reached", value={"name": "login"}
-                    ),
-                    observed=SanitisedObserved(
-                        kind="stage_reached", summary={"name": "login"}
-                    ),
+                    expected={"kind": "stage_reached", "name": "login"},
+                    observed={"kind": "stage_reached", "name": "login"},
                 ),
                 FixtureResult(
                     fixture_id="delete_account",
                     status="aborted",
-                    expected=StructuredExpectation(
-                        kind="match_target",
-                        value={"category": "danger_button"},
-                    ),
-                    observed=SanitisedObserved(
-                        kind="mismatch",
-                        summary={"category": "wrong_target", "digest": "sha256:abc123"},
-                    ),
+                    expected={"category": "danger_button"},
+                    observed={
+                        "category": "wrong_target",
+                        "digest": "sha256:abc123",
+                    },
                 ),
             ),
             reproducibility_digest="sha256:fake-digest-pending",
@@ -518,19 +500,10 @@ class TestEndToEndReport:
         text = to_json(report)
         restored = from_json(text)
         assert restored == report
-        # Sanitised kinds preserved.
-        assert restored.fixture_results[0].expected.kind == "stage_reached"
-        assert restored.fixture_results[1].observed.kind == "mismatch"
-        # Thresholded vs ungated preserved.
+        assert restored.fixture_results[0].expected == {
+            "kind": "stage_reached",
+            "name": "login",
+        }
+        assert restored.fixture_results[1].observed["category"] == "wrong_target"
         assert restored.threshold_decisions[0].thresholded is True
         assert restored.threshold_decisions[1].thresholded is False
-        assert restored.threshold_decisions[1].threshold is None
-
-
-# ---------------------------------------------------------------------------
-# Sanity check: ensure _RSV alias matches constant
-# ---------------------------------------------------------------------------
-
-
-def test_schema_version_alias_matches() -> None:
-    assert _RSV == REPORT_SCHEMA_VERSION
