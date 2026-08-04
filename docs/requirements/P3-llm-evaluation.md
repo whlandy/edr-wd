@@ -6,7 +6,7 @@
 - Source contract: `../architecture/01-action-trace-test-report-design.md` §24, §18 Phase C/D, §20 Live E2E, §21 Metrics
 - Mapped checkpoints: **P3.1 Structured LLM Planner**, **P3.2 Evaluation And Metrics**
 - Predecessors: **P2.5 Design Review Gate** (closed; see `P2-5-design-gate.md`) → **P3.1 Design Review Gate** (closed round 1; see `P3-1-design-gate.md`) → **P3.2 Design Review Gate** (in review; see `P3-2-evaluation-design-gate.md`)
-- Completion state: **P2.5 closed; P3.1 design gate CLOSED; P3.1 implementation CLOSED; P3.2 design gate CLOSED (round 2 APPROVED 2026-08-04); P3.2 implementation IN PROGRESS**
+- Completion state: **P2.5 closed; P3.1 design gate CLOSED; P3.1 implementation CLOSED; P3.2 design gate CLOSED (round 2 APPROVED 2026-08-04); P3.2 implementation COMPLETE (Reviewed and APPROVED 2026-08-04)**
 - Milestone: **P3.2 closes the design**. After P3.2, EDR-WD can hand a
   target snapshot to a structured-output model and execute an
   autonomous plan with reproducible evaluation evidence.
@@ -257,12 +257,12 @@ availability a unit-CI requirement.
 
 | ID | Requirement |
 |----|-------------|
-| FR-P3.2-01 | Evaluation is reproducible from versioned fixtures; running twice produces identical reports given frozen inputs. |
+| FR-P3.2-01 | Evaluation is reproducible from versioned fixtures. Each evaluation stage declares its determinism class (D0/D1/D2 per P3.2 design gate D22). D0 stages produce byte-identical output given frozen inputs. D1 stages (involving LLM / model artifacts) produce semantically equivalent output given a fixed `(planner_artifact, model_artifact)` pair. D2 stages accept bounded variance. |
 | FR-P3.2-02 | Metrics contain no sensitive text (audit confirms zero matches against the configured secret registry and zero observed screen text). |
 | FR-P3.2-03 | Regressions are reported by `(action_id, backend, profile)` and link back to the underlying trace evidence. |
 | FR-P3.2-04 | Evaluation supports a `--no-gui` mode for unit CI; live E2E is opt-in. |
 | FR-P3.2-05 | Each metric writer refuses to serialize a payload that contains observed text or secret patterns. |
-| FR-P3.2-06 | Datasets are content-addressed; the dataset digest is part of the regression report. |
+| FR-P3.2-06 | Datasets have explicit stable identities (`dataset_id`, `dataset_version`, `fixture_id`). Dataset identity metadata is included in regression reports. Content-addressed storage is an implementation choice, not a contract requirement. |
 | FR-P3.2-07 | Thresholds are externalized to a config file; CI can override per metric. |
 | FR-P3.2-08 | Replan rate, recovery success rate, and semantic/coordinate ratio each have explicit targets documented in the eval README. |
 
@@ -298,8 +298,7 @@ class Thresholds:
 
 ### Acceptance Criteria
 
-1. Running eval on the same fixtures twice produces identical
-   reports (deterministic).
+1. Running eval on the same fixtures twice satisfies the declared determinism class (D0/D1/D2) and produces a reproducible evaluation outcome according to that class.
 2. Each metric writer audit confirms no secret / no screen text.
 3. Regression report shows the offending metric, expected range,
    observed value, and trace evidence link.
