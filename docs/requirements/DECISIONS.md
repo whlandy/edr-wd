@@ -323,3 +323,104 @@ implementation's job.
 - **Next**: P3.1 implementation may begin once it produces
   its own review package that records option choices for
   D1 / D3 / D4.
+
+---
+
+## P3.2 Design Review (D17..D22)
+
+### P3.2-specific (D17..D22)
+
+#### D17. Dataset identity and versioning contract
+
+- Contract: every fixture carries explicit identity
+  `(dataset_id, dataset_version, fixture_id)`; identity is
+  content-stable and embedded in the report; old dataset
+  versions remain runnable for at least one major P3.2
+  release after supersession; dataset version bumps on
+  contract change (not content change).
+- Resolution: contract locked.
+- Source: P3.2 spec §Checkpoint P3.2.
+
+#### D18. Evaluation result schema contract
+
+- Contract: structured document (parseable from JSON);
+  required top-level fields (dataset_id, dataset_version,
+  planner_version, execution_profile, started_at, ended_at,
+  metrics, threshold_decisions, reproducibility_digest,
+  schema_version); additive evolution within a
+  `(dataset_version, planner_version)` pair; no observed
+  text / args / selectors / confirmation tokens; schema
+  version `report_schema.v1` initial.
+- Resolution: contract locked.
+- Source: P3.2 spec §Checkpoint P3.2.
+
+#### D19. Metric ownership contract
+
+- Contract: each metric has a single owner with
+  responsibility for definition / formula / unit / expected
+  range; declaration includes `metric_id`, `owner`,
+  `definition`, `unit`, `direction`; cross-cutting metrics
+  defined at the gate (not at implementation); cross-cutting
+  metric set locked at the gate; per-subsystem metrics MAY
+  be added at implementation review.
+- Resolution: contract locked.
+- Source: P3.2 spec §Checkpoint P3.2.
+
+#### D20. Threshold policy contract
+
+- Contract: each metric has a threshold declaration
+  (separate from metric definition); declaration includes
+  `metric_id`, `direction`, `pass_if`, `threshold`,
+  `rationale`; CI gate fails on threshold violation only;
+  no warning levels; threshold values are implementation
+  freedom; hardcoded thresholds PROHIBITED for cross-cutting
+  metrics; missing thresholds treated as CI fail; no live GUI
+  availability in unit CI.
+- Resolution: contract locked.
+- Source: P3.2 spec §Checkpoint P3.2.
+
+#### D21. CI failure semantics contract
+
+- Contract: machine-readable output (JSON or equivalent)
+  in addition to human-readable summary; each failure
+  carries `metric_id`, `(dataset_id, dataset_version,
+  fixture_id)`, `expected`, `observed`, `direction`; non-zero
+  exit on any threshold violation; no `args` / observed
+  screen text / selectors / confirmation tokens / LLM
+  prompts or responses in failure output; deterministic
+  output (modulo run identifier).
+- Resolution: contract locked.
+- Source: P3.2 spec §Checkpoint P3.2.
+
+#### D22. Reproducibility boundary contract
+
+- Contract: byte-for-byte reproducible given same
+  `(dataset_version, planner_version, execution_profile)`
+  triple and frozen inputs; reproducibility digest includes
+  content-hash of dataset fixtures, planner prompt template,
+  action catalog, and threshold declarations; digest
+  excludes timestamps, run identifiers, environment-specific
+  paths, host / user info; digest embedded in the report
+  (computed before write); CI gate warns on digest mismatch
+  but still emits pass / fail decision.
+- Resolution: contract locked.
+- Source: P3.2 spec §Checkpoint P3.2.
+
+### Inherited from P3.1 (unchanged contracts; P3.2 reuse)
+
+| ID | Contract | P3.2 reuse |
+|----|----------|------------|
+| D15 (P3.1) | Per-transport prompt sanitisation | D22 references the planner prompt template for the reproducibility digest |
+| D16 (P3.1) | Plan event redaction; secret audit | D18 reuses D16 redaction contract (no observed text / args / selectors / tokens in reports) |
+
+---
+
+## P3.2 Design Gate Closure
+
+- **2026-08-04 round 1** — ⏳ pending reviewer sign-off.
+- Gate is paper-only: no code, no tests, no runtime changes.
+- **Next**: P3.2 implementation may begin once this gate
+  closes AND P3.2 implementation produces its own review
+  package that records the option choices (metric formulas,
+  threshold values, CI exit semantics, digest hash function)
+  made in code.

@@ -5,8 +5,8 @@
 - State: requirements (no implementation yet)
 - Source contract: `../architecture/01-action-trace-test-report-design.md` §24, §18 Phase C/D, §20 Live E2E, §21 Metrics
 - Mapped checkpoints: **P3.1 Structured LLM Planner**, **P3.2 Evaluation And Metrics**
-- Predecessors: **P2.5 Design Review Gate** (closed; see `P2-5-design-gate.md`) → **P3.1 Design Review Gate** (closed round 1; see `P3-1-design-gate.md`)
-- Completion state: **P2.5 closed; P3.1 design gate CLOSED (round 1); P3.1 implementation UNDONE; P3.2 design + implementation UNDONE**
+- Predecessors: **P2.5 Design Review Gate** (closed; see `P2-5-design-gate.md`) → **P3.1 Design Review Gate** (closed round 1; see `P3-1-design-gate.md`) → **P3.2 Design Review Gate** (in review; see `P3-2-evaluation-design-gate.md`)
+- Completion state: **P2.5 closed; P3.1 design gate CLOSED; P3.1 implementation CLOSED; P3.2 design gate IN REVIEW (round 1, awaiting sign-off); P3.2 implementation UNDONE**
 - Milestone: **P3.2 closes the design**. After P3.2, EDR-WD can hand a
   target snapshot to a structured-output model and execute an
   autonomous plan with reproducible evaluation evidence.
