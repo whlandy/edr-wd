@@ -1,9 +1,13 @@
-"""EDR manual RAG package.
+"""P0 CHM ingestion pipeline — CHM → Manual IR.
 
-This package intentionally starts as a lightweight contract surface. The
-implementation should follow docs/requirements/EDR-RAG-DESIGN.md in P0-P3 order.
+Converts a CHM product manual into structured, inspectable artifacts:
+  - manifest.json        : describes the ingestion run
+  - sections.jsonl       : one ManualSection per useful HTML page
+  - assets.jsonl         : one AssetRef per image/resource
+
+Deterministic. No embeddings, no vector DB, no LLM extraction required.
 """
 
-__all__ = ["__version__"]
+from . import extract, parse_html, parse_toc, normalize, schema  # noqa: F401
 
-__version__ = "0.1.0"
+__all__ = ["extract", "parse_html", "parse_toc", "normalize", "schema"]

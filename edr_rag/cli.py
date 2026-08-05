@@ -1,77 +1,119 @@
-"""Command line entrypoint for edr-rag.
+"""CLI entry point for the CHM ingestion pipeline.
 
-The implementation is intentionally phased. Only workspace initialisation is
-active today; ingestion/search/action logic should be added following
-docs/requirements/EDR-RAG-DESIGN.md.
+Commands:
+  python -m tools.edr_rag.cli ingest --chm <path> [options]
+
+    P0 ingest: extract CHM + TOC + HTML → manifest.json + sections.jsonl + assets.jsonl
+
+  python -m tools.edr_rag.cli validate --workdir <path> [--manual-id <id>]
+
+
+  python -m tools.edr_rag.cli search --query <text> [--workdir <path>] [options]
+    (Planned for P1 — not implemented yet)
 """
 
 from __future__ import annotations
 
 import argparse
-import os
+import json
+import logging
+import sys
 from pathlib import Path
 
+from . import normalize
 
-DEFAULT_WORKDIR = "~/Desktop/edr-chm-rag-work"
-DESIGN_DOC = "docs/requirements/EDR-RAG-DESIGN.md"
-
-
-def _workdir(value: str | None) -> Path:
-    raw = value or os.environ.get("CHM_RAG_WORKDIR") or DEFAULT_WORKDIR
-    return Path(raw).expanduser()
+logger = logging.getLogger(__name__)
 
 
-def init_workdir(args: argparse.Namespace) -> int:
-    workdir = _workdir(args.workdir)
-    for child in [
-        "input",
-        "extracted",
-        "normalized",
-        "action_catalog",
-        "vector_index",
-        "logs",
-    ]:
-        (workdir / child).mkdir(parents=True, exist_ok=True)
-    print(f"edr-rag workdir ready: {workdir}")
-    return 0
-
-
-def not_implemented(args: argparse.Namespace) -> int:
-    command = getattr(args, "command", "unknown")
-    print(
-        f"edr-rag command '{command}' is not implemented yet. "
-        f"Implement it according to {DESIGN_DOC}."
+def _configure_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
     )
-    return 2
 
 
-def build_parser() -> argparse.ArgumentParser:
+def _cmd_ingest(args: argparse.Namespace) -> None:
+    """Run P0 ingestion."""
+    chm_path = Path(args.chm).expanduser().resolve()
+    manual_id = args.manual_id
+    product = args.product
+    workdir = Path(args.workdir).expanduser().resolve()
+
+    if not chm_path.is_file():
+        print(f"Error: CHM file not found: {chm_path}", file=sys.stderr)
+        sys.exit(1)
+
+    manifest = normalize.run_ingest(chm_path, manual_id, product, workdir)
+    print(f"{json.dumps(manifest.to_json(), ensure_ascii=False, indent=2)}")
+
+
+def _cmd_validate(args: argparse.Namespace) -> None:
+    """Validate the output of a P0 ingestion run.
+
+    P0 contract check (review Blocker 5):
+    sections.jsonl:
+      required: id, manual_id, title, content, section_path, source_ref.relative_path
+    assets.jsonl:
+      required: id, manual_id, type, path
+    """
+    workdir = Path(args.workdir).expanduser().resolve()
+    manual_id = args.manual_id
+
+    try:
+        section_count, asset_count, errors = normalize.validate_workdir(workdir)
+    except FileNotFoundError as e:
+        print(f"Validation FAILED: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if manual_id:
+        manifest_path = workdir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("manual_id") != manual_id:
+            print(
+                f"Warning: manifest manual_id ({manifest.get('manual_id')}) "
+                f"does not match argument ({manual_id})",
+                file=sys.stderr,
+            )
+
+    if errors:
+        sys.exit(1)
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="edr-rag",
-        description="CHM manual ingestion, retrieval, and action catalog tooling.",
+        description="CHM ingestion pipeline — P0: extract, parse, normalize",
     )
-    sub = parser.add_subparsers(dest="command")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
 
-    p_init = sub.add_parser("init-workdir", help="Create the edr-rag desktop workdir layout.")
-    p_init.add_argument("--workdir", default=None, help="Override CHM_RAG_WORKDIR.")
-    p_init.set_defaults(func=init_workdir)
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for name in ["ingest", "extract-procedures", "search", "build-actions", "action-search", "apply-feedback"]:
-        p = sub.add_parser(name, help=f"Placeholder for P-level command: {name}.")
-        p.add_argument("--workdir", default=None, help="Override CHM_RAG_WORKDIR.")
-        p.set_defaults(func=not_implemented)
+    # ingest
+    ingest_parser = subparsers.add_parser("ingest", help="Run P0 ingestion")
+    ingest_parser.add_argument("--chm", required=True, help="Path to the .chm file")
+    ingest_parser.add_argument("--manual-id", required=True, help="Manual identifier (e.g., product-manual)")
+    ingest_parser.add_argument("--product", required=True, help="Product name (e.g., ProductName)")
+    ingest_parser.add_argument("--workdir", default="~/Desktop/edr-chm-rag-work",
+                               help="Working directory (default: ~/Desktop/edr-chm-rag-work)")
 
-    return parser
+    # validate
+    validate_parser = subparsers.add_parser("validate", help="Validate P0 output")
+    validate_parser.add_argument("--workdir", default="~/Desktop/edr-chm-rag-work",
+                                 help="Working directory (default: ~/Desktop/edr-chm-rag-work)")
+    validate_parser.add_argument("--manual-id", default=None, help="Expected manual_id for validation")
 
+    args = parser.parse_args()
+    _configure_logging(args.verbose)
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if not hasattr(args, "func"):
+    if args.command == "ingest":
+        _cmd_ingest(args)
+    elif args.command == "validate":
+        _cmd_validate(args)
+    else:
         parser.print_help()
-        return 0
-    return args.func(args)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

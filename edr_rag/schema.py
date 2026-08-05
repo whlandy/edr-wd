@@ -1,167 +1,155 @@
-"""Schemas for CHM-derived manual knowledge artifacts.
+"""P0 schemas for CHM → Manual IR.
 
-These dataclasses are the on-disk contract for the phased edr-rag work:
+Defines the data contracts for CHM ingestion output artifacts:
+  - ManualSection: one per HTML page/section
+  - AssetRef: one per image or resource
+  - Manifest: describes the entire ingestion run
 
-- P0 writes ManualSection and AssetRef JSONL.
-- P1 writes Procedure and RetrievalChunk JSONL.
-- P2 writes ActionCatalogEntry YAML/JSONL.
-- P3 writes FeedbackItem JSONL.
+Identity model (locked in P0):
+  - `id` is the SEMANTIC identity of a section (stable across re-ingestions).
+    Example: "manual.section.network.proxy".
+    Downstream P1/P2 (embedding, retrieval, action lookup) keys on this.
+  - `source_ref` carries the EXTRACTION artifact identity (where the section
+    was found in this particular extraction). It may legitimately change
+    across re-ingestions if the CHM internals get repacked:
+        network/proxy.htm     (v1)
+        html/network/proxy.html (v2)
+    Consumers must NOT key on `source_ref`.
+
+These are plain dataclasses (not ORM, not pydantic) because P0 artifacts are
+written as JSONL and consumed by simple readers. No LLM or embedding logic.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 
-JsonDict = dict[str, Any]
+@dataclass
+class Link:
+    """A hyperlink from a manual section."""
+    text: str
+    href: str
 
 
-@dataclass(slots=True)
+@dataclass
+class ImageRef:
+    """A reference to an image within a section."""
+    src: str
+    alt: str = ""
+    asset_id: str = ""
+
+
+@dataclass
 class SourceRef:
-    """A stable reference back to the extracted manual source."""
+    """Extraction artifact identity for a section.
 
-    file: str
-    section_id: str | None = None
-    procedure_id: str | None = None
+    Carries the location of the HTML file inside the extracted CHM and an
+    optional anchor within that page. This is NOT a stable identity —
+    re-ingestion may produce different SourceRef values for the same section.
+    Key on `ManualSection.id`, not on `source_ref`.
+    """
+    relative_path: str  # relative path inside extracted_dir (e.g. "network/proxy.html")
     anchor: str | None = None
 
-    def to_dict(self) -> JsonDict:
-        return asdict(self)
 
+@dataclass
+class ManualSection:
+    """One useful HTML page or section from the CHM manual.
 
-@dataclass(slots=True)
-class AssetRef:
-    """An image or other asset extracted from a CHM manual."""
+    Identity contract (P0):
+      - `id` is the SEMANTIC identity of a section.
+        Contract:
+          * globally unique within `manual_id`
+          * stable across re-ingestion (a re-extracted CHM with repacked
+            paths MUST yield the same `id` for the same logical section)
+          * MUST NOT contain extraction artifact paths
+          * MUST NOT depend on HTML filename
+          * format is implementation-defined (the generator may use TOC
+            hierarchy, page operation slug, numeric ids, etc.)
+        Downstream P1/P2 (embedding, retrieval, action lookup) keys on `id`.
+      - `source_ref` MUST be set to where the section was found.
+      - `section_path` priority: hhc hierarchy > html heading hierarchy > [title] > [].
 
+    Migration note:
+      P0 has no pre-SourceRef artifacts, so no backward-compatibility
+      adapter is required. If future ingestions read legacy JSONL that
+      has top-level `source_file` instead of `source_ref`, an explicit
+      migration step is needed — do NOT silently coerce.
+    """
     id: str
     manual_id: str
-    type: str
-    path: str
-    absolute_path: str | None = None
+    product: str
+    title: str
+    section_path: list[str]
+    source_ref: SourceRef
+    content: str = ""
+    headings: list[str] = field(default_factory=list)
+    links: list[Link] = field(default_factory=list)
+    images: list[ImageRef] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_jsonl(self) -> dict:
+        d = asdict(self)
+        # Convert nested dataclasses
+        d["source_ref"] = {"relative_path": self.source_ref.relative_path, "anchor": self.source_ref.anchor}
+        d["links"] = [{"text": l.text, "href": l.href} for l in self.links]
+        d["images"] = [
+            {"src": i.src, "alt": i.alt, "asset_id": i.asset_id}
+            for i in self.images
+        ]
+        return d
+
+    @staticmethod
+    def from_jsonl(d: dict) -> ManualSection:
+        d = dict(d)
+        sr = d.get("source_ref")
+        if sr is None:
+            raise ValueError("ManualSection missing required field 'source_ref'")
+        d["source_ref"] = SourceRef(**sr)
+        d["links"] = [Link(**l) for l in d.get("links", [])]
+        d["images"] = [ImageRef(**i) for i in d.get("images", [])]
+        return ManualSection(**d)
+
+
+@dataclass
+class AssetRef:
+    """An image or resource extracted from the CHM."""
+    id: str
+    manual_id: str
+    type: str  # "image", "css", "js", etc.
+    path: str  # relative path from extracted dir
+    absolute_path: str  # absolute path on disk
     referenced_by: list[str] = field(default_factory=list)
     description: str | None = None
 
-    def to_dict(self) -> JsonDict:
+    def to_jsonl(self) -> dict:
         return asdict(self)
 
+    @staticmethod
+    def from_jsonl(d: dict) -> AssetRef:
+        return AssetRef(**d)
 
-@dataclass(slots=True)
-class ManualSection:
-    """Normalized section parsed from CHM HTML and TOC structure."""
 
-    id: str
+@dataclass
+class Manifest:
+    """Describes one ingestion run. Written as manifest.json."""
     manual_id: str
-    product: str
-    title: str
-    section_path: list[str]
-    source_file: str
-    content: str
-    anchor: str | None = None
-    headings: list[str] = field(default_factory=list)
-    links: list[JsonDict] = field(default_factory=list)
-    images: list[JsonDict] = field(default_factory=list)
-    metadata: JsonDict = field(default_factory=dict)
+    source_chm: str
+    source_hash: str
+    extracted_dir: str
+    generated_at: str  # ISO 8601
+    section_count: int
+    asset_count: int
+    parser_version: str = "p0"
 
-    def to_dict(self) -> JsonDict:
+    def to_json(self) -> dict:
         return asdict(self)
 
-
-@dataclass(slots=True)
-class ProcedureStep:
-    """One ordered instruction extracted from a manual procedure."""
-
-    order: int
-    instruction: str
-    target: str | None = None
-    action_hint: str | None = None
-
-    def to_dict(self) -> JsonDict:
-        return asdict(self)
-
-
-@dataclass(slots=True)
-class Procedure:
-    """A structured SOP candidate extracted from manual sections."""
-
-    id: str
-    manual_id: str
-    product: str
-    operation: str
-    title: str
-    section_path: list[str]
-    source: SourceRef
-    steps: list[ProcedureStep]
-    preconditions: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    recovery: list[str] = field(default_factory=list)
-    confidence: float | None = None
-    status: str = "candidate"
-
-    def to_dict(self) -> JsonDict:
-        data = asdict(self)
-        data["source"] = self.source.to_dict()
-        data["steps"] = [step.to_dict() for step in self.steps]
-        return data
-
-
-@dataclass(slots=True)
-class RetrievalChunk:
-    """Searchable chunk generated from sections, procedures, or actions."""
-
-    id: str
-    manual_id: str
-    type: str
-    text: str
-    source: SourceRef
-    metadata: JsonDict = field(default_factory=dict)
-
-    def to_dict(self) -> JsonDict:
-        data = asdict(self)
-        data["source"] = self.source.to_dict()
-        return data
-
-
-@dataclass(slots=True)
-class ActionCatalogEntry:
-    """Reviewable action candidate derived from a Procedure."""
-
-    action_id: str
-    product: str
-    module: str
-    title: str
-    source: SourceRef
-    procedure: list[JsonDict]
-    status: str = "candidate"
-    confidence: float | None = None
-    risk: str = "unknown"
-    requires_confirmation: bool = True
-    preconditions: list[str] = field(default_factory=list)
-    success_criteria: list[JsonDict] = field(default_factory=list)
-    recovery: list[str] = field(default_factory=list)
-    validation: JsonDict = field(default_factory=dict)
-
-    def to_dict(self) -> JsonDict:
-        data = asdict(self)
-        data["source"] = self.source.to_dict()
-        return data
-
-
-@dataclass(slots=True)
-class FeedbackItem:
-    """Execution feedback used by P3 to improve catalog and retrieval data."""
-
-    feedback_id: str
-    manual_id: str
-    failure_type: str
-    action_id: str | None = None
-    procedure_id: str | None = None
-    expected: str | None = None
-    observed: str | None = None
-    evidence: JsonDict = field(default_factory=dict)
-    suggested_patch: JsonDict = field(default_factory=dict)
-    status: str = "needs_review"
-    created_at: str | None = None
-
-    def to_dict(self) -> JsonDict:
-        return asdict(self)
+    @staticmethod
+    def from_json(d: dict) -> Manifest:
+        return Manifest(**d)
