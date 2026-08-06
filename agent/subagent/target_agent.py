@@ -147,9 +147,11 @@ class TargetSubAgent:
             init = self.initialize_mcp()
             if not init.get("ok"):
                 return init
-            return mcp_manager.get_mcp_tools(
-                self.state.session_id or "",
-                self.state.mcp_url,
+            return mcp_manager.unwrap_tools_list(
+                mcp_manager.get_mcp_tools(
+                    self.state.session_id or "",
+                    self.state.mcp_url,
+                )
             )
 
     def call_tool(
@@ -243,19 +245,4 @@ class TargetSubAgent:
 
     @staticmethod
     def _unwrap_tool_result(result: dict) -> dict:
-        if not isinstance(result, dict):
-            return {"ok": False, "raw": result}
-        if not result.get("ok") or "data" not in result:
-            return result
-
-        data = result.get("data", {})
-        result_obj = data.get("result", data) if isinstance(data, dict) else data
-        if isinstance(result_obj, dict) and "content" in result_obj:
-            for block in result_obj.get("content", []):
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text = block.get("text", "")
-                    try:
-                        return json.loads(text)
-                    except (TypeError, json.JSONDecodeError):
-                        return {"ok": False, "raw": text}
-        return result_obj if isinstance(result_obj, dict) else {"ok": True, "data": result_obj}
+        return mcp_manager.unwrap_tool_result(result)

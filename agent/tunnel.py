@@ -90,6 +90,22 @@ def _owned_tunnel_pid(local_port: int) -> int | None:
     return None
 
 
+def _terminate_owned_tunnel(local_port: int) -> int | None:
+    """Stop only the EDR-WD process recorded for ``local_port``."""
+    pid = _read_pid(local_port)
+    if not pid:
+        return None
+    if _process_alive(pid):
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.time() + 2.0
+        while _process_alive(pid) and time.time() < deadline:
+            time.sleep(0.05)
+        if _process_alive(pid):
+            os.kill(pid, signal.SIGKILL)
+    _pid_file(local_port).unlink(missing_ok=True)
+    return pid
+
+
 def _mcp_status(local_port: int) -> int:
     try:
         conn = http.client.HTTPConnection("127.0.0.1", local_port, timeout=5)
@@ -176,25 +192,32 @@ def serve(args: argparse.Namespace) -> int:
             pid_file.unlink()
 
 
-def start(args: argparse.Namespace) -> int:
-    target = _target_name(args.target)
+def ensure_tunnel(target: str | None = None, *, timeout: float = 10.0) -> dict:
+    """Ensure the configured tunnel is healthy, replacing an owned stale one.
+
+    A listening local socket is not sufficient: the SSH transport can die while
+    the forwarding process remains alive.  In that state the old implementation
+    returned an error and required a manual stop/start cycle.
+    """
+    target = _target_name(target)
     _ssh_cfg, local_port, _remote_port = _cfg(target)
     if _port_open(local_port):
         pid = _owned_tunnel_pid(local_port)
         if not pid:
-            print(
-                f"Port {local_port} is already in use by a non-EDR-WD tunnel process",
-                file=sys.stderr,
-            )
-            return 1
+            return {
+                "ok": False,
+                "target": target,
+                "error": f"Port {local_port} is already in use by a non-EDR-WD process",
+            }
         if _mcp_responding(local_port):
-            print(f"Tunnel already running on port {local_port} pid={pid}")
-            return 0
-        print(
-            f"Tunnel process pid={pid} is running, but MCP is not responding on port {local_port}",
-            file=sys.stderr,
-        )
-        return 1
+            return {
+                "ok": True,
+                "target": target,
+                "status": "already_running",
+                "local_port": local_port,
+                "pid": pid,
+            }
+        _terminate_owned_tunnel(local_port)
 
     log_file = _log_file(local_port)
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -214,14 +237,35 @@ def start(args: argparse.Namespace) -> int:
             start_new_session=True,
         )
 
-    deadline = time.time() + args.timeout
+    deadline = time.time() + timeout
     while time.time() < deadline:
         if _owned_tunnel_pid(local_port) and _mcp_responding(local_port):
-            print(f"Tunnel started on 127.0.0.1:{local_port}")
-            return 0
+            return {
+                "ok": True,
+                "target": target,
+                "status": "started",
+                "local_port": local_port,
+                "pid": _owned_tunnel_pid(local_port),
+            }
         time.sleep(0.25)
 
-    print(f"Tunnel failed to start. Log: {log_file}", file=sys.stderr)
+    return {
+        "ok": False,
+        "target": target,
+        "error": f"Tunnel failed to start. Log: {log_file}",
+        "local_port": local_port,
+    }
+
+
+def start(args: argparse.Namespace) -> int:
+    result = ensure_tunnel(args.target, timeout=args.timeout)
+    if result.get("ok"):
+        print(
+            f"Tunnel {result['status']} on 127.0.0.1:{result['local_port']} "
+            f"pid={result.get('pid')}"
+        )
+        return 0
+    print(result.get("error", "Tunnel failed to start"), file=sys.stderr)
     return 1
 
 
@@ -233,12 +277,7 @@ def stop(args: argparse.Namespace) -> int:
     if not pid:
         print(f"Tunnel pid file not found for port {local_port}")
         return 0
-    if _process_alive(pid):
-        os.kill(pid, signal.SIGTERM)
-        time.sleep(0.5)
-        if _process_alive(pid):
-            os.kill(pid, signal.SIGKILL)
-    pid_file.unlink(missing_ok=True)
+    _terminate_owned_tunnel(local_port)
     print(f"Tunnel stopped on port {local_port}")
     return 0
 

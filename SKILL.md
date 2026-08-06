@@ -120,12 +120,23 @@ edr-wd --target TARGET down
 edr-wd --target TARGET restart
 edr-wd --target TARGET repair
 edr-wd --target TARGET test
+edr-wd --target TARGET tools
+edr-wd --target TARGET call list_windows
+edr-wd --target TARGET call is_window_open --args '{"process_name":"EDRClient.exe"}'
+edr-wd --target TARGET open-edr
 ```
 
 Normal lifecycle calls are no-upload operations. Only explicit deploy/install/
 repair paths may write tracked target payload. `repair` means
 `deploy -> install -> ensure`. Target helpers belong under `target/scripts/` or
 `target/automation/`; never generate ad hoc remote scripts to make a run pass.
+
+Use `tools`, `call`, and `open-edr` for interactive operation. Do not create
+temporary Python MCP clients merely to initialize a session, list/call tools,
+decode screenshots, or open EDRClient. `open-edr` owns the complete generic
+workflow: ensure readiness, repair an owned stale tunnel once, activate the
+application, verify the exact EDRClient main-window title, connect that window,
+and persist the returned screenshot under agent-local `result-report/`.
 
 Before deployment or restart, validate config, SSH, target identity, Python
 runtime dependencies, GUI permissions, lifecycle registration, and port state.

@@ -15,11 +15,9 @@ Architecture:
   target_manager.ensure_server_running()  →  TCP port open (tcp_only)
   mcp_manager.initialize(target_name)     →  MCP session ready
 
-Usage:
-  from agent.mcp_manager import initialize, get_mcp_tools, call_mcp_tool
-  result = initialize("2.26-edr-win26-win11")
-  if result["ok"]:
-      tools = get_mcp_tools(result["session_id"])
+Normal callers should use ``TargetSubAgent.ensure_ready()``, ``tools_list()``,
+and ``call_tool()`` for session ownership and normalized results. The lower-level
+functions in this module remain available for transport diagnostics.
 """
 
 from __future__ import annotations
@@ -91,7 +89,7 @@ def _mcp_initialize(url: str, timeout: float = MCP_INIT_TIMEOUT) -> tuple[bool, 
             return (True, session, f"HTTP {e.status}: {e.body[:200]}")
         return (False, None, f"HTTP {e.status}: {e.body[:200]}")
 
-    except (urllib.error.URLError, socket.timeout) as e:
+    except (urllib.error.URLError, socket.timeout, OSError, http.client.HTTPException) as e:
         return (False, None, f"{type(e).__name__}: {e}")
 
 
@@ -112,7 +110,7 @@ def _extract_session_from_sse(raw: str) -> Optional[str]:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def initialize(name: Optional[str] = None) -> dict:
+def initialize(name: Optional[str] = None, *, repair_tunnel: bool = True) -> dict:
     """
     Initialize MCP session with the target server.
 
@@ -142,6 +140,25 @@ def initialize(name: Optional[str] = None) -> dict:
     mcp_url = tc.build_mcp_url(target_name)
 
     ok, session, error = _mcp_initialize(mcp_url)
+    tunnel_repaired = False
+    tunnel_error = None
+    cfg = tc.get_target(target_name)
+    if (
+        not ok
+        and repair_tunnel
+        and cfg.get("mcp", {}).get("connect_mode") == "tunnel"
+    ):
+        # A Paramiko forwarding process may keep its local listener after the
+        # underlying SSH transport has died. Replace that owned stale process
+        # once and retry MCP initialization; never touch an unowned port.
+        from .tunnel import ensure_tunnel
+
+        tunnel_result = ensure_tunnel(target_name)
+        if tunnel_result.get("ok"):
+            ok, session, error = _mcp_initialize(mcp_url)
+            tunnel_repaired = tunnel_result.get("status") == "started"
+        else:
+            tunnel_error = tunnel_result.get("error")
 
     if ok:
         return {
@@ -153,6 +170,7 @@ def initialize(name: Optional[str] = None) -> dict:
                 "mcp_url": mcp_url,
                 "protocol_version": MCP_PROTOCOL_VERSION,
                 "ready_level": "mcp_ready",
+                "tunnel_repaired": tunnel_repaired,
             },
         }
     else:
@@ -162,6 +180,7 @@ def initialize(name: Optional[str] = None) -> dict:
             "stage": "mcp_initialize",
             "error": f"MCP initialize failed: {error}",
             "mcp_url": mcp_url,
+            "tunnel_error": tunnel_error,
         }
 
 
@@ -191,6 +210,38 @@ def call_mcp_tool(session_id: str, mcp_url: str, tool_name: str,
         "name": tool_name,
         "arguments": arguments or {},
     }, timeout=timeout)
+
+
+def unwrap_tool_result(result: dict) -> dict:
+    """Return a tool's JSON payload without the JSON-RPC/FastMCP envelopes."""
+    if not isinstance(result, dict):
+        return {"ok": False, "raw": result}
+    if not result.get("ok") or "data" not in result:
+        return result
+    data = result.get("data", {})
+    result_obj = data.get("result", data) if isinstance(data, dict) else data
+    if isinstance(result_obj, dict) and "content" in result_obj:
+        for block in result_obj.get("content", []):
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+                try:
+                    parsed = json.loads(text)
+                    return parsed if isinstance(parsed, dict) else {"ok": True, "data": parsed}
+                except (TypeError, json.JSONDecodeError):
+                    return {"ok": False, "raw": text}
+    return result_obj if isinstance(result_obj, dict) else {"ok": True, "data": result_obj}
+
+
+def unwrap_tools_list(result: dict) -> dict:
+    """Normalize ``tools/list`` to ``{ok, tools}`` for callers and CLIs."""
+    if not isinstance(result, dict) or not result.get("ok"):
+        return result if isinstance(result, dict) else {"ok": False, "raw": result}
+    data = result.get("data", {})
+    result_obj = data.get("result", data) if isinstance(data, dict) else {}
+    tools = result_obj.get("tools") if isinstance(result_obj, dict) else None
+    if not isinstance(tools, list):
+        return {"ok": False, "error": "MCP tools/list response did not contain a tools list"}
+    return {"ok": True, "tools": tools}
 
 
 _jsonrpc_id_counter = 1
@@ -231,7 +282,7 @@ def _mcp_jsonrpc(session_id: str, mcp_url: str, method: str, params: dict,
         return {"ok": False, "error": f"socket timeout after {effective_timeout}s waiting for JSON-RPC response"}
     except _HTTPStatusError as e:
         return {"ok": False, "error": f"HTTP {e.status}: {e.body[:200]}"}
-    except (urllib.error.URLError, socket.timeout) as e:
+    except (urllib.error.URLError, socket.timeout, OSError, http.client.HTTPException) as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
@@ -320,18 +371,18 @@ def _read_all_sse_data(resp) -> str:
     arrived.  A blank line terminates one SSE event; once we have seen a data:
     line and then the event terminator, return immediately.
     """
-    body = b""
+    lines: list[bytes] = []
     saw_data = False
     while True:
-        chunk = resp.read(1)
-        if not chunk:
+        line = resp.readline()
+        if not line:
             break
-        body += chunk
-        if b"data:" in body:
+        lines.append(line)
+        if line.lstrip().startswith(b"data:"):
             saw_data = True
-        if saw_data and (b"\r\n\r\n" in body or b"\n\n" in body):
+        if saw_data and line.strip() == b"":
             break
-    return body.decode("utf-8", errors="replace")
+    return b"".join(lines).decode("utf-8", errors="replace")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

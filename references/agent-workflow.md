@@ -289,3 +289,24 @@ Treat it as another target mode, not as a test shortcut.
 `agent/tunnel.py` manages local port forwarding through Paramiko. `agent/tunnel.sh`
 is only a compatibility wrapper around that Python entry point. Do not add
 OpenSSH or `sshpass` paths for tunnel mode.
+
+The MCP initializer automatically repairs one owned stale tunnel and retries
+the handshake once. A stale tunnel is a process whose local listener still
+exists while `/mcp` no longer responds. It is safe to replace only when its PID
+file proves EDR-WD ownership; an unrelated listener on the configured port must
+remain untouched and produce a structured error.
+
+For normal interactive use, prefer the packaged CLI instead of temporary
+Python scripts:
+
+```bash
+edr-wd --target TARGET tools
+edr-wd --target TARGET call TOOL --args '{"key":"value"}'
+edr-wd --target TARGET open-edr
+```
+
+`open-edr` verifies `EDRClient.exe` together with the exact HiSec main-window
+title before connecting and taking a screenshot. This prevents another window
+owned by the same process, such as `日志中心`, from becoming the screenshot
+target. The screenshot is decoded and stored on the agent under
+`result-report/<timestamp>/screenshots/`.
