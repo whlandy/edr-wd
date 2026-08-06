@@ -12,6 +12,12 @@ EDR-WD separates orchestration from target-local GUI automation:
 - `target/`: FastMCP tools, action catalog/dispatcher, observations, Windows UIA
   and macOS Accessibility backends, and tracked target scripts.
 
+`edr-rag` is a separate project/repository. It owns CHM manual ingestion,
+manual/procedure/action search, action-catalog knowledge, and feedback capture.
+Do not re-add `edr_rag/` to this repository. `edr-wd` consumes `edr-rag`
+through MCP or a narrow client boundary when an agent needs manual knowledge
+before executing GUI/PowerShell actions.
+
 ## Start Here
 
 1. Check `git status --short --branch` and preserve unrelated changes.
@@ -28,6 +34,54 @@ EDR-WD separates orchestration from target-local GUI automation:
 | Execute atomic tests / inspect evidence | `agent/execution/`, `agent/trace/` | `references/testing.md` |
 | Add fixed product verification | `sops/INDEX.md` | `sops/TEMPLATE.md` |
 | Plan/evaluate action sequences | `agent/planner/`, `agent/eval/` | `references/mcp-tools.md`, `references/testing.md` |
+| Use CHM manuals / RAG / action knowledge | separate `edr-rag` repo | `docs/requirements/EDR-RAG-INTEGRATION.md` |
+
+## edr-rag Boundary
+
+Keep `edr-rag` and `edr-wd` independent:
+
+```text
+edr-rag:
+  CHM manual ingestion
+  manual/procedure/action search
+  action catalog knowledge
+  feedback capture
+
+edr-wd:
+  target lifecycle
+  GUI automation
+  PowerShell execution
+  action execution evidence
+```
+
+Expected agent flow:
+
+1. Query `edr-rag` to decide what procedure/action should be used.
+2. Check risk, preconditions, and confirmation policy from `edr-rag`.
+3. Execute approved GUI/PowerShell steps through `edr-wd`.
+4. Send execution failures or corrections back to `edr-rag` feedback.
+
+Runtime integration should use separate MCP servers:
+
+```text
+edr-rag MCP:
+  action_search
+  procedure_search
+  get_action
+  submit_feedback
+
+edr-wd MCP:
+  connect
+  dump_tree
+  click_target
+  run_powershell
+```
+
+Design source of truth:
+
+```text
+edr-rag/docs/requirements/EDR-RAG-DESIGN.md
+```
 
 ## Configure A Target
 
@@ -150,5 +204,7 @@ skipped.
 - `references/activate-edr.md`: HiSec entry/client activation internals.
 - `references/window-detection.md`: window verification and diagnostics.
 - `references/testing.md`: test tiers, traces, reports, failure triage.
+- `docs/requirements/EDR-RAG-INTEGRATION.md`: boundary between `edr-wd` and
+  the standalone `edr-rag` project.
 - `sops/INDEX.md`: fixed verification catalog.
 - `docs/README.md`: maintainer architecture and archive map.
