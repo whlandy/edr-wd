@@ -165,6 +165,9 @@ def reason_to_code(reason: str | None) -> str:
     if reason in ("target_occluded", "target_ambiguous", "target_not_found",
                   "point_outside_window", "ownership_mismatch"):
         return reason
+    if reason in ("target_visible",):
+        # T3 goal-reached outcome — the stable signal for "the probe matched".
+        return CODE_OK
     return CODE_OK
 
 

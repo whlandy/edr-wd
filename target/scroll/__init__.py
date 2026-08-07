@@ -37,6 +37,12 @@ from .detect import (
     structure_to_strategy,
 )
 from .verifier import ScrollCoordinator, PageVerifier
+from .scroll_until_visible import (
+    DEFAULT_MAX_STEPS,
+    find_target,
+    run_scroll_until_visible,
+    scroll_until_visible,
+)
 from .backend import (
     BackendUnavailableError,
     ScrollBackendSource,
@@ -86,6 +92,10 @@ __all__ = [
     "PageController",
     "PageVerifier",
     "ScrollCoordinator",
+    "DEFAULT_MAX_STEPS",
+    "find_target",
+    "scroll_until_visible",
+    "run_scroll_until_visible",
     "ScrollBackendSource",
     "BackendUnavailableError",
     "run_scroll_region",

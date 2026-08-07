@@ -63,6 +63,8 @@ class Reason(Enum):
     FOCUS_THEN_SCROLL = "focus_then_scroll"      # activate + wheel moved content
     NO_SCROLL_EFFECT = "no_scroll_effect"        # dispatched but nothing verified as moved
     NOT_DISPATCHED = "not_dispatched"            # primitive/control action was not sent
+    TARGET_VISIBLE = "target_visible"            # (T3) target observed by text probe
+    TARGET_NOT_FOUND = "target_not_found"        # (T3) bounded scroll never surfaced target
 
 
 class Strategy(Enum):

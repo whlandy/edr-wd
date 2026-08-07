@@ -625,6 +625,62 @@ def page_table(
 
 
 @mcp.tool(
+    name="scroll_until_visible",
+    description=(
+        "Target-driven bounded scroll: advance one direction (down|up) until a "
+        "control whose text matches target_text_re is observed in the tree. "
+        "Probes BEFORE the first dispatch — a target already visible performs "
+        "ZERO input (reason=target_visible). Stops immediately on "
+        "NOT_DISPATCHED or (verify=True) NO_SCROLL_EFFECT; counts only "
+        "moved-but-unmatched steps against max_steps and terminates honestly "
+        "with target_not_found when the bound is exhausted. down->next->negative "
+        "wheel / pagination next; up->prev->positive wheel / pagination prev. "
+        "Aligns action codes with the page_table/scroll semantics (A020 / A029). "
+        "verify=False never reports moved=True."
+    ),
+)
+def scroll_until_visible(
+    target_text_re: str,
+    direction: str = "down",
+    window_title_re: str = None,
+    max_depth: int = 6,
+    process_name: str = None,
+    pid: int = None,
+    verify: bool = True,
+    max_steps: int = 8,
+) -> str:
+    """Scroll one direction until a text-identified target appears (bounded).
+
+    Composes the real chain (snapshot -> detect -> PageController plan ->
+    dispatcher -> probe) via `run_scroll_until_visible`. Backend-unavailable
+    and no-controls outcomes are converted to NOT_DISPATCHED inside the
+    facade; any exception escaping here is a genuine bug and should propagate.
+    """
+    if _backend is None:
+        return _backend_unavailable("scroll_until_visible")
+    from scroll.backend import ScrollBackendSource
+    from scroll.scroll_until_visible import run_scroll_until_visible
+
+    source = ScrollBackendSource(
+        _backend,
+        window_title_re=window_title_re,
+        max_depth=max_depth,
+        process_name=process_name,
+        pid=pid,
+        host=os.environ.get("EDR_WD_HOST", "local"),
+    )
+    result = run_scroll_until_visible(
+        source,
+        target_text_re=target_text_re,
+        direction=direction,
+        max_steps=max_steps,
+        verify=verify,
+    )
+    result["ok"] = True
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
     name="click_window_at",
     description=(
         "Click window-relative coordinates (x, y) converted to screen space using the connected window's rectangle. "
