@@ -66,8 +66,72 @@ class WindowsPywinautoBackend:
 
     # ── Window lock ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _win32_foreground_state() -> dict:
+        """Live: resolve the *Win32* foreground (top-most) window via ctypes.
+
+        P0.2 (docs/todo/window-scoped-scroll-and-verification.md) prefers the
+        Win32 foreground HWND/PID/title/rect over a pywinauto-only active
+        window because `pywinauto.Desktop().get_active()` is unreliable under
+        RDP / when the interactive desktop is locked or switched.
+
+        Uses only stdlib ctypes (no pywinauto, no psutil required to resolve
+        identity — pid-to-process-name is best-effort). Returns
+        `{"ok": False, ...}` when the Win32 API is unavailable (non-Windows
+        host) or the call fails, so callers degrade to the pywinauto fallback.
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return {"ok": False, "error": "GetForegroundWindow returned NULL"}
+            pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            pid = int(pid.value)
+            # title
+            length = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value or ""
+            # rect
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            r = {
+                "left": int(rect.left), "top": int(rect.top),
+                "right": int(rect.right), "bottom": int(rect.bottom),
+                "width": int(rect.right - rect.left),
+                "height": int(rect.bottom - rect.top),
+            }
+            process_name = None
+            if pid:
+                try:
+                    import psutil
+                    process_name = psutil.Process(pid).name()
+                except Exception:
+                    pass
+            return {
+                "ok": True,
+                "handle": int(hwnd),
+                "title": title,
+                "pid": pid,
+                "process_name": process_name,
+                "rectangle": r,
+                "source": "win32_foreground",
+            }
+        except Exception as e:  # pragma: no cover - live-only / non-Windows
+            return {"ok": False, "error": str(e), "source": "win32_foreground"}
+
     def _active_window_state(self) -> dict:
         try:
+            # P0.2: prefer the Win32 foreground HWND/PID/title/rect when it is
+            # available — it is the authoritative notion of "frontmost" under
+            # RDP. Fall back to pywinauto's Desktop.get_active().
+            fg = self._win32_foreground_state()
+            if fg.get("ok"):
+                return fg
             from pywinauto import Desktop
             active = Desktop(backend=self.backend).get_active()
             title = active.window_text()
@@ -79,6 +143,11 @@ class WindowsPywinautoBackend:
             except Exception:
                 pass
             rect = None
+            handle = None
+            try:
+                handle = int(active.handle)
+            except Exception:
+                pass
             try:
                 r = active.rectangle()
                 rect = {"x": r.left, "y": r.top, "w": r.width(), "h": r.height()}
@@ -86,13 +155,16 @@ class WindowsPywinautoBackend:
                 pass
             return {
                 "ok": True,
+                "handle": handle,
                 "title": title,
                 "pid": pid,
                 "process_name": process_name,
                 "rectangle": rect,
+                "source": "pywinauto_active",
             }
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
 
     def _connected_window_state(self) -> dict:
         win = self._gui.main_window
@@ -114,6 +186,11 @@ class WindowsPywinautoBackend:
             except Exception:
                 pass
         rect = None
+        handle = None
+        try:
+            handle = int(win.handle)
+        except Exception:
+            pass
         try:
             r = win.rectangle()
             rect = {"x": r.left, "y": r.top, "w": r.width(), "h": r.height()}
@@ -121,6 +198,7 @@ class WindowsPywinautoBackend:
             pass
         return {
             "ok": True,
+            "handle": handle,
             "title": title,
             "pid": pid,
             "process_name": process_name,
@@ -177,6 +255,7 @@ class WindowsPywinautoBackend:
             "title_re": title_re or (re.escape(state.get("title") or "") if state.get("title") else None),
             "process_name": process_name or state.get("process_name"),
             "pid": pid if pid is not None else state.get("pid"),
+            "handle": state.get("handle"),
             "strict": bool(strict),
             "snapshot": state,
         }
@@ -194,30 +273,172 @@ class WindowsPywinautoBackend:
     def get_window_lock(self) -> dict:
         return {"ok": True, "locked": self._window_lock is not None, "lock": self._window_lock}
 
+    def _locked_window_still_exists(self) -> dict:
+        """Check the locked window still exists (title/process/pid), without
+        requiring it to be frontmost. Used by the `strict=False` degraded path.
+
+        Best-effort: falls back to `is_window_open` when available; returns
+        `{"ok": False, "reason": ...}` if the existence check is inconclusive
+        (e.g. no connected backend in tests)."""
+        lock = self._window_lock
+        if not isinstance(lock, dict):
+            return {"ok": False, "reason": "no lock"}
+        title_re = lock.get("title_re")
+        process_name = lock.get("process_name") or lock.get("snapshot", {}).get("process_name")
+        pid = lock.get("pid")
+        try:
+            import re as _re
+            probe = _re.compile(str(title_re or ""))
+        except Exception:
+            probe = None
+        try:
+            enumerator = getattr(self, "_enumerate_top_windows_windows", None)
+            if callable(enumerator):
+                windows = enumerator()
+            else:
+                windows = []
+            for w in windows:
+                title = w.get("title") or ""
+                if probe is not None and not probe.search(title):
+                    continue
+                if process_name:
+                    cur = str(w.get("process_name") or "").lower().removesuffix(".exe")
+                    exp = str(process_name).lower().removesuffix(".exe")
+                    if exp not in cur and cur not in exp:
+                        continue
+                if pid is not None and w.get("pid") != int(pid):
+                    continue
+                return {"ok": True, "window": w}
+            return {"ok": False, "reason": "locked window no longer found"}
+        except Exception as e:  # pragma: no cover - live-only
+            return {"ok": False, "reason": f"existence check failed: {e}"}
+
     def verify_window_lock(self, activate: bool = True) -> dict:
+        """Harden window-lock verification under RDP (P0.2).
+
+        Prefers the Win32 foreground HWND/PID/title/rect (ctypes) over a
+        pywinauto-only active window. The lock's `strict` flag governs how
+        much we require of the *foreground*:
+
+          * `strict=True`  — the foreground must be verified to own the lock
+            (matching pid/handle/process/title). If foreground ownership
+            cannot be verified or does not match, we block (`ok=False`).
+          * `strict=False` — even when the foreground is not verifiable, we
+            still check the locked window *exists* (and, when a connected
+            window is present, its process ownership) and only then allow
+            dispatch, explicitly marking the result `degraded=True`.
+
+        Degraded verification is surfaced in the result payload via
+        `degraded`, `degraded_reason`, and a `verification` detail block.
+        """
         if self._window_lock is None:
             return {"ok": True, "locked": False}
+        lock = self._window_lock
+        strict = bool(lock.get("strict", True))
         state = self._active_window_state()
-        if self._state_matches_lock(state, self._window_lock):
-            return {"ok": True, "locked": True, "active": state, "lock": self._window_lock}
+        matched = self._state_matches_lock(state, lock)
+
+        def _full(extra=None):
+            out = {
+                "ok": True,
+                "locked": True,
+                "active": state,
+                "foreground": {"source": state.get("source"), "handle": state.get("handle")},
+                "degraded": False,
+                "degraded_reason": None,
+                "verification": {
+                    "source": state.get("source"),
+                    "strict": strict,
+                    "method": "foreground_ownership",
+                },
+                "lock": lock,
+            }
+            if extra is not None:
+                out.update(extra)
+            return out
+
+        if matched:
+            return _full()
+
+        # Foreground ownership not (yet) verified. Try one (re)activation to
+        # bring the locked window forward, then re-check.
         activation = None
         if activate:
             activation = self._activate_locked_window()
             state = self._active_window_state()
-            if self._state_matches_lock(state, self._window_lock):
-                return {
-                    "ok": True,
-                    "locked": True,
-                    "active": state,
-                    "lock": self._window_lock,
-                    "activation": activation,
-                }
+            matched = self._state_matches_lock(state, lock)
+
+        if matched:
+            return _full({"activation": activation})
+
+        if strict:
+            # RDP/foreground could not be verified — block, never dispatch.
+            return {
+                "ok": False,
+                "locked": True,
+                "error": "Window lock mismatch (strict): foreground ownership could not be verified",
+                "code": "verification_unavailable" if not state.get("ok") else "ownership_mismatch",
+                "active": state,
+                "foreground": {"source": state.get("source"), "handle": state.get("handle")},
+                "degraded": True,
+                "degraded_reason": "strict verification failed",
+                "verification": {
+                    "source": state.get("source"),
+                    "strict": True,
+                    "method": "foreground_ownership",
+                    "matched": matched,
+                },
+                "lock": lock,
+                "activation": activation,
+            }
+
+        # strict=False: still check the window exists + process ownership
+        # before allowing a degraded dispatch.
+        existence = self._locked_window_still_exists()
+        existence_ok = existence.get("ok") is True
+        connected = self._connected_window_state()
+        process_ok = True
+        if lock.get("process_name"):
+            expected = str(lock["process_name"]).lower().removesuffix(".exe")
+            actual = str(connected.get("process_name") or "").lower().removesuffix(".exe") if connected.get("ok") else ""
+            if actual and expected and expected != actual:
+                process_ok = False
+        if not existence_ok or not process_ok:
+            _reason = (existence.get("reason") or "window existence unconfirmed") if not existence_ok else "connected process ownership mismatch"
+            return {
+                "ok": False,
+                "locked": True,
+                "error": "Window lock mismatch (degraded): " + str(_reason),
+                "code": "verification_unavailable",
+                "active": state,
+                "foreground": {"source": state.get("source"), "handle": state.get("handle")},
+                "degraded": True,
+                "degraded_reason": "strict=False but window existence/ownership could not be confirmed",
+                "verification": {
+                    "source": state.get("source"),
+                    "strict": False,
+                    "method": "degraded_existence",
+                    "existence": existence,
+                    "process_ok": process_ok,
+                },
+                "lock": lock,
+                "activation": activation,
+            }
         return {
-            "ok": False,
+            "ok": True,
             "locked": True,
-            "error": "Window lock mismatch",
             "active": state,
-            "lock": self._window_lock,
+            "foreground": {"source": state.get("source"), "handle": state.get("handle")},
+            "degraded": True,
+            "degraded_reason": "foreground not verifiable; verified window existence + process ownership",
+            "verification": {
+                "source": state.get("source"),
+                "strict": False,
+                "method": "degraded_existence",
+                "existence": existence,
+                "process_ok": process_ok,
+            },
+            "lock": lock,
             "activation": activation,
         }
 
