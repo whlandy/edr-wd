@@ -351,7 +351,7 @@ class WindowsLifecycle:
         Read-only check: are required tracked target payload files present
         on the target?  Does not upload or modify anything.
 
-        Required files (per docs/todo/target-sync-without-ad-hoc-scripts.md):
+        Required files (see references/agent-workflow.md lifecycle docs):
           <target_root>/server.py
           <target_root>/automation/__init__.py
           <target_root>/scripts/start_server.ps1

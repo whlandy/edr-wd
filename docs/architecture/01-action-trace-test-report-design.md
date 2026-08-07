@@ -5,14 +5,14 @@
 - State: proposed implementation design
 - Intended implementer: Hermes or another coding agent
 - Review owner: EDR-WD maintainers
-- Related task list: [`../todo/llm-action-id-sequences.md`](../todo/llm-action-id-sequences.md)
+- Related remaining work: [`../todo/llm-action-id-sequences.md`](../todo/llm-action-id-sequences.md)
 - Initial protocol version: `1.0.0`
 
 This document is the implementation contract for adding versioned action IDs,
 LLM-generated action sequences, atomic test execution, chained traces,
 transition-aware checkpoints, screenshot evidence, and Markdown reports to
-EDR-WD. The TODO remains the progress checklist; this document defines how the
-finished system should behave.
+EDR-WD. The TODO now keeps only the remaining live acceptance work; this
+document defines how the finished system should behave.
 
 ## 1. Problem Statement
 

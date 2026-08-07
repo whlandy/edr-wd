@@ -1,7 +1,7 @@
 """Read-only integrity helper tests (Phase 1, no target writes).
 
-These tests verify the contract of the four integrity helpers introduced in
-Phase 1 of the target-sync-without-ad-hoc-scripts refactor:
+These tests verify the contract of the four lifecycle integrity helpers used by
+the deploy/repair workflow:
 
   - WindowsLifecycle._target_integrity
   - WindowsLifecycle._task_integrity

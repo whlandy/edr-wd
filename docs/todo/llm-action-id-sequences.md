@@ -652,182 +652,39 @@ HiSec mutations require `expected_process_name` and a verified window lock.
 Coordinate actions have higher risk than semantic actions and should not be
 selected while a unique semantic target exists.
 
-## Implementation Plan
+## Remaining Work
 
-Detailed priority gates, per-checkpoint acceptance criteria, and Hermes review
-packages are defined in
-[`../architecture/01-action-trace-test-report-design.md`](../architecture/01-action-trace-test-report-design.md#24-priority-levels-and-review-checkpoints)
-and the per-level requirements documents under
-[`../requirements/`](../requirements/). Use `P0.1` through `P3.2` as the
-delivery and review sequence; the phases below remain the capability
-checklist.
+The P0.1-P3.2 implementation checkpoints have landed in code and tests. Keep
+the V1 table above because the catalog implementation and tests use it as the
+human-readable registry mirror.
 
-### Phase → Checkpoint Mapping
+The remaining work is live acceptance only.
 
-The phases below are the **capability** checklist. Each phase is decomposed
-into one or more review checkpoints from architecture §24. Every checkpoint
-must be reviewed and approved before the next begins.
+### Live HiSec Planner Scenarios
 
-| Phase (capability) | Checkpoint (review gate) | Requirement doc | Status |
-|--------------------|--------------------------|------------------|--------|
-| Phase 1: Catalog Foundation | P0.1 Canonical Action Catalog | [`../requirements/P0-protocol-foundation.md`](../requirements/P0-protocol-foundation.md#checkpoint-p01--canonical-action-catalog) | UNDONE |
-| Phase 2: Observation Target Map | P0.2 Wire Models And Validation + P0.3 Observation And Target Identity | [`../requirements/P0-protocol-foundation.md`](../requirements/P0-protocol-foundation.md) | UNDONE |
-| Phase 3: Sequence Models And Executor | P0.2 (models) + P1.1 (dispatcher) + P1.2 (atomic executor) | [`../requirements/P0-protocol-foundation.md`](../requirements/P0-protocol-foundation.md), [`../requirements/P1-execution-evidence-mvp.md`](../requirements/P1-execution-evidence-mvp.md) | UNDONE |
-| Phase 4: Trace And Recovery | P1.3 Append-Only Trace Core + P2.1 Transition/Checkpoint + P2.2 Recovery Branches | [`../requirements/P1-execution-evidence-mvp.md`](../requirements/P1-execution-evidence-mvp.md), [`../requirements/P2-recovery-production.md`](../requirements/P2-recovery-production.md) | UNDONE |
-| Phase 5: Test Evidence And Reports | P1.4 Screenshot Evidence And Case Trace + P2.3 Run-Level Report And Reruns | [`../requirements/P1-execution-evidence-mvp.md`](../requirements/P1-execution-evidence-mvp.md), [`../requirements/P2-recovery-production.md`](../requirements/P2-recovery-production.md) | UNDONE |
-| Phase 6: LLM Planning | P3.1 Structured LLM Planner | [`../requirements/P3-llm-evaluation.md`](../requirements/P3-llm-evaluation.md) | UNDONE |
-| Phase 7: Evaluation | P2.4 Production Hardening + P3.2 Evaluation And Metrics | [`../requirements/P2-recovery-production.md`](../requirements/P2-recovery-production.md), [`../requirements/P3-llm-evaluation.md`](../requirements/P3-llm-evaluation.md) | UNDONE |
+Add environment-gated live tests equivalent to the deterministic stub suite in
+`test_case/test_planner_e2e/test_todo_scenarios.py`.
 
-Notes on the mapping:
+Scenarios:
 
-- **P0.1 alone covers Phase 1.** Phase 1's deliverables (typed
-  `ActionSpec`, catalog version/digest, `status.action_space` regenerated
-  from the registry) are exactly P0.1.
-- **Phase 2 splits across P0.2 and P0.3.** Adding `snapshot_id` /
-  `target_id` to legacy observation tools is P0.3; the `TargetRef`
-  model is P0.2; deterministic fingerprints are P0.3.
-- **Phase 3 is the gateway to execution.** Strict models land in P0.2,
-  the `execute_action` dispatcher in P1.1, and the atomic executor in
-  P1.2.
-- **Phase 4 is mostly P1.3 + P2.1 + P2.2.** The trace chain is P1.3;
-  checkpoint policy and recovery execution are P2.1 / P2.2.
-- **Phase 5 closes the user-facing loop.** Per-case `trace.md` is the
-  P1.4 MVP; run-level `report.md` is P2.3.
-- **Phase 6 is P3.1.** Structured-output LLM planner with confirmation
-  gate.
-- **Phase 7 covers production hardening (P2.4) and evaluation (P3.2).**
+- Successful semantic plan on a real HiSec page.
+- Stale tree after a window/control refresh.
+- Ambiguous target where multiple controls match.
+- Wrong window or process ownership.
+- Mid-sequence dialog that requires re-observe/replan.
 
-### Status Of Existing Code (Not Counted As Progress)
+Acceptance:
 
-The existing `target/server.py` MCP tools, `target/automation/*`
-backend implementations, and `test_case/` profile runners are the
-**migration baseline**, not checkpoint progress. They remain
-backward-compatible while each P-level checkpoint lands. In
-particular:
+- Stale and ambiguous targets never fall back to unverified coordinates.
+- Wrong ownership is blocked before GUI mutation.
+- Mid-sequence dialogs are observed and replanned, not clicked through blindly.
+- Trace/evidence output is sufficient to explain each planner decision.
+- Existing stub-LLM acceptance tests remain green.
 
-- The hard-coded `status.action_space` maps in `target/server.py`
-  are replaced by a catalog call in **P0.1**.
-- The legacy observation endpoints (`list_windows`, `dump_tree`,
-  `find_control`) gain `snapshot_id` and per-control target IDs in
-  **P0.3**.
-- Every legacy MCP tool remains a valid caller after **P1.1**.
+### Optional Follow-Ups
 
-Marking any of these existing pieces as "done" against a checkpoint
-without the corresponding new code and tests would be incorrect.
-
-### Phase 1: Catalog Foundation
-
-- [ ] Add typed `ActionSpec` and immutable V1 semantic ID registry.
-- [ ] Treat numeric action codes as optional aliases and test ID/code agreement.
-- [ ] Encode backend support and JSON input schema for every action.
-- [ ] Generate the compatibility `status.action_space` map from the registry.
-- [ ] Add catalog version/digest to `status` and expose catalog retrieval.
-- [ ] Test duplicate IDs/names, ID stability, schemas, and deterministic digest.
-
-### Phase 2: Observation Target Map
-
-- [ ] Add `snapshot_id` to `list_windows`, `dump_tree`, and `find_control`.
-- [ ] Return target IDs and backend-neutral window/control fingerprints.
-- [ ] Preserve native selectors without treating `control_id` as durable.
-- [ ] Implement exact/stable/fallback resolution and ambiguity errors.
-- [ ] Invalidate target IDs after window/tree-changing actions.
-
-### Phase 3: Sequence Models And Executor
-
-- [ ] Add Pydantic `ActionSequence`, `ActionStep`, `TargetRef`, guard,
-      expectation, and error-policy models.
-- [ ] Validate catalog version/digest and input schemas.
-- [ ] Add a dry-run endpoint that resolves steps without GUI mutation.
-- [ ] Add deterministic execution with per-step receipts and bounded retries.
-- [ ] Initially support `abort`, `retry`, and `reobserve_replan`, not arbitrary
-      branches/loops.
-
-### Phase 4: Trace And Recovery
-
-- [ ] Add typed trace events, canonical serialization, and hash-chain checks.
-- [ ] Persist append-only JSONL plus content-addressed observation artifacts.
-- [ ] Add checkpoint creation policies before risky/state-changing steps.
-- [ ] Detect window/page/modal transitions from before/after observations and
-      avoid checkpoints for ordinary same-page clicks.
-- [ ] Implement logical, session, application, and environment restore
-      strategies with verification.
-- [ ] Resume from a checkpoint by creating a new branch; never rewrite history.
-- [ ] Add trace queries by trace/branch/plan/step/call/checkpoint ID.
-- [ ] Capture baseline, per-step, transition, checkpoint, and failure
-      screenshots with digests and redaction metadata.
-
-### Phase 5: Test Evidence And Reports
-
-- [ ] Add typed test case, atomic step, expectation, step-result, and evidence
-      models with stable case/step IDs.
-- [ ] Project trace events into `step-results.json` without making the
-      projection authoritative execution state.
-- [ ] Generate and incrementally refresh one readable `trace.md` per case with
-      relative screenshot embeds.
-- [ ] Generate one run-level `report.md` with environment, totals, durations,
-      failures, retries, and links to case traces.
-- [ ] Verify artifact digests and surface missing/corrupt screenshots in the
-      report instead of silently omitting them.
-- [ ] Preserve every rerun/branch and identify the attempt used for the final
-      test outcome.
-
-### Phase 6: LLM Planning
-
-- [ ] Give the LLM only actions enabled for the live backend/profile/policy.
-- [ ] Require structured output matching `ActionSequence` exactly.
-- [ ] Prefer semantic actions over coordinate fallbacks in planner guidance.
-- [ ] Re-observe/replan after state-changing steps.
-- [ ] Persist plans/results with sensitive argument redaction.
-
-### Phase 7: Evaluation
-
-- [ ] Unit-test catalog stability, target remapping, stale references, schemas,
-      and JSON round trips.
-- [ ] Test event hash integrity, branch ancestry, checkpoint recovery,
-      irreversible-action guards, and crash-safe append/resume.
-- [ ] Add simulated Windows UIA and macOS AX sequence tests.
-- [ ] Add live HiSec E2E for successful plans, stale trees, ambiguity, wrong
-      ownership, and mid-sequence dialogs.
-- [ ] Measure valid action selection, sequence success, replans/task,
-      semantic-vs-coordinate ratio, and unsafe-action rejection.
-- [ ] Snapshot-test Markdown rendering, screenshot linkage, redaction, partial
-      crash recovery, rerun aggregation, and report totals.
-
-## Acceptance Criteria
-
-- Every LLM-visible action has exactly one immutable semantic action ID.
-- Numeric action codes, when present, resolve to that semantic ID and are never
-  accepted alone without catalog-version validation.
-- One catalog drives status, planning schema, validation, and dispatch.
-- Every mutating target reference includes snapshot and ownership evidence.
-- Stale/ambiguous targets never cause unverified coordinate clicks.
-- Plans round-trip through JSON/Pydantic and reject unknown IDs/parameters.
-- Existing MCP names and `status.action_space` remain backward compatible.
-- Equivalent Windows/macOS semantics share an ID while capability flags remain
-  backend-specific.
-- Trace events form a verifiable parent/hash chain and remain append-only.
-- Recovery creates a new branch from a checkpoint and preserves failed events.
-- Every checkpoint declares its actual restoration level; logical rewind is not
-  misrepresented as UI or external-state rollback.
-- Every executed atomic test step has a structured result linked to its trace
-  events and declared expectations.
-- Every mutating step has after-action visual evidence; transitions, failures,
-  and checkpoints retain before/after evidence according to policy.
-- Opening a case's `trace.md` shows ordered steps, outcomes, expectations, and
-  screenshots through relative links; no custom UI is required.
-- A run-level `report.md` is generated from structured results and its totals
-  reconcile with all included case attempts.
-
-## Open Decisions
-
-- Semantic versioning or integer epoch for catalog compatibility?
-- Store selector evidence inline or by immutable observation digest?
-- Which GUI mutations require confirmation in autonomous mode?
-- Add branches/loops later, or rely on replan after each observation?
-- How long may a target snapshot remain valid?
-- Which actions receive automatic checkpoints, and what storage budget applies
-  to screenshots/control trees?
-- Which HiSec pages have tested inverse actions versus logical-only recovery?
-- Which UI regions/text patterns require default screenshot redaction?
-- Should run reports use the latest attempt, first attempt, or both for the
-  headline pass rate?
+- Decide which HiSec pages have tested inverse actions versus logical-only
+  recovery.
+- Decide which UI regions/text patterns require default screenshot redaction.
+- Decide whether run reports should headline the latest attempt, first attempt,
+  or both.

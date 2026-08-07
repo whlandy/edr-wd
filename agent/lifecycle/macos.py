@@ -205,7 +205,7 @@ class MacOSLifecycle:
         Read-only check: are required tracked macOS target payload files
         present on the target?  Does not upload or modify anything.
 
-        Required files (per docs/todo/target-sync-without-ad-hoc-scripts.md):
+        Required files (see references/agent-workflow.md lifecycle docs):
           <root>/server.py
           <root>/automation/__init__.py
           <root>/scripts/macos/start_server.sh
