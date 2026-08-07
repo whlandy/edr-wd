@@ -67,6 +67,54 @@ def _atomic_write(path: Path, data: bytes) -> None:
     tmp.replace(path)
 
 
+def _decision_block(
+    *,
+    tool: str,
+    window_args: dict,
+    result: dict | None = None,
+    iterations: list | None = None,
+) -> dict:
+    """Record the ownership/coordinate decision context for an evidence record.
+
+    P1.3 acceptance: "记录精确 action 参数与 ownership/coordinate 决策". The
+    window-scoped composite tools (scroll_region / page_table) resolve a
+    single connected window and dispatch window-relative coordinates that are
+    converted to screen space, so the decision context is:
+
+      * coordinate_space — the semantic space the action targeted ("window").
+      * ownership       — the expected owning process/pid the backend used
+        for the candidate control / ownership check (only the keys actually
+        supplied in the selection args are recorded; nothing is fabricated).
+      * verdict         — the stable ownership/coordinate resolution codes
+        the backend returned per step (e.g. WHEEL_MOVED / NEXT_PAGE for a
+        clean dispatch, or target_occluded / target_ambiguous /
+        point_outside_window / target_not_found when resolution failed).
+    """
+    ownership = {}
+    if window_args.get("process_name"):
+        ownership["process_name"] = window_args["process_name"]
+    if window_args.get("pid") is not None:
+        ownership["pid"] = window_args["pid"]
+
+    codes = []
+    source = iterations if iterations is not None else ([result] if result else [])
+    for item in source:
+        code = (item or {}).get("code")
+        if code:
+            codes.append(code)
+    if not codes and result:
+        code = result.get("code")
+        if code:
+            codes.append(code)
+
+    return {
+        "coordinate_space": "window",
+        "owner": ownership,
+        "verdict_codes": codes,
+        "tool_domain": tool,
+    }
+
+
 def _render_evidence_md(evidence: dict) -> str:
     lines = [
         "# EDR-WD CLI Evidence",
@@ -79,6 +127,12 @@ def _render_evidence_md(evidence: dict) -> str:
         "",
         "```json",
         json.dumps(evidence.get("arguments", {}), ensure_ascii=False, indent=2, default=str),
+        "```",
+        "",
+        "## Decision (ownership/coordinate)",
+        "",
+        "```json",
+        json.dumps(evidence.get("decision", {}), ensure_ascii=False, indent=2, default=str),
         "```",
         "",
         "## Result",
@@ -131,6 +185,7 @@ def _with_verify_evidence(agent, target: str, tool: str, arguments: dict, result
         "target": target,
         "tool": tool,
         "arguments": arguments,
+        "decision": _decision_block(tool=tool, window_args=arguments, result=result),
         "result": {k: result.get(k) for k in (
             "ok", "dispatched", "event_dispatched", "moved", "reason", "code",
             "success", "error", "steps", "iterations",
@@ -257,6 +312,11 @@ def _cmd_scroll(args: argparse.Namespace, agent, parser, target: str) -> int:
             "target": target,
             "tool": "scroll_region",
             "arguments": window_args,
+            "decision": _decision_block(
+                tool="scroll_region",
+                window_args=window_args,
+                iterations=iterations,
+            ),
             "result": {
                 "ok": ok_all,
                 "moved": moved_any,

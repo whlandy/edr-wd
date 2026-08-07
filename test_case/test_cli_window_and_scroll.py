@@ -157,6 +157,46 @@ def test_scroll_verify_persists_before_after_evidence(fake_agent, capsys):
     # screenshot captured before the action and after it
     tools_called = [c[0] for c in agent.calls]
     assert tools_called.count("screenshot") == 2
+    # decision context records ownership/coordinate verdicts (P1.3); only
+    # the selection keys actually supplied are recorded (here just a title)
+    decision = evidence["decision"]
+    assert decision["coordinate_space"] == "window"
+    assert decision["owner"] == {}
+    assert "WHEEL_MOVED" in decision["verdict_codes"]
+
+
+def test_scroll_verify_records_occlusion_decision(fake_agent, capsys):
+    """A window-scoped scroll that fails ownership/occlusion must record the
+    stable verdict code in the evidence decision block (P1.3)."""
+    agent, written = fake_agent
+
+    def _scroll_response(name, arguments=None, timeout=None):
+        return {
+            "ok": True,
+            "dispatched": False,
+            "moved": False,
+            "reason": "occluded",
+            "code": "target_occluded",
+        }
+
+    agent.responses["scroll_region"] = _scroll_response
+    agent.responses["screenshot"] = {"ok": False, "error": "no live backend"}
+
+    exit_code = cli.main([
+        "--target", "win-dev", "scroll",
+        "--window-title", "^日志中心$", "--process-name", "EDRClient.exe",
+        "--pid", "6752", "--down", "1", "--verify",
+    ])
+    out = json.loads(capsys.readouterr().out)
+    evidence = out["evidence"]
+    decision = evidence["decision"]
+    assert decision["coordinate_space"] == "window"
+    assert decision["owner"] == {"process_name": "EDRClient.exe", "pid": 6752}
+    assert decision["verdict_codes"] == ["target_occluded"]
+    # the decision block is rendered into the markdown evidence file
+    md = next(data.decode("utf-8") for path, data in written if path.name == "evidence.md")
+    assert "## Decision (ownership/coordinate)" in md
+    assert "target_occluded" in md
 
 
 def test_page_next_verify_calls_page_table_and_persists(fake_agent, capsys):
@@ -180,4 +220,6 @@ def test_page_next_verify_calls_page_table_and_persists(fake_agent, capsys):
     assert exit_code == 0
     assert out["moved"] is True
     assert out["evidence"]["tool"] == "page_table"
+    assert out["evidence"]["decision"]["coordinate_space"] == "window"
+    assert "NEXT_PAGE" in out["evidence"]["decision"]["verdict_codes"]
     assert any(path.name == "evidence.json" for path, _ in written)
