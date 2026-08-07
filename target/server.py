@@ -457,6 +457,58 @@ def scroll(clicks: int, x: int = None, y: int = None) -> str:
 
 
 @mcp.tool(
+    name="scroll_region",
+    description=(
+        "Detect the connected window's scroll structure and dispatch ONE bounded "
+        "scroll/next action through the full composite chain "
+        "(detect -> controller.plan -> real dispatcher -> verify). Unlike the raw "
+        "'scroll' primitive, this never fabricates movement: it returns a "
+        "ScrollResult (dispatched / moved / reason) and reports NOT_DISPATCHED "
+        "when no enabled owner control exists or the backend is unavailable. "
+        "Optional window_title_re overrides the currently connected window."
+    ),
+)
+def scroll_region(
+    window_title_re: str = None,
+    max_depth: int = 6,
+    process_name: str = None,
+    pid: int = None,
+) -> str:
+    """One bounded scroll/next cycle through the full chain.
+
+    `run_scroll_region` converts the *expected* domain outcomes (backend
+    unavailable, no targets/controls) into honest NOT_DISPATCHED results
+    internally — it does not raise for those. Any exception escaping here is a
+    genuine bug, so we let it propagate (MCP framework logs the true
+    traceback) instead of masking it as a business `ok:false` payload, which
+    would hide TypeError/AttributeError-style crashes from callers.
+
+    DO NOT wrap this body in `except Exception -> ok:false`. There is no
+    "known MCP error" to route to here: BackendUnavailableError and the
+    no-controls ValueError are both consumed inside run_scroll_region, so any
+    `except` we add today would be dead code, and tomorrow it would silently
+    swallow real crashes. If you believe a NEW expected failure can reach this
+    point, add a narrow `except <ThatSpecificError>:` (with a test) — never a
+    blanket one. (See review: "tighten server exception handling".)
+    """
+    if _backend is None:
+        return _backend_unavailable("scroll_region")
+    from scroll.backend import ScrollBackendSource, run_scroll_region
+
+    source = ScrollBackendSource(
+        _backend,
+        window_title_re=window_title_re,
+        max_depth=max_depth,
+        process_name=process_name,
+        pid=pid,
+        host=os.environ.get("EDR_WD_HOST", "local"),
+    )
+    result = run_scroll_region(source)
+    result["ok"] = True
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
     name="click_window_at",
     description=(
         "Click window-relative coordinates (x, y) converted to screen space using the connected window's rectangle. "
