@@ -681,6 +681,72 @@ def scroll_until_visible(
 
 
 @mcp.tool(
+    name="drag_target",
+    description=(
+        "One window/ownership-verified drag (A028 pointer.drag) from a resolved "
+        "control to a release point. Resolves target_ref (target_id / automation_id "
+        "/ text / control_type, ownership-gated by expected_process_name) to a "
+        "control rectangle, grabs a safe point (grab=handle for thumb/slider/splitter, "
+        "grab=center otherwise) and drags to either an absolute (x2, y2) or a "
+        "(dx, dy) offset from the grab point. Verifies actual movement via the "
+        "Observer (never reports moved=True without a verified change). For sliders, "
+        "handles, splitter bars, resize grips and precise list reordering. "
+        "Dispatches exactly one pointer.drag (A028); never a wheel or click. "
+        "verify=False never reports moved=True."
+    ),
+)
+def drag_target(
+    target_ref: dict,
+    dx: int = None,
+    dy: int = None,
+    x2: int = None,
+    y2: int = None,
+    grab: str = "handle",
+    duration: float = 0.25,
+    window_title_re: str = None,
+    max_depth: int = 6,
+    process_name: str = None,
+    pid: int = None,
+    verify: bool = True,
+    expected_process_name: str = None,
+) -> str:
+    """Drag one control to a release point (A028), window/ownership verified.
+
+    Mirrors the sibling composite tools' honest-error contract:
+    backend-unavailable, no-controls and resolution-failure outcomes are
+    converted to NOT_DISPATCHED inside the facade; any exception escaping
+    here is a genuine bug and should propagate.
+    """
+    if _backend is None:
+        return _backend_unavailable("drag_target")
+    from scroll.backend import ScrollBackendSource
+    from scroll.drag import run_drag_target
+
+    source = ScrollBackendSource(
+        _backend,
+        window_title_re=window_title_re,
+        max_depth=max_depth,
+        process_name=process_name,
+        pid=pid,
+        host=os.environ.get("EDR_WD_HOST", "local"),
+    )
+    result = run_drag_target(
+        source,
+        target_ref=target_ref,
+        dx=dx,
+        dy=dy,
+        x2=x2,
+        y2=y2,
+        grab=grab,
+        duration=duration,
+        verify=verify,
+        expected_process_name=expected_process_name,
+    )
+    result["ok"] = True
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
     name="click_window_at",
     description=(
         "Click window-relative coordinates (x, y) converted to screen space using the connected window's rectangle. "

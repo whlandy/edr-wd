@@ -43,6 +43,16 @@ from .scroll_until_visible import (
     run_scroll_until_visible,
     scroll_until_visible,
 )
+from .drag import (
+    DRAG_ACTION_CODE,
+    DRAG_ACTION_ID,
+    DEFAULT_DURATION,
+    DragTargetResolutionError,
+    plan_drag,
+    resolve_drag_target,
+    run_drag_target,
+    step_drag,
+)
 from .backend import (
     BackendUnavailableError,
     ScrollBackendSource,
@@ -96,6 +106,14 @@ __all__ = [
     "find_target",
     "scroll_until_visible",
     "run_scroll_until_visible",
+    "DRAG_ACTION_ID",
+    "DRAG_ACTION_CODE",
+    "DEFAULT_DURATION",
+    "DragTargetResolutionError",
+    "resolve_drag_target",
+    "plan_drag",
+    "step_drag",
+    "run_drag_target",
     "ScrollBackendSource",
     "BackendUnavailableError",
     "run_scroll_region",
