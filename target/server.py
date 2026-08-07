@@ -41,6 +41,8 @@ try:  # Installed package / `python -m target.server`.
         status_action_space,
     )
     from .scroll.pointer_result import normalize as _ptr_normalize
+    from .scroll.window_args import resolve_window as _resolve_window
+    from .scroll.window_args import window_doc as _window_doc
 except ImportError:  # Target-local `python server.py` deployment compatibility.
     from automation import create_backend
     from automation.base import AutomationBackend
@@ -51,6 +53,8 @@ except ImportError:  # Target-local `python server.py` deployment compatibility.
         status_action_space,
     )
     from scroll.pointer_result import normalize as _ptr_normalize
+    from scroll.window_args import resolve_window as _resolve_window
+    from scroll.window_args import window_doc as _window_doc
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -477,33 +481,42 @@ def scroll(clicks: int, x: int = None, y: int = None) -> str:
         "Window-scoped scroll (P0.1): scroll the mouse wheel inside a specific "
         "window by a signed number of clicks. Coordinates (x, y) are WINDOW-"
         "RELATIVE to the resolved window's top-left corner. The window is "
-        "resolved uniquely from window_title_re + expected_process_name + "
+        "resolved uniquely from the `window` object (title_re / process_name / "
+        "pid / handle) or the legacy window_title_re + expected_process_name + "
         "optional expected_pid, and the converted screen point is verified to "
         "belong to that window and NOT be occluded by another top-level window "
         "before any pointer movement. Stable error codes on failure: "
         "target_not_found / target_ambiguous / point_outside_window / "
-        "target_occluded. Catalog action: pointer.scroll (A029)."
+        "target_occluded. Catalog action: pointer.scroll (A029). "
+        + _window_doc("Selects the target window.")
     ),
 )
 def scroll_window(
     clicks: int,
     x: int,
     y: int,
+    window: dict = None,
     window_title_re: str = None,
     expected_process_name: str = None,
     expected_pid: int = None,
 ) -> str:
     if _backend is None:
         return _backend_unavailable("scroll_window")
+    _w = _resolve_window(
+        window,
+        window_title_re=window_title_re,
+        expected_process_name=expected_process_name,
+        expected_pid=expected_pid,
+    )
     if hasattr(_backend, "scroll_window"):
         result = _ptr_normalize(
             _backend.scroll_window(
                 clicks,
                 x,
                 y,
-                window_title_re=window_title_re,
-                expected_process_name=expected_process_name,
-                expected_pid=expected_pid,
+                window_title_re=_w["window_title_re"],
+                expected_process_name=_w["process_name"],
+                expected_pid=_w["pid"],
             ),
             tool="scroll_window",
             scope="window",
@@ -530,10 +543,13 @@ def scroll_window(
         "'scroll' primitive, this never fabricates movement: it returns a "
         "ScrollResult (dispatched / moved / reason) and reports NOT_DISPATCHED "
         "when no enabled owner control exists or the backend is unavailable. "
-        "Optional window_title_re overrides the currently connected window."
+        "Optional `window` object (or legacy window_title_re) overrides the "
+        "currently connected window. "
+        + _window_doc("Selects the target window.")
     ),
 )
 def scroll_region(
+    window: dict = None,
     window_title_re: str = None,
     max_depth: int = 6,
     process_name: str = None,
@@ -560,12 +576,19 @@ def scroll_region(
         return _backend_unavailable("scroll_region")
     from scroll.backend import ScrollBackendSource, run_scroll_region
 
-    source = ScrollBackendSource(
-        _backend,
+    _w = _resolve_window(
+        window,
         window_title_re=window_title_re,
-        max_depth=max_depth,
         process_name=process_name,
         pid=pid,
+    )
+    source = ScrollBackendSource(
+        _backend,
+        window_title_re=_w["window_title_re"],
+        max_depth=max_depth,
+        process_name=_w["process_name"],
+        pid=_w["pid"],
+        native_window_id=_w["native_window_id"],
         host=os.environ.get("EDR_WD_HOST", "local"),
     )
     result = run_scroll_region(source)
@@ -583,11 +606,14 @@ def scroll_region(
         "next/prev, or a missing enabled owner. Verifies real page movement "
         "(content digest change) before reporting moved=True. direction: "
         "next|prev|first. One call = one page turn; draining all pages is a "
-        "caller loop."
+        "caller loop. Optional `window` object (or legacy window_title_re) "
+        "selects the target window. "
+        + _window_doc("Selects the target window.")
     ),
 )
 def page_table(
     direction: str = "next",
+    window: dict = None,
     window_title_re: str = None,
     max_depth: int = 6,
     process_name: str = None,
@@ -606,12 +632,19 @@ def page_table(
         return _backend_unavailable("page_table")
     from scroll.backend import ScrollBackendSource, run_page_table
 
-    source = ScrollBackendSource(
-        _backend,
+    _w = _resolve_window(
+        window,
         window_title_re=window_title_re,
-        max_depth=max_depth,
         process_name=process_name,
         pid=pid,
+    )
+    source = ScrollBackendSource(
+        _backend,
+        window_title_re=_w["window_title_re"],
+        max_depth=max_depth,
+        process_name=_w["process_name"],
+        pid=_w["pid"],
+        native_window_id=_w["native_window_id"],
         host=os.environ.get("EDR_WD_HOST", "local"),
     )
     result = run_page_table(
@@ -636,12 +669,15 @@ def page_table(
         "with target_not_found when the bound is exhausted. down->next->negative "
         "wheel / pagination next; up->prev->positive wheel / pagination prev. "
         "Aligns action codes with the page_table/scroll semantics (A020 / A029). "
-        "verify=False never reports moved=True."
+        "verify=False never reports moved=True. Optional `window` object (or "
+        "legacy window_title_re) selects the target window. "
+        + _window_doc("Selects the target window.")
     ),
 )
 def scroll_until_visible(
     target_text_re: str,
     direction: str = "down",
+    window: dict = None,
     window_title_re: str = None,
     max_depth: int = 6,
     process_name: str = None,
@@ -661,12 +697,19 @@ def scroll_until_visible(
     from scroll.backend import ScrollBackendSource
     from scroll.scroll_until_visible import run_scroll_until_visible
 
-    source = ScrollBackendSource(
-        _backend,
+    _w = _resolve_window(
+        window,
         window_title_re=window_title_re,
-        max_depth=max_depth,
         process_name=process_name,
         pid=pid,
+    )
+    source = ScrollBackendSource(
+        _backend,
+        window_title_re=_w["window_title_re"],
+        max_depth=max_depth,
+        process_name=_w["process_name"],
+        pid=_w["pid"],
+        native_window_id=_w["native_window_id"],
         host=os.environ.get("EDR_WD_HOST", "local"),
     )
     result = run_scroll_until_visible(
@@ -692,7 +735,10 @@ def scroll_until_visible(
         "Observer (never reports moved=True without a verified change). For sliders, "
         "handles, splitter bars, resize grips and precise list reordering. "
         "Dispatches exactly one pointer.drag (A028); never a wheel or click. "
-        "verify=False never reports moved=True."
+        "verify=False never reports moved=True. Optional `window` object (or "
+        "legacy window_title_re / process_name / pid) selects the target "
+        "window. "
+        + _window_doc("Selects the target window.")
     ),
 )
 def drag_target(
@@ -703,6 +749,7 @@ def drag_target(
     y2: int = None,
     grab: str = "handle",
     duration: float = 0.25,
+    window: dict = None,
     window_title_re: str = None,
     max_depth: int = 6,
     process_name: str = None,
@@ -722,12 +769,20 @@ def drag_target(
     from scroll.backend import ScrollBackendSource
     from scroll.drag import run_drag_target
 
-    source = ScrollBackendSource(
-        _backend,
+    _w = _resolve_window(
+        window,
         window_title_re=window_title_re,
-        max_depth=max_depth,
         process_name=process_name,
         pid=pid,
+        expected_process_name=expected_process_name,
+    )
+    source = ScrollBackendSource(
+        _backend,
+        window_title_re=_w["window_title_re"],
+        max_depth=max_depth,
+        process_name=_w["process_name"],
+        pid=_w["pid"],
+        native_window_id=_w["native_window_id"],
         host=os.environ.get("EDR_WD_HOST", "local"),
     )
     result = run_drag_target(
@@ -740,7 +795,7 @@ def drag_target(
         grab=grab,
         duration=duration,
         verify=verify,
-        expected_process_name=expected_process_name,
+        expected_process_name=_w["process_name"],
     )
     result["ok"] = True
     return json.dumps(result, ensure_ascii=False)
@@ -751,18 +806,33 @@ def drag_target(
     description=(
         "Click window-relative coordinates (x, y) converted to screen space using the connected window's rectangle. "
         "Use when you have coordinates relative to the window's top-left corner. "
-        "If window_title_re is not given, uses the currently connected window."
+        "If no `window` object or window_title_re is given, uses the currently connected window. "
+        + _window_doc("Selects the target window.")
     ),
 )
 def click_window_at(
     x: int,
     y: int,
+    window: dict = None,
     window_title_re: str = None,
     expected_process_name: str = None,
 ) -> str:
     if _backend is None:
         return _backend_unavailable("click_window_at")
-    result = _backend.click_window_at(x, y, window_title_re, expected_process_name)
+    _w = _resolve_window(
+        window,
+        window_title_re=window_title_re,
+        expected_process_name=expected_process_name,
+    )
+    result = _ptr_normalize(
+        _backend.click_window_at(
+            x,
+            y,
+            _w["window_title_re"],
+            _w["process_name"],
+        ),
+        tool="click_window_at",
+    )
     return json.dumps(result, ensure_ascii=False)
 
 
