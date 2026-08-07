@@ -445,14 +445,61 @@ def drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.25) -> str:
 @mcp.tool(
     name="scroll",
     description=(
-        "Scroll the mouse wheel by a signed number of clicks. "
-        "Optional x/y can reposition the pointer before scrolling."
+        "LOW-LEVEL RAW PRIMITIVE: scroll the mouse wheel by a signed number of "
+        "clicks. UNSCOPED — it acts on whatever top-level window currently owns "
+        "the pointer; there is no window binding or ownership check. Optional "
+        "x/y can reposition the pointer before scrolling (screen coords). "
+        "For window-bound scroll with resolution + verification, use "
+        "'scroll_window' instead."
     ),
 )
 def scroll(clicks: int, x: int = None, y: int = None) -> str:
     if _backend is None:
         return _backend_unavailable("scroll")
     result = _backend.scroll(clicks, x=x, y=y)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="scroll_window",
+    description=(
+        "Window-scoped scroll (P0.1): scroll the mouse wheel inside a specific "
+        "window by a signed number of clicks. Coordinates (x, y) are WINDOW-"
+        "RELATIVE to the resolved window's top-left corner. The window is "
+        "resolved uniquely from window_title_re + expected_process_name + "
+        "optional expected_pid, and the converted screen point is verified to "
+        "belong to that window and NOT be occluded by another top-level window "
+        "before any pointer movement. Stable error codes on failure: "
+        "target_not_found / target_ambiguous / point_outside_window / "
+        "target_occluded. Catalog action: pointer.scroll (A029)."
+    ),
+)
+def scroll_window(
+    clicks: int,
+    x: int,
+    y: int,
+    window_title_re: str = None,
+    expected_process_name: str = None,
+    expected_pid: int = None,
+) -> str:
+    if _backend is None:
+        return _backend_unavailable("scroll_window")
+    if hasattr(_backend, "scroll_window"):
+        result = _backend.scroll_window(
+            clicks,
+            x,
+            y,
+            window_title_re=window_title_re,
+            expected_process_name=expected_process_name,
+            expected_pid=expected_pid,
+        )
+    else:
+        result = {
+            "ok": False,
+            "code": "backend_unsupported",
+            "error": "current backend does not implement window-scoped scroll",
+            "scope": "window",
+        }
     return json.dumps(result, ensure_ascii=False)
 
 

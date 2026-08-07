@@ -99,6 +99,15 @@ class AutomationBackend(Protocol):
         x: Optional[int] = None,
         y: Optional[int] = None,
     ) -> dict: ...
+    def scroll_window(
+        self,
+        clicks: int,
+        x: int,
+        y: int,
+        window_title_re: Optional[str] = None,
+        expected_process_name: Optional[str] = None,
+        expected_pid: Optional[int] = None,
+    ) -> dict: ...
     def lock_window(
         self,
         title_re: Optional[str] = None,

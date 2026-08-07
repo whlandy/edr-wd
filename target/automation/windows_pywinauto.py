@@ -385,9 +385,200 @@ class WindowsPywinautoBackend:
             payload = {"ok": True, "method": "pyautogui.scroll", "clicks": int(clicks)}
             if x is not None and y is not None:
                 payload["point"] = {"x": int(x), "y": int(y)}
+            # P0.1: the raw `scroll(clicks, x, y)` primitive is unscoped &
+            # low-level — it acts on whatever top-level window owns the point.
+            payload["scope"] = "screen_unscoped"
             return payload
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    # ── P0.1 window-scoped scroll ─────────────────────────────────────────────
+    #
+    # Extends/wraps the raw `scroll` primitive with window binding. The caller
+    # supplies coordinate_space="window" plus window + process + optional PID
+    # selectors; we resolve a unique top-level window, convert window-relative
+    # coordinates to screen coordinates, verify the point belongs to the target
+    # window (and is not occluded by another top-level window), then dispatch
+    # pyautogui.scroll. The resolution/ownership decisions live in
+    # target/automation/window_scope.py (pure & unit-tested); this method only
+    # gathers live window info + a Win32 point hit-test and drives them.
+    #
+    # `_enumerate_windows` and `_hit_test_top_window` are injectable so the
+    # orchestration can be unit-tested with fakes on non-Windows hosts.
+
+    @staticmethod
+    def _enumerate_top_windows_windows() -> list:
+        """Live: enumerate visible top-level windows as info dicts.
+
+        Windows/pywinauto only. Returns a list of
+        {handle, title, process_name, pid, rect} dicts.
+        """
+        from pywinauto import Desktop
+        import psutil
+
+        out = []
+        try:
+            desktop = Desktop(backend="uia")
+        except Exception as exc:  # pragma: no cover - live-only
+            return out
+        for win in desktop.windows():
+            try:
+                if not win.is_top_level() or not win.is_visible():
+                    continue
+            except Exception:
+                continue
+            try:
+                handle = int(win.handle)
+                title = win.window_text() or ""
+                pid = int(win.process_id())
+                process_name = ""
+                try:
+                    process_name = psutil.Process(pid).name()
+                except Exception:
+                    pass
+                r = win.rectangle()
+                rect = {
+                    "left": int(r.left), "top": int(r.top),
+                    "right": int(r.right), "bottom": int(r.bottom),
+                    "width": int(r.width()), "height": int(r.height()),
+                }
+                out.append(
+                    {
+                        "handle": handle,
+                        "title": title,
+                        "process_name": process_name,
+                        "pid": pid,
+                        "rect": rect,
+                    }
+                )
+            except Exception:
+                continue
+        return out
+
+    @staticmethod
+    def _hit_test_top_window_windows(screen_x: int, screen_y: int) -> Optional[int]:
+        """Live: Win32 WindowFromPoint -> top-level ancestor hwnd.
+
+        Returns None when the Win32 call is unavailable (non-Windows host).
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            pt = wintypes.POINT(int(screen_x), int(screen_y))
+            hwnd = user32.WindowFromPoint(pt)
+            if not hwnd:
+                return None
+            return int(user32.GetAncestor(hwnd, 2))  # GA_ROOT = 2
+        except Exception:  # pragma: no cover - live-only (Win32 absent on macOS)
+            return None
+
+    def scroll_window(
+        self,
+        clicks: int,
+        x: int,
+        y: int,
+        window_title_re: Optional[str] = None,
+        expected_process_name: Optional[str] = None,
+        expected_pid: Optional[int] = None,
+        *,
+        _enumerate_windows=None,
+        _hit_test_top_window=None,
+    ) -> dict:
+        """Window-scoped scroll (P0.1).
+
+        Coordinates (x, y) are window-relative. The event is dispatched only if
+        a unique target window resolves from the selectors and the converted
+        screen point belongs to that window and is not covered by another
+        top-level window.
+
+        Returned envelope includes `scope` and a thin `window` identity so the
+        caller can distinguish scoped from unscoped scrolls.
+        """
+        try:
+            from ..automation.window_scope import (
+                WindowScopeError,
+                assert_owned_and_unoccluded,
+                resolve_unique_window,
+                to_screen,
+            )
+        except ImportError:
+            from automation.window_scope import (
+                WindowScopeError,
+                assert_owned_and_unoccluded,
+                resolve_unique_window,
+                to_screen,
+            )
+
+        enumerate_windows = _enumerate_windows or self._enumerate_top_windows_windows
+        hit_test = _hit_test_top_window or self._hit_test_top_window_windows
+
+        try:
+            windows = enumerate_windows()
+        except Exception as e:
+            return {"ok": False, "code": "window_enum_failed", "error": str(e)}
+
+        target, err = resolve_unique_window(
+            windows,
+            title_re=window_title_re,
+            process_name=expected_process_name,
+            pid=expected_pid,
+        )
+        if target is None:
+            assert err is not None, "resolve_unique_window failed without an error"
+            return {
+                "ok": False,
+                "code": err.code,
+                "error": str(err),
+                "scope": "window",
+            }
+
+        try:
+            sx, sy = to_screen(target["rect"], x, y)
+        except Exception as e:
+            return {"ok": False, "code": "coord_conversion_failed", "error": str(e)}
+
+        hit_handle = None
+        try:
+            hit_handle = hit_test(sx, sy)
+        except Exception:
+            hit_handle = None
+
+        try:
+            assert_owned_and_unoccluded(
+                target, windows, sx, sy, hit_test_handle=hit_handle
+            )
+        except WindowScopeError as e:
+            return {
+                "ok": False,
+                "code": e.code,
+                "error": str(e),
+                "scope": "window",
+                "point": {"x": sx, "y": sy},
+            }
+
+        try:
+            pyautogui.moveTo(int(sx), int(sy))
+            pyautogui.scroll(int(clicks))
+        except Exception as e:
+            return {"ok": False, "error": str(e), "scope": "window"}
+
+        return {
+            "ok": True,
+            "method": "pyautogui.scroll",
+            "clicks": int(clicks),
+            "scope": "window",
+            "point": {"x": sx, "y": sy},
+            "window": {
+                "handle": target.get("handle"),
+                "title": target.get("title"),
+                "process_name": target.get("process_name"),
+                "pid": target.get("pid"),
+                "rect": target.get("rect"),
+            },
+        }
+
 
     # ── Connect-required ──────────────────────────────────────────────────────
 
