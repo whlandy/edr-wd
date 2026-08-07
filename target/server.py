@@ -40,6 +40,7 @@ try:  # Installed package / `python -m target.server`.
         get_action_catalog as _get_action_catalog_dict,
         status_action_space,
     )
+    from .scroll.pointer_result import normalize as _ptr_normalize
 except ImportError:  # Target-local `python server.py` deployment compatibility.
     from automation import create_backend
     from automation.base import AutomationBackend
@@ -49,6 +50,7 @@ except ImportError:  # Target-local `python server.py` deployment compatibility.
         get_action_catalog as _get_action_catalog_dict,
         status_action_space,
     )
+    from scroll.pointer_result import normalize as _ptr_normalize
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -368,7 +370,10 @@ def click_target(
 def click_at(x: int, y: int, expected_process_name: str = None) -> str:
     if _backend is None:
         return _backend_unavailable("click_at")
-    result = _backend.click_at(x, y, expected_process_name)
+    result = _ptr_normalize(
+        _backend.click_at(x, y, expected_process_name),
+        tool="click_at",
+    )
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -438,7 +443,10 @@ def hover_at(x: int, y: int) -> str:
 def drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.25) -> str:
     if _backend is None:
         return _backend_unavailable("drag")
-    result = _backend.drag(x1, y1, x2, y2, duration=duration)
+    result = _ptr_normalize(
+        _backend.drag(x1, y1, x2, y2, duration=duration),
+        tool="drag",
+    )
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -456,7 +464,10 @@ def drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.25) -> str:
 def scroll(clicks: int, x: int = None, y: int = None) -> str:
     if _backend is None:
         return _backend_unavailable("scroll")
-    result = _backend.scroll(clicks, x=x, y=y)
+    result = _ptr_normalize(
+        _backend.scroll(clicks, x=x, y=y),
+        tool="scroll",
+    )
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -485,21 +496,28 @@ def scroll_window(
     if _backend is None:
         return _backend_unavailable("scroll_window")
     if hasattr(_backend, "scroll_window"):
-        result = _backend.scroll_window(
-            clicks,
-            x,
-            y,
-            window_title_re=window_title_re,
-            expected_process_name=expected_process_name,
-            expected_pid=expected_pid,
+        result = _ptr_normalize(
+            _backend.scroll_window(
+                clicks,
+                x,
+                y,
+                window_title_re=window_title_re,
+                expected_process_name=expected_process_name,
+                expected_pid=expected_pid,
+            ),
+            tool="scroll_window",
+            scope="window",
         )
     else:
-        result = {
-            "ok": False,
-            "code": "backend_unsupported",
-            "error": "current backend does not implement window-scoped scroll",
-            "scope": "window",
-        }
+        result = _ptr_normalize(
+            {
+                "ok": False,
+                "code": "backend_unsupported",
+                "error": "current backend does not implement window-scoped scroll",
+            },
+            tool="scroll_window",
+            scope="window",
+        )
     return json.dumps(result, ensure_ascii=False)
 
 

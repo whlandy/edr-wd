@@ -49,6 +49,20 @@ from .state_machine import (
     run,
     machine_step_fn,
 )
+from .pointer_result import (
+    CODE_NO_EFFECT,
+    CODE_NOT_DISPATCHED,
+    CODE_OK,
+    CODE_POINT_OUTSIDE_WINDOW,
+    CODE_TARGET_AMBIGUOUS,
+    CODE_TARGET_NOT_FOUND,
+    CODE_TARGET_OCCLUDED,
+    CODE_VERIFICATION_UNAVAILABLE,
+    STABLE_POINTER_CODES,
+    is_verified_success,
+    normalize as normalize_pointer_result,
+    reason_to_code,
+)
 
 __all__ = [
     "Reason",
@@ -80,4 +94,16 @@ __all__ = [
     "transition",
     "run",
     "machine_step_fn",
+    "CODE_OK",
+    "CODE_TARGET_OCCLUDED",
+    "CODE_TARGET_AMBIGUOUS",
+    "CODE_VERIFICATION_UNAVAILABLE",
+    "CODE_NO_EFFECT",
+    "CODE_NOT_DISPATCHED",
+    "CODE_TARGET_NOT_FOUND",
+    "CODE_POINT_OUTSIDE_WINDOW",
+    "STABLE_POINTER_CODES",
+    "normalize_pointer_result",
+    "reason_to_code",
+    "is_verified_success",
 ]

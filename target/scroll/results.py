@@ -152,10 +152,17 @@ class ScrollResult:
     # ---- serialization ---------------------------------------------------
 
     def to_dict(self) -> dict:
+        from .pointer_result import reason_to_code
+
+        # P0.3: `event_dispatched` aliases `dispatched` so the composite
+        # envelope speaks the same vocabulary as the raw pointer envelope,
+        # and `code` exposes a stable machine-readable code.
         return {
             "dispatched": self.dispatched,
+            "event_dispatched": self.dispatched,
             "moved": self.moved,
             "reason": self.reason.value,
+            "code": reason_to_code(self.reason.value),
             "success": self.success,
             "strategy_used": self.strategy_used.value if self.strategy_used else None,
         }

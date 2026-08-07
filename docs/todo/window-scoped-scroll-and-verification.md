@@ -52,7 +52,7 @@ Acceptance:
   ownership before dispatch.
 - Degraded verification is explicit in the result payload.
 
-### P0.3 Unified Pointer Result Envelope
+### P0.3 Unified Pointer Result Envelope  `[DONE — round-002]`
 
 Keep low-level dispatch success separate from verified UI effect.
 
@@ -64,6 +64,17 @@ Acceptance:
 - Failure states have stable machine-readable codes, for example
   `target_occluded`, `target_ambiguous`, `verification_unavailable`,
   `no_effect`, and `not_dispatched`.
+
+Implementation summary (round-002): new pure module
+`target/scroll/pointer_result.py` centralises the stable codes
+(`STABLE_POINTER_CODES`) and provides `normalize()` to wrap raw backend
+pointer payloads in the envelope (`ok` / `event_dispatched` / `code` /
+`scope` / `tool`, additive so existing fields survive), `code_for()` /
+`event_dispatched_for()` derivation (dry-run is not a real dispatch), and
+`is_verified_success()` (only `moved=True` in a composite is success). The
+server MCP tools `scroll`, `scroll_window`, `click_at`, and `drag` now emit
+the envelope. `ScrollResult.to_dict()` aliases `event_dispatched` =
+`dispatched` and adds `code` via `reason_to_code()`.
 
 ## Remaining P1: Semantic Planner And Evidence
 
