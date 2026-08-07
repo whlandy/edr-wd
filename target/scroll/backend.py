@@ -229,10 +229,67 @@ def run_scroll_region(
         coord.clear_detection()
 
 
+def run_page_table(
+    source: ScrollBackendSource,
+    *,
+    direction: str = "next",
+    verify: bool = True,
+    max_attempts: Optional[int] = None,
+    detector: Optional[PageDetector] = None,
+    verifier: Optional[PageVerifier] = None,
+    executor: Optional[ScrollExecutor] = None,
+    threshold: float = 0.0,
+) -> dict:
+    """Compose the paged-table chain for ONE page turn (T2) and return a dict.
+
+    Production entry for the server.py `page_table` MCP tool. It is the exact
+    paged-table sibling of `run_scroll_region`: snapshot -> detect -> plan
+    (A020-only `PageTableController`) -> real dispatcher -> bounded verify.
+
+    Unlike `run_scroll_region` it NEVER falls back to a wheel/drag — a
+    non-paged structure, a disabled next/prev, or a missing enabled owner
+    returns `NOT_DISPATCHED`.
+    """
+    from .page_table import step_page_table
+
+    if direction not in ("next", "prev", "first"):
+        raise ValueError(
+            f"unknown page_table direction {direction!r}; "
+            f"expected one of next|prev|first"
+        )
+    detector = detector or PageDetector()
+    verifier = verifier or PageVerifier()
+    executor = executor or ScrollExecutor()
+    observer = source.make_observer()
+
+    try:
+        before = observer.snapshot()
+    except BackendUnavailableError as e:
+        return ScrollResult.not_dispatched().to_dict() | {"backend_error": str(e)}
+    except ValueError:
+        # no controls / no targets — a paged table has nothing to turn.
+        return ScrollResult.not_dispatched().to_dict()
+
+    result = detector.detect(before)
+    sr = step_page_table(
+        result,
+        direction,
+        before=before,
+        executor=executor,
+        observer=observer,
+        verifier=verifier,
+        threshold=threshold,
+        verify=verify,
+        max_attempts=max_attempts,
+    )
+    return sr.to_dict()
+
+
 __all__ = [
     "ScrollBackendSource",
     "BackendUnavailableError",
     "run_scroll_region",
+    "run_page_table",
     "_shape_control",
     "_shape_rect",
 ]

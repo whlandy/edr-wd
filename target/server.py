@@ -574,6 +574,57 @@ def scroll_region(
 
 
 @mcp.tool(
+    name="page_table",
+    description=(
+        "Turn ONE page of a paged table via a semantic pagination click only "
+        "(gui.click / A020). Never emits pointer.scroll (A029) or pointer.drag "
+        "(A028). Confirms the surface is PAGINATED or LOAD_MORE via PageDetector; "
+        "returns NOT_DISPATCHED for FLAT/INFINITE/TREE_LAZY, a disabled "
+        "next/prev, or a missing enabled owner. Verifies real page movement "
+        "(content digest change) before reporting moved=True. direction: "
+        "next|prev|first. One call = one page turn; draining all pages is a "
+        "caller loop."
+    ),
+)
+def page_table(
+    direction: str = "next",
+    window_title_re: str = None,
+    max_depth: int = 6,
+    process_name: str = None,
+    pid: int = None,
+    verify: bool = True,
+    max_attempts: int = None,
+) -> str:
+    """One semantic page turn through the paged-table-only composite chain.
+
+    Mirrors `scroll_region`'s honest-error contract: backend-unavailable and
+    no-controls outcomes are converted into NOT_DISPATCHED inside
+    `run_page_table`. Any exception escaping here is a genuine bug and should
+    propagate (see scroll_region docstring) — never a blanket `except`.
+    """
+    if _backend is None:
+        return _backend_unavailable("page_table")
+    from scroll.backend import ScrollBackendSource, run_page_table
+
+    source = ScrollBackendSource(
+        _backend,
+        window_title_re=window_title_re,
+        max_depth=max_depth,
+        process_name=process_name,
+        pid=pid,
+        host=os.environ.get("EDR_WD_HOST", "local"),
+    )
+    result = run_page_table(
+        source,
+        direction=direction,
+        verify=verify,
+        max_attempts=max_attempts,
+    )
+    result["ok"] = True
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
     name="click_window_at",
     description=(
         "Click window-relative coordinates (x, y) converted to screen space using the connected window's rectangle. "
