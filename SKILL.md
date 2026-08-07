@@ -159,6 +159,14 @@ Prefer `gui.click`, `gui.type_text`, and `gui.select`. Coordinate actions are
 guarded fallbacks. Never reuse stale `target_id`/`control_id` values or confuse
 `HisecEndpointAgent` with `EDRClient` ownership.
 
+For scroll, drag, and paged-table navigation, classify the target surface and
+verify that visible content actually changed. `ok=true` from `scroll`/`drag`
+does not prove the UI moved. Prefer pagination controls over wheel scrolling for
+paginated tables, keep the strategy chain bounded (`MAX_SCROLL_ATTEMPTS`), and
+terminate with `no_scroll_effect` rather than looping a frozen page. Use a
+bounded focus-then-scroll fallback only when RDP/window-lock verification fails.
+See `references/element-click.md`.
+
 ## Tests, Traces, And Reports
 
 An atomic test step passes only when its action and all declared expectations
@@ -211,7 +219,8 @@ skipped.
 - `references/target-config.md`: config schema, auth, naming, connection modes.
 - `references/agent-workflow.md`: deployment, lifecycle, tunnel, subagent.
 - `references/mcp-tools.md`: action catalog, MCP tools, backend capabilities.
-- `references/element-click.md`: semantic Windows UIA/macOS AX interaction.
+- `references/element-click.md`: semantic Windows UIA/macOS AX interaction,
+  including scroll/drag/paged-table classification and verification.
 - `references/activate-edr.md`: HiSec entry/client activation internals.
 - `references/window-detection.md`: window verification and diagnostics.
 - `references/testing.md`: test tiers, traces, reports, failure triage.

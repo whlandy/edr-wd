@@ -49,6 +49,8 @@ protocol decision or unfinished acceptance item.
 
 - `docs/requirements/`: P0-P3 contracts, decisions, and design gates.
 - `docs/todo/`: historical implementation plans and remaining acceptance.
+- [`todo/scroll-and-paged-table-actions.md`](todo/scroll-and-paged-table-actions.md):
+  scroll, drag, paginated-table, RDP fallback, and verification design notes.
 - [`archive/changelogs/`](archive/changelogs/): module implementation history.
 - [`archive/reports/`](archive/reports/): one-time integration reports.
 

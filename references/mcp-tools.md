@@ -102,6 +102,13 @@ Windows backend:
   `HisecEndpointAgent.exe` and `EDRClient.exe` cannot be confused.
 - Use desktop window handles first for Qt/UIA windows when PID connection is
   unreliable.
+- For scroll/drag, keep `scroll` and `drag` primitive compatibility. Prefer
+  semantic pagination button clicks (`nextPageButton`/`prePageButton`) over
+  wheel scrolling when such controls exist for a paginated table.
+- Treat RDP active-window detection failures as recoverable: try `lock_window`
+  first; if lock verification fails due to active-window API limitations, use
+  focus-then-scroll only when process, window, and point are all known. See
+  `references/element-click.md`.
 
 macOS backend:
 
@@ -112,6 +119,10 @@ macOS backend:
   `HiSecEndpointAgent` and `EDRClient` cannot be confused.
 - `click_at` is dry-run by default. Set `EDR_WD_ALLOW_REAL_CLICKS=1` on the
   target only when real pointer actions are intended.
+- `scroll`/`drag` are also dry-run by default under the same guard. Prefer AX
+  scroll actions when available before falling back to `pyautogui`, and use
+  AX-discovered scroll areas and table row changes as verification. Preserve
+  the same action catalog IDs as Windows (`pointer.drag`/`pointer.scroll`).
 
 ## Return Parsing
 
