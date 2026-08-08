@@ -33,6 +33,9 @@
           "local_port": 18765
         }
       },
+      "file_transfer": {
+        "remote_root": "C:\\Users\\<TARGET_USER>\\Desktop\\edr-wd-record\\transfers"
+      },
       "windows": {
         "python_path": "C:\\Program Files\\Python313\\python.exe",
         "target_root": "C:\\Users\\<TARGET_USER>\\Desktop\\edr-wd\\target",
@@ -67,6 +70,9 @@
           "enabled": false,
           "local_port": 18765
         }
+      },
+      "file_transfer": {
+        "remote_root": "/Users/<TARGET_USER>/Desktop/edr-wd-record/transfers"
       },
       "macos": {
         "python_path": "/opt/homebrew/bin/python3",

@@ -43,6 +43,7 @@ try:  # Installed package / `python -m target.server`.
     from .scroll.pointer_result import normalize as _ptr_normalize
     from .scroll.window_args import resolve_window as _resolve_window
     from .scroll.window_args import window_doc as _window_doc
+    from .file_transfer import download_chunk, stat_file, upload_chunk
 except ImportError:  # Target-local `python server.py` deployment compatibility.
     from automation import create_backend
     from automation.base import AutomationBackend
@@ -55,6 +56,7 @@ except ImportError:  # Target-local `python server.py` deployment compatibility.
     from scroll.pointer_result import normalize as _ptr_normalize
     from scroll.window_args import resolve_window as _resolve_window
     from scroll.window_args import window_doc as _window_doc
+    from file_transfer import download_chunk, stat_file, upload_chunk
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -899,6 +901,67 @@ def screenshot(path: str = None) -> str:
         return _backend_unavailable("screenshot")
     result = _backend.screenshot(path)
     return json.dumps(result, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Sandboxed file transfer
+# ---------------------------------------------------------------------------
+
+@mcp.tool(
+    name="transfer_upload",
+    description=(
+        "Upload one base64-encoded file chunk to the target transfer sandbox. "
+        "Paths are relative to EDR_WD_TRANSFER_DIR; absolute paths, traversal, "
+        "and symlinks are rejected. Start at offset=0, use overwrite=true only "
+        "when replacement is intended, then send contiguous offsets. Set final=true "
+        "and expected_sha256 on the last chunk to verify the complete file."
+    ),
+)
+def transfer_upload(
+    relative_path: str,
+    content_base64: str,
+    offset: int = 0,
+    overwrite: bool = False,
+    final: bool = False,
+    expected_sha256: str = None,
+) -> str:
+    return json.dumps(upload_chunk(
+        relative_path,
+        content_base64,
+        offset=offset,
+        overwrite=overwrite,
+        final=final,
+        expected_sha256=expected_sha256,
+    ), ensure_ascii=False)
+
+
+@mcp.tool(
+    name="transfer_download",
+    description=(
+        "Download one base64-encoded chunk from the target transfer sandbox. "
+        "Use next_offset until eof=true. The final response includes SHA-256. "
+        "A single chunk is limited to 1 MiB."
+    ),
+)
+def transfer_download(
+    relative_path: str,
+    offset: int = 0,
+    max_bytes: int = 256 * 1024,
+) -> str:
+    return json.dumps(download_chunk(
+        relative_path, offset=offset, max_bytes=max_bytes,
+    ), ensure_ascii=False)
+
+
+@mcp.tool(
+    name="transfer_stat",
+    description=(
+        "Return size, SHA-256, and modification time for a file in the target "
+        "transfer sandbox. No absolute target path is exposed."
+    ),
+)
+def transfer_stat(relative_path: str) -> str:
+    return json.dumps(stat_file(relative_path), ensure_ascii=False)
 
 
 @mcp.tool(

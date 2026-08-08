@@ -35,6 +35,7 @@
         },
         "ssh": {"$ref": "#/$defs/ssh"},
         "mcp": {"$ref": "#/$defs/mcp"},
+        "file_transfer": {"$ref": "#/$defs/file_transfer"},
         "windows": {"$ref": "#/$defs/windows"},
         "macos": {"$ref": "#/$defs/macos"}
       },
@@ -111,6 +112,13 @@
           },
           "additionalProperties": false
         }
+      },
+      "additionalProperties": false
+    },
+    "file_transfer": {
+      "type": "object",
+      "properties": {
+        "remote_root": {"type": "string", "minLength": 1}
       },
       "additionalProperties": false
     },

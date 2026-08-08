@@ -60,7 +60,8 @@ if [[ ! -f "${START_SCRIPT}" ]]; then
   exit 1
 fi
 
-LOG_DIR="${ROOT}/logs"
+RECORD_DIR="${EDR_WD_RECORD_DIR:-${HOME}/Desktop/edr-wd-record}"
+LOG_DIR="${RECORD_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 
 # Render template. We use sed for substitution because envsubst may not

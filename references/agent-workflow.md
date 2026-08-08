@@ -63,7 +63,8 @@ deploy it with the normal `target/` sync.
 Allowed target-side writes:
 
 - `logs/` and PID files created by tracked startup scripts.
-- screenshot/artifact files under `EDR_WD_ARTIFACT_DIR` or the default target
+- screenshot/artifact files under `EDR_WD_ARTIFACT_DIR` or the default
+  `~/Desktop/edr-wd-record/artifacts`
   artifact directory.
 - macOS LaunchAgent plist installation generated from the tracked template.
 - Windows scheduled-task registration using tracked scripts.
@@ -309,4 +310,4 @@ edr-wd --target TARGET open-edr
 title before connecting and taking a screenshot. This prevents another window
 owned by the same process, such as `日志中心`, from becoming the screenshot
 target. The screenshot is decoded and stored on the agent under
-`result-report/<timestamp>/screenshots/`.
+`~/Desktop/edr-wd-record/result-report/<timestamp>/screenshots/`.

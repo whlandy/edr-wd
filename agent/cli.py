@@ -12,6 +12,7 @@ from pathlib import Path
 
 from agent import target_manager
 from agent.e2e_report import create_run_dir, persist_target_screenshot
+from agent.file_transfer import download_file, upload_file
 from agent.subagent.target_agent import TargetSubAgent
 from agent.target_config import TargetConfig, add_config_arguments, run_config_command
 
@@ -436,6 +437,17 @@ def build_parser() -> argparse.ArgumentParser:
     page_next.add_argument("--verify", action="store_true", help="Persist before/action/after evidence")
     page_next.add_argument("--timeout", type=float, help="MCP call timeout in seconds")
 
+    upload = sub.add_parser("file-upload", help="Upload a file through MCP with optional SCP fallback")
+    upload.add_argument("local_path")
+    upload.add_argument("relative_path", help="Destination relative to the target transfer root")
+    upload.add_argument("--overwrite", action="store_true")
+    upload.add_argument("--no-scp-fallback", action="store_true")
+
+    download = sub.add_parser("file-download", help="Download a file through MCP with optional SCP fallback")
+    download.add_argument("relative_path", help="Source relative to the target transfer root")
+    download.add_argument("local_path")
+    download.add_argument("--overwrite", action="store_true")
+    download.add_argument("--no-scp-fallback", action="store_true")
     return parser
 
 
@@ -510,6 +522,24 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError as exc:
                 result = {"ok": False, "error": str(exc), "tool_result": result}
         return _print_result(result)
+    if args.command == "file-upload":
+        return _print_result(upload_file(
+            target,
+            args.local_path,
+            args.relative_path,
+            config=TargetConfig(args.config),
+            overwrite=args.overwrite,
+            allow_scp_fallback=not args.no_scp_fallback,
+        ))
+    if args.command == "file-download":
+        return _print_result(download_file(
+            target,
+            args.relative_path,
+            args.local_path,
+            config=TargetConfig(args.config),
+            overwrite=args.overwrite,
+            allow_scp_fallback=not args.no_scp_fallback,
+        ))
     if args.command == "open-edr":
         agent = _target_agent(target, args.config)
         ready = agent.ensure_ready()

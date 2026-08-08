@@ -2,8 +2,8 @@
 
 Target screenshots are returned over MCP as base64.  This module persists the
 returned bytes on the agent host and writes small JSON/Markdown run reports.
-Runtime output lives under ``result-report/<UTC timestamp>`` and is
-intentionally gitignored.
+Runtime output lives under
+``~/Desktop/edr-wd-record/result-report/<UTC timestamp>`` by default.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_REPORT_ROOT = REPO_ROOT / "result-report"
+DEFAULT_RECORD_ROOT = Path.home() / "Desktop" / "edr-wd-record"
+DEFAULT_REPORT_ROOT = DEFAULT_RECORD_ROOT / "result-report"
 
 
 def _safe_name(value: str) -> str:
@@ -32,8 +32,11 @@ def _safe_name(value: str) -> str:
 
 def create_run_dir(target: str, *, root: Path | None = None) -> Path:
     """Create one collision-safe, agent-local directory for an E2E run."""
+    record_root = Path(os.environ.get("EDR_WD_RECORD_DIR", DEFAULT_RECORD_ROOT))
     output_root = Path(
-        os.environ.get("EDR_WD_E2E_REPORT_ROOT", root or DEFAULT_REPORT_ROOT)
+        os.environ.get(
+            "EDR_WD_E2E_REPORT_ROOT", root or record_root / "result-report"
+        )
     )
     stamp = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S-%f")
     run_dir = output_root / stamp

@@ -136,7 +136,9 @@ temporary Python MCP clients merely to initialize a session, list/call tools,
 decode screenshots, or open EDRClient. `open-edr` owns the complete generic
 workflow: ensure readiness, repair an owned stale tunnel once, activate the
 application, verify the exact EDRClient main-window title, connect that window,
-and persist the returned screenshot under agent-local `result-report/`.
+and persist the returned screenshot under agent-local
+`~/Desktop/edr-wd-record/result-report/` by default. Set
+`EDR_WD_RECORD_DIR` to override the common record root.
 
 Before deployment or restart, validate config, SSH, target identity, Python
 runtime dependencies, GUI permissions, lifecycle registration, and port state.

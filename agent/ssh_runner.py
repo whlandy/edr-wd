@@ -259,7 +259,9 @@ def _paramiko_run_ssh(ssh_config: dict, command: str, timeout: int = 30) -> Tupl
 
 
 def _paramiko_scp_to(ssh_config: dict, local_path: str | os.PathLike,
-                      remote_path: str, timeout: int = 30) -> Tuple[int, str]:
+                      remote_path: str, timeout: int = 30,
+                      preserve_bytes: bool = False,
+                      overwrite: bool = True) -> Tuple[int, str]:
     """Upload a file or directory to the remote host via SFTP. Returns (exit_code, msg)."""
     local = Path(local_path)
     if not local.exists():
@@ -299,7 +301,14 @@ def _paramiko_scp_to(ssh_config: dict, local_path: str | os.PathLike,
 
         def _write_file(local_file: Path, remote_file: str) -> None:
             _ensure_remote_dir(_remote_parent(remote_file))
-            if _should_strip_crlf(local_file):
+            if not overwrite:
+                try:
+                    sftp.stat(remote_file)
+                except IOError:
+                    pass
+                else:
+                    raise FileExistsError("Remote destination already exists")
+            if not preserve_bytes and _should_strip_crlf(local_file):
                 content = local_file.read_bytes()
                 text_content = content.decode("utf-8", errors="replace").replace("\r\n", "\n")
                 with sftp.open(remote_file, "wb") as remote_f:
@@ -374,11 +383,22 @@ def run_ssh(ssh_config: dict, command: str, *, timeout: int = 30) -> Tuple[int, 
 
 
 def scp_to(ssh_config: dict, local_path: str | os.PathLike,
-           remote_path: str, *, timeout: int = 30) -> Tuple[int, str]:
+           remote_path: str, *, timeout: int = 30,
+           preserve_bytes: bool = False,
+           overwrite: bool = True) -> Tuple[int, str]:
     """
     Upload local_path to remote_path on the target via Paramiko SFTP.
     Returns (exit_code, message).
     """
+    if preserve_bytes or not overwrite:
+        return _paramiko_scp_to(
+            ssh_config,
+            local_path,
+            remote_path,
+            timeout=timeout,
+            preserve_bytes=preserve_bytes,
+            overwrite=overwrite,
+        )
     return _paramiko_scp_to(ssh_config, local_path, remote_path, timeout=timeout)
 
 

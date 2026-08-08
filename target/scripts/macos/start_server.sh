@@ -25,6 +25,8 @@
 #   EDR_WD_AUTOMATION_BACKEND — automation backend (default: macos_accessibility)
 #   EDR_WD_TARGET_DIR         — Override target root
 #   EDR_WD_PIDFILE            — Override PID file path
+#   EDR_WD_RECORD_DIR         — Logs/screenshots root
+#                               (default: ~/Desktop/edr-wd-record)
 #
 # Exit codes:
 #   0  — server is running (either we just started it, or it was
@@ -44,8 +46,9 @@ HOST="${EDR_WD_MCP_HOST:-0.0.0.0}"
 AUTOMATION_BACKEND="${EDR_WD_AUTOMATION_BACKEND:-macos_accessibility}"
 PIDFILE="${EDR_WD_PIDFILE:-${TARGET_DIR}/logs/server.pid}"
 
-LOG_DIR="${TARGET_DIR}/logs"
-SCREENSHOT_DIR="${TARGET_DIR}/screenshots"
+RECORD_DIR="${EDR_WD_RECORD_DIR:-${HOME}/Desktop/edr-wd-record}"
+LOG_DIR="${RECORD_DIR}/logs"
+SCREENSHOT_DIR="${RECORD_DIR}/artifacts/screenshots"
 mkdir -p "${LOG_DIR}" "${SCREENSHOT_DIR}"
 
 cd "${TARGET_DIR}"

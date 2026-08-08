@@ -10,6 +10,7 @@ one reference for the task at hand.
 | Create or edit a target | [`../references/target-config.md`](../references/target-config.md) |
 | Deploy, start, stop, restart, repair | [`../references/agent-workflow.md`](../references/agent-workflow.md) |
 | Use or add actions/MCP tools | [`../references/mcp-tools.md`](../references/mcp-tools.md) |
+| Transfer files through MCP | [`file-transfer.md`](file-transfer.md) |
 | Select and click controls | [`../references/element-click.md`](../references/element-click.md) |
 | Debug HiSec activation | [`../references/activate-edr.md`](../references/activate-edr.md) |
 | Run tests and inspect reports | [`../references/testing.md`](../references/testing.md) |

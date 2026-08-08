@@ -376,7 +376,7 @@ class MacOSAccessibilityBackend:
         """
         Capture the full screen to `path` (or a default location).
 
-        Default location: <target cwd>/tmp/screenshots/edr-wd-screenshot-<timestamp>.png
+        Default location: ~/Desktop/edr-wd-record/artifacts/screenshots/.
         """
         if not path:
             path = screenshot_path()

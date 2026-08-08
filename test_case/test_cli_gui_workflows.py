@@ -57,3 +57,48 @@ def test_tools_command_returns_normalized_tool_array(monkeypatch, capsys):
 
     assert exit_code == 0
     assert output == {"ok": True, "tools": [{"name": "activate_edr"}]}
+
+
+def test_file_upload_cli_enables_scp_fallback_by_default(monkeypatch, capsys):
+    captured = {}
+
+    def fake_upload(target, local_path, relative_path, **kwargs):
+        captured.update({
+            "target": target,
+            "local_path": local_path,
+            "relative_path": relative_path,
+            **kwargs,
+        })
+        return {"ok": True, "transport": "scp"}
+
+    monkeypatch.setattr(cli, "upload_file", fake_upload)
+    exit_code = cli.main([
+        "--target", "win-dev", "file-upload", "./a.bin", "cases/a.bin",
+    ])
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["transport"] == "scp"
+    assert captured["allow_scp_fallback"] is True
+
+
+def test_file_download_cli_can_disable_scp_fallback(monkeypatch, capsys):
+    captured = {}
+
+    def fake_download(target, relative_path, local_path, **kwargs):
+        captured.update({
+            "target": target,
+            "relative_path": relative_path,
+            "local_path": local_path,
+            **kwargs,
+        })
+        return {"ok": True, "transport": "mcp"}
+
+    monkeypatch.setattr(cli, "download_file", fake_download)
+    exit_code = cli.main([
+        "--target", "win-dev", "file-download", "results/a.bin", "./a.bin",
+        "--no-scp-fallback",
+    ])
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["transport"] == "mcp"
+    assert captured["allow_scp_fallback"] is False

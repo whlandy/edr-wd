@@ -24,7 +24,12 @@ from agent.target_config import TargetConfig
 
 
 PID_DIR = Path(os.environ.get("EDR_WD_TUNNEL_PID_DIR", "/tmp"))
-LOG_DIR = Path(os.environ.get("EDR_WD_TUNNEL_LOG_DIR", "/tmp"))
+_RECORD_ROOT = Path(
+    os.environ.get(
+        "EDR_WD_RECORD_DIR", Path.home() / "Desktop" / "edr-wd-record"
+    )
+)
+LOG_DIR = Path(os.environ.get("EDR_WD_TUNNEL_LOG_DIR", _RECORD_ROOT / "logs"))
 
 
 def _target_name(value: str | None) -> str:
