@@ -313,6 +313,8 @@ def click(
     parent_fallback: bool = True,
     expected_process_name: str = None,
 ) -> str:
+    if _backend is None:
+        return _backend_unavailable("click")
     result = _backend.click(
         control_id, text, class_name, parent_text, automation_id,
         auto_id_contains, auto_id_suffix, parent_of, control_type,
@@ -348,6 +350,8 @@ def click_target(
     parent_fallback: bool = True,
     expected_process_name: str = None,
 ) -> str:
+    if _backend is None:
+        return _backend_unavailable("click_target")
     result = _backend.click_target(
         control_id=control_id,
         text=text,
@@ -852,6 +856,8 @@ def type_text(
     class_name: str = None,
     string: str = "",
 ) -> str:
+    if _backend is None:
+        return _backend_unavailable("type_text")
     result = _backend.type_text(control_id, text, class_name, string)
     return json.dumps(result, ensure_ascii=False)
 
@@ -871,6 +877,8 @@ def select(
     item: str = None,
     index: int = None,
 ) -> str:
+    if _backend is None:
+        return _backend_unavailable("select")
     result = _backend.select(control_id, text, class_name, item, index)
     return json.dumps(result, ensure_ascii=False)
 
@@ -884,6 +892,8 @@ def get_text(
     text: str = None,
     class_name: str = None,
 ) -> str:
+    if _backend is None:
+        return _backend_unavailable("get_text")
     result = _backend.get_text(control_id, text, class_name)
     return json.dumps(result, ensure_ascii=False)
 
@@ -1020,6 +1030,8 @@ def is_window_open(
     process_name: str = None,
     class_name: str = None,
 ) -> str:
+    if _backend is None:
+        return _backend_unavailable("is_window_open")
     result = _backend.is_window_open(title_re=title_re, process_name=process_name, class_name=class_name)
     return json.dumps(result, ensure_ascii=False)
 
@@ -1040,6 +1052,8 @@ def wait_window(
     timeout: float = 10.0,
     interval: float = 0.5,
 ) -> str:
+    if _backend is None:
+        return _backend_unavailable("wait_window")
     result = _backend.wait_window(
         title_re=title_re, process_name=process_name, class_name=class_name,
         timeout=timeout, interval=interval,
@@ -1180,7 +1194,9 @@ def status() -> str:
     if not port_open:
         warnings.append(f"port {_server_port} not reachable")
 
-    backend_name = "unknown"
+    # Default to the resolved startup kind so a failure reading `.backend`
+    # below still reports something useful instead of "unknown".
+    backend_name = _backend_kind
     backend_ok = _backend is not None
     if _backend is not None:
         try:
