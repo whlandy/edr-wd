@@ -246,9 +246,10 @@ class MacOSAccessibilityBackend:
     def _state_matches_lock(self, state: dict, lock: dict) -> bool:
         if not state.get("ok"):
             return False
-        if lock.get("pid") is not None and state.get("pid") != lock.get("pid"):
-            return False
-        if lock.get("process_name"):
+        if lock.get("pid") is not None:
+            if state.get("pid") != lock.get("pid"):
+                return False
+        elif lock.get("process_name"):
             current = (state.get("process_name") or "").lower()
             expected = str(lock["process_name"]).lower()
             if expected not in current and current not in expected:
@@ -622,7 +623,18 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                                 "visible": True,
                                 "enabled": True,
                             })
-                    return {"ok": True, "found": True, "windows": normalized, "count": len(normalized)}
+                    if pat := (re.compile(title_re) if title_re else None):
+                        normalized = [
+                            window for window in normalized
+                            if pat.search(window.get("window_title") or "")
+                        ]
+                    if normalized:
+                        return {
+                            "ok": True,
+                            "found": True,
+                            "windows": normalized,
+                            "count": len(normalized),
+                        }
             except Exception:
                 pass
 
@@ -641,6 +653,13 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 continue
             matches.append(w)
 
+        if proc_lc:
+            # HiSecEndpoint is a substring of HiSecEndpointAgent. Prefer the
+            # exact process owner so callers do not attach to the agent window.
+            matches.sort(
+                key=lambda window: (window.get("app_name") or "").lower() != proc_lc
+            )
+
         # macOS HiSec windows are sometimes surfaced by System Events with
         # generic AX wrapper names/titles. If the normal match path fails,
         # fall back to known HiSec heuristics so `connect()`/`wait_window()`
@@ -649,7 +668,7 @@ print(String(data: data, encoding: .utf8) ?? "[]")
         # Only apply keyword fallback to windows whose app_name is also HiSec-related
         # to avoid false positives from generic English words like "agent"/"endpoint"
         # matching unrelated windows (e.g. "hermes-agent", "some-endpoint").
-        if not matches and proc_lc:
+        if not matches and proc_lc and not title_re:
             hisec_agent_name = "hisecendpointagent" in proc_lc
             edr_client_name = "edrclient" in proc_lc or "hisecendpoint" in proc_lc
             if hisec_agent_name or edr_client_name:
@@ -716,23 +735,78 @@ print(String(data: data, encoding: .utf8) ?? "[]")
         Bring an app to the foreground. Provide either app_name ("Finder")
         or bundle_id ("com.apple.finder"). One of them is required.
         """
-        if bundle_id:
-            script = f'tell application id "{bundle_id}" to activate'
-        elif app_name:
-            script = f'tell application "{app_name}" to activate'
-        else:
+        if not app_name and not bundle_id:
             return {"ok": False, "error": "activate_app requires app_name or bundle_id"}
 
-        rc, out = _run_osascript(script, timeout=10)
-        if rc != 0:
+        target_pid = self._pid_for_bundle(bundle_id) if bundle_id else None
+        target_window = None
+        if app_name:
+            listed = self.list_windows()
+            if listed.get("ok"):
+                exact = [
+                    window for window in listed.get("windows", [])
+                    if (window.get("app_name") or "").casefold() == app_name.casefold()
+                    and window.get("pid") is not None
+                ]
+                if exact:
+                    target_window = exact[0]
+                    target_pid = int(target_window["pid"])
+            if target_pid is None:
+                target_pid = self._pid_for_app(app_name)
+
+        if bundle_id:
+            script = f'tell application id {json.dumps(bundle_id)} to activate'
+        else:
+            script = f'tell application {json.dumps(app_name)} to activate'
+        app_rc, app_out = _run_osascript(script, timeout=10)
+
+        pid_rc = None
+        pid_out = ""
+        if target_pid is not None:
+            pid_script = (
+                'tell application "System Events"\n'
+                f'  set matches to every process whose unix id is {target_pid}\n'
+                '  if (count of matches) is 0 then error "process not found"\n'
+                '  set frontmost of first item of matches to true\n'
+                'end tell\n'
+            )
+            pid_rc, pid_out = _run_osascript(pid_script, timeout=10)
+
+        method = "pid" if pid_rc == 0 else "application"
+        active = self._frontmost_window_state()
+        if (
+            target_pid is not None
+            and active.get("pid") != target_pid
+            and target_window is not None
+            and _allow_real_mouse_actions()
+        ):
+            rectangle = target_window.get("rectangle") or {}
+            if rectangle.get("w") and rectangle.get("h"):
+                x = int(rectangle["x"] + rectangle["w"] / 2)
+                y = int(rectangle["y"] + min(16, rectangle["h"] / 2))
+                click_rc, click_out = _run(["cliclick", f"c:{x},{y}"], timeout=5)
+                if click_rc == 0:
+                    method = "window_header_click"
+                    time.sleep(0.2)
+                    active = self._frontmost_window_state()
+                else:
+                    pid_out = f"{pid_out}; header click failed: {click_out.strip()}"
+
+        if app_rc != 0 and pid_rc != 0 and active.get("pid") != target_pid:
             return {
                 "ok": False,
-                "error": f"activate_app failed (rc={rc}): {out.strip()}",
+                "error": (
+                    f"activate_app failed (app rc={app_rc}): {app_out.strip()}; "
+                    f"pid rc={pid_rc}: {pid_out.strip()}"
+                ),
             }
         return {
             "ok": True,
             "app_name": app_name,
             "bundle_id": bundle_id,
+            "pid": target_pid,
+            "method": method,
+            "active": active,
         }
 
     def activate_edr(
@@ -1589,7 +1663,10 @@ print(String(data: data, encoding: .utf8) ?? "[]")
             return {"ok": True, "matched": "bundle_id", "pid": self._connected_pid}
 
         if process_name:
-            r = self.is_window_open(process_name=process_name)
+            r = self.is_window_open(
+                process_name=process_name,
+                title_re=title_re,
+            )
             if not r.get("found"):
                 norm_proc = process_name.lower()
                 if any(tag in norm_proc for tag in ("edrclient", "hisecendpoint", "hisecendpointagent")):
