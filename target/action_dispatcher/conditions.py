@@ -27,8 +27,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from action_catalog import ActionSpec
-from observations import ObservationRef, is_live
+try:
+    from ..action_catalog import ActionSpec
+    from ..observations import ObservationRef, is_live
+except ImportError:  # target-local deployment
+    from action_catalog import ActionSpec
+    from observations import ObservationRef, is_live
 
 from .receipts import (
     CODE_ACTION_CODE_MISMATCH,

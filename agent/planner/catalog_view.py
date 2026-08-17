@@ -55,7 +55,7 @@ Boundary notes (per architecture §7.2 / P2.5):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from action_catalog import (
+from target.action_catalog import (
     ACTIONS_V1,
     BACKEND_NOT_IMPLEMENTED,
     VALID_BACKENDS,

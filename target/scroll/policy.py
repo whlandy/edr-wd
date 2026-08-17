@@ -41,7 +41,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol
 
-from action_dispatcher.receipts import ActionReceipt
+try:
+    from ..action_dispatcher.receipts import ActionReceipt
+except ImportError:
+    from action_dispatcher.receipts import ActionReceipt
 
 from .results import ScrollResult, Strategy
 

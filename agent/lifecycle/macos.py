@@ -153,6 +153,33 @@ class MacOSLifecycle:
                 details=stages,
             )
 
+        # Recording requires a target-local indicator plus Quartz event tap,
+        # Accessibility, and in-memory CoreGraphics PNG capture.
+        dep_cmd = (
+            f'"{python_path}" -c '
+            f'"import fastmcp, PIL, pyautogui, tkinter, Quartz, AppKit; '
+            f'print(\\"macos target deps ok\\")"'
+        )
+        rc, out = run_ssh(ssh_cfg, dep_cmd, timeout=20)
+        stages["python_dependencies"] = {
+            "ok": rc == 0,
+            "requires": [
+                "fastmcp", "Pillow", "PyAutoGUI", "tkinter",
+                "pyobjc-framework-Quartz", "pyobjc-framework-Cocoa",
+            ],
+            "output": out.strip()[:300],
+        }
+        if rc != 0:
+            return self._err(
+                "probe",
+                "python_dependencies_missing",
+                (
+                    "Target Python cannot import required EDR-WD runtime "
+                    f"dependencies: {out[:300]}"
+                ),
+                details=stages,
+            )
+
         return self._ok("probe", data=stages)
 
     # ── deploy ───────────────────────────────────────────────────────────────

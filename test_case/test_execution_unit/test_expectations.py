@@ -54,8 +54,8 @@ def _err_receipt():
     )
 
 
-def test_registry_has_all_ten_evaluators():
-    """P1.4: visual_evidence_captured is now a real evaluator."""
+def test_registry_has_all_thirteen_evaluators():
+    """Recording replay extends state assertions without removing existing evaluators."""
     expected = {
         "action_ok",
         "window_open",
@@ -65,6 +65,9 @@ def test_registry_has_all_ten_evaluators():
         "control_absent",
         "control_text_equals",
         "control_text_contains",
+        "control_value_equals",
+        "control_checked_equals",
+        "control_enabled_equals",
         "window_text_contains",
         "visual_evidence_captured",
     }
@@ -119,6 +122,17 @@ def test_window_open_fails_when_no_match():
         None, _exp("window_open", {"process": "notepad"}), obs, None,
     )
     assert r.status is StepStatus.FAILED
+
+
+def test_window_open_supports_title_regex_match():
+    obs = {"windows": [{"process_name": "EDRClient.exe", "title": "策略设置 - EDR"}]}
+    result = EXPECTATION_REGISTRY["window_open"](
+        None,
+        _exp("window_open", {"process_name": "EDRClient.exe", "title_regex": "^策略设置"}),
+        obs,
+        None,
+    )
+    assert result.status is StepStatus.PASSED
 
 
 def test_window_closed_passes_when_absent():

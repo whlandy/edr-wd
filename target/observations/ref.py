@@ -30,7 +30,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from protocol_models.models import ProtocolModelError
+try:
+    from ..protocol_models.models import ProtocolModelError
+except ImportError:  # target-local deployment
+    from protocol_models.models import ProtocolModelError
 
 from ._strict import (
     _allow_none_or_str,

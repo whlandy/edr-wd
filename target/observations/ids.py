@@ -14,11 +14,18 @@ The resolver's typed-error codes live in `enums.py`.
 
 from __future__ import annotations
 
-from protocol_models.ids import (
-    SCOPE_SNAP,
-    VALID_SCOPES,
-    new_snapshot_id,
-)
+try:
+    from ..protocol_models.ids import (
+        SCOPE_SNAP,
+        VALID_SCOPES,
+        new_snapshot_id,
+    )
+except ImportError:  # target-local deployment
+    from protocol_models.ids import (
+        SCOPE_SNAP,
+        VALID_SCOPES,
+        new_snapshot_id,
+    )
 
 
 __all__ = [

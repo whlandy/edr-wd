@@ -20,7 +20,13 @@ from .checkpoints import (
     VALID_CHECKPOINT_KINDS,
     decide_checkpoint,
 )
-from .executor import AtomicExecutor, BackendUnavailable, IllegalTransition, ObservationProvider
+from .executor import (
+    AtomicExecutor,
+    BackendUnavailable,
+    IllegalTransition,
+    ObservationProvider,
+    StepMaterializationError,
+)
 from .expectations import (
     EXPECTATION_REGISTRY,
     EVALUATORS_NOT_AVAILABLE,
@@ -117,6 +123,7 @@ __all__ = [
     # executor
     "AtomicExecutor",
     "ObservationProvider",
+    "StepMaterializationError",
     "BackendUnavailable",
     # state machine
     "StepState",

@@ -62,7 +62,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping, Optional, Tuple
 
-from observations.models import ObservationSnapshot, Target
+try:
+    from ..observations.models import ObservationSnapshot, Target
+except ImportError:
+    from observations.models import ObservationSnapshot, Target
 
 from .actions import PlannedAction
 from .executor import ScrollExecutor

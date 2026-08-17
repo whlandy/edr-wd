@@ -24,7 +24,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-from action_catalog import ACTIONS_V1, ActionSpec, backend_capability_view
+try:
+    from ..action_catalog import ACTIONS_V1, ActionSpec, backend_capability_view
+except ImportError:  # target-local deployment
+    from action_catalog import ACTIONS_V1, ActionSpec, backend_capability_view
 
 
 # Side-effect classes that imply "observation snapshots must be

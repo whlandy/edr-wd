@@ -21,7 +21,10 @@ Stability (architecture §7.2):
 
 from __future__ import annotations
 
-from observations import invalidate_snapshot
+try:
+    from ..observations import invalidate_snapshot
+except ImportError:  # target-local deployment
+    from observations import invalidate_snapshot
 
 # In P1.1 we treat every snapshot registered on the current backend
 # as one bucket. The active_snapshot_id is set by `server.py`

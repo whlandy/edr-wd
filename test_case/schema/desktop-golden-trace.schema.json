@@ -1,0 +1,482 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edr-wd.local/schemas/desktop-golden-trace.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "name",
+    "sourceRecording",
+    "catalog",
+    "environment",
+    "entry",
+    "steps",
+    "cleanup"
+  ],
+  "properties": {
+    "schema": {
+      "const": "edr.desktop-golden-trace/v1"
+    },
+    "status": {
+      "enum": [
+        "ready",
+        "incomplete"
+      ]
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceRecording": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "sha256"
+      ],
+      "properties": {
+        "schema": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "digest"
+      ],
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "type": "string"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "application": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      }
+    },
+    "entry": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "steps": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/graphStep"
+      }
+    },
+    "cleanup": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    }
+  },
+  "$defs": {
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "processName": {
+          "type": "string"
+        },
+        "titleRegex": {
+          "type": "string"
+        },
+        "bundleId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "automationId": {
+          "type": "string"
+        },
+        "identifier": {
+          "type": "string"
+        },
+        "controlType": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "ancestry": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "anchor": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "visual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "template",
+        "elementSha256",
+        "redacted"
+      ],
+      "properties": {
+        "template": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contextTemplate": {
+          "type": "string",
+          "minLength": 1
+        },
+        "elementSha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "contextSha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "relativePoint": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "redacted": {
+          "const": true
+        }
+      }
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "window",
+        "control",
+        "visual"
+      ],
+      "properties": {
+        "window": {
+          "$ref": "#/$defs/window"
+        },
+        "control": {
+          "$ref": "#/$defs/control"
+        },
+        "visual": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/visual"
+            }
+          ]
+        }
+      }
+    },
+    "windowExpected": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "exists": {
+          "type": "boolean"
+        },
+        "processName": {
+          "type": "string"
+        },
+        "process_name": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "titleRegex": {
+          "type": "string"
+        }
+      }
+    },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "expected"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "text_equals",
+            "text_contains",
+            "value_equals",
+            "visible",
+            "checked",
+            "enabled",
+            "window_open"
+          ]
+        },
+        "expected": {},
+        "timeoutSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 300
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "text_equals",
+                  "text_contains",
+                  "value_equals"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "visible",
+                  "checked",
+                  "enabled"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "window_open"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "oneOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "$ref": "#/$defs/windowExpected"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepId",
+        "actionId",
+        "args",
+        "selector",
+        "endSelector",
+        "verifiers",
+        "required",
+        "status",
+        "issues"
+      ],
+      "properties": {
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": {
+          "type": "object"
+        },
+        "selector": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/selector"
+            }
+          ]
+        },
+        "endSelector": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/selector"
+            }
+          ]
+        },
+        "verifiers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/verifier"
+          }
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "incomplete"
+          ]
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "graphStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepId",
+        "actionId",
+        "args",
+        "selector",
+        "endSelector",
+        "verifiers",
+        "required",
+        "status",
+        "issues",
+        "next"
+      ],
+      "properties": {
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": {
+          "type": "object"
+        },
+        "selector": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/selector"
+            }
+          ]
+        },
+        "endSelector": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/selector"
+            }
+          ]
+        },
+        "verifiers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/verifier"
+          }
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "incomplete"
+          ]
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "next": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

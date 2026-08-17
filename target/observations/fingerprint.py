@@ -37,7 +37,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-from protocol_models.canonical_json import canonical_bytes
+try:
+    from ..protocol_models.canonical_json import canonical_bytes
+except ImportError:  # target-local deployment
+    from protocol_models.canonical_json import canonical_bytes
 
 from .models import Target
 

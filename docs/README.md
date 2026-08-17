@@ -28,6 +28,10 @@ Configuration assets:
   platform, lifecycle, and backend boundaries.
 - [`architecture/01-action-trace-test-report-design.md`](architecture/01-action-trace-test-report-design.md):
   action IDs, observations, execution, trace, recovery, planner, and reports.
+- [`architecture/03-desktop-record-script-golden-replay-design.md`](architecture/03-desktop-record-script-golden-replay-design.md):
+  manual desktop action capture, executable test generation, and semantic/visual golden replay.
+- [`todo/desktop-recording-golden-replay.md`](todo/desktop-recording-golden-replay.md):
+  phased implementation and verification tracker for desktop recording and replay.
 
 Implementation ownership:
 

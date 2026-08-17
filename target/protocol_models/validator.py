@@ -48,7 +48,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
-from action_catalog import ActionSpec, ACTIONS_V1, catalog_digest
+try:
+    from ..action_catalog import ActionSpec, ACTIONS_V1, catalog_digest
+except ImportError:  # target-local deployment
+    from action_catalog import ActionSpec, ACTIONS_V1, catalog_digest
 
 from .enums import VALID_EXPECTATION_TYPES
 from .models import (

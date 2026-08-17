@@ -29,7 +29,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from protocol_models.models import ProtocolModelError
+try:
+    from ..protocol_models.models import ProtocolModelError
+except ImportError:  # target-local deployment
+    from protocol_models.models import ProtocolModelError
 
 from ._strict import (
     _allow_none_or_str,
@@ -92,14 +95,21 @@ class Target:
     title: str
     control_type: str | None = None
     automation_id: str | None = None
+    identifier: str | None = None
     text: str | None = None
+    value: Any = None
+    checked: bool | None = None
+    enabled: bool | None = None
+    protected: bool | None = None
+    ancestry: tuple[Mapping[str, str], ...] = field(default_factory=tuple)
     rect: tuple[int, int, int, int] | None = None
     fingerprint: str = ""
     fingerprint_fields: tuple[str, ...] = field(default_factory=tuple)
 
     _ALLOWED: frozenset[str] = frozenset({
         "target_id", "kind", "process_name", "pid", "native_window_id",
-        "title", "control_type", "automation_id", "text", "rect",
+        "title", "control_type", "automation_id", "identifier", "text",
+        "value", "checked", "enabled", "protected", "ancestry", "rect",
         "fingerprint", "fingerprint_fields",
     })
 
@@ -129,6 +139,22 @@ class Target:
                 path="fingerprint_fields",
                 value=type(self.fingerprint_fields).__name__,
             )
+        for field_name in ("checked", "enabled", "protected"):
+            field_value = getattr(self, field_name)
+            if field_value is not None and not isinstance(field_value, bool):
+                raise ProtocolModelError(
+                    "type_error",
+                    f"{field_name} must be bool or None",
+                    path=field_name,
+                    value=field_value,
+                )
+        if not isinstance(self.ancestry, tuple) or not all(
+            isinstance(item, Mapping) for item in self.ancestry
+        ):
+            raise ProtocolModelError(
+                "type_error", "ancestry must be a tuple of mappings",
+                path="ancestry", value=type(self.ancestry).__name__,
+            )
         if self.rect is not None:
             if (not isinstance(self.rect, tuple)
                 or len(self.rect) != 4
@@ -150,6 +176,8 @@ class Target:
             kwargs["rect"] = tuple(kwargs["rect"])
         if "fingerprint_fields" in kwargs and kwargs["fingerprint_fields"] is not None:
             kwargs["fingerprint_fields"] = tuple(kwargs["fingerprint_fields"])
+        if "ancestry" in kwargs and kwargs["ancestry"] is not None:
+            kwargs["ancestry"] = tuple(dict(item) for item in kwargs["ancestry"])
         return cls(**kwargs)
 
 

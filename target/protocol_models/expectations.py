@@ -38,6 +38,9 @@ from .enums import (
     EXPECTATION_CONTROL_EXISTS,
     EXPECTATION_CONTROL_TEXT_CONTAINS,
     EXPECTATION_CONTROL_TEXT_EQUALS,
+    EXPECTATION_CONTROL_VALUE_EQUALS,
+    EXPECTATION_CONTROL_CHECKED_EQUALS,
+    EXPECTATION_CONTROL_ENABLED_EQUALS,
     EXPECTATION_VISUAL_EVIDENCE_CAPTURED,
     EXPECTATION_WINDOW_CLOSED,
     EXPECTATION_WINDOW_OPEN,
@@ -96,6 +99,21 @@ _EXPECTATION_TYPE_REGISTRY_RAW: dict[str, ExpectationTypeSpec] = {
     EXPECTATION_CONTROL_TEXT_CONTAINS: ExpectationTypeSpec(
         type=EXPECTATION_CONTROL_TEXT_CONTAINS,
         description="Normalized control text contains the value.",
+        required_fields=("selector", "value"),
+    ),
+    EXPECTATION_CONTROL_VALUE_EQUALS: ExpectationTypeSpec(
+        type=EXPECTATION_CONTROL_VALUE_EQUALS,
+        description="A uniquely matched control value equals the expected value.",
+        required_fields=("selector", "value"),
+    ),
+    EXPECTATION_CONTROL_CHECKED_EQUALS: ExpectationTypeSpec(
+        type=EXPECTATION_CONTROL_CHECKED_EQUALS,
+        description="A uniquely matched control checked state equals the expected boolean.",
+        required_fields=("selector", "value"),
+    ),
+    EXPECTATION_CONTROL_ENABLED_EQUALS: ExpectationTypeSpec(
+        type=EXPECTATION_CONTROL_ENABLED_EQUALS,
+        description="A uniquely matched control enabled state equals the expected boolean.",
         required_fields=("selector", "value"),
     ),
     EXPECTATION_WINDOW_TEXT_CONTAINS: ExpectationTypeSpec(

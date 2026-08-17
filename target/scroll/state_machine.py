@@ -32,8 +32,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Protocol, Tuple
 
-from action_dispatcher.receipts import ActionReceipt
-from observations.models import ObservationSnapshot
+try:
+    from ..action_dispatcher.receipts import ActionReceipt
+    from ..observations.models import ObservationSnapshot
+except ImportError:
+    from action_dispatcher.receipts import ActionReceipt
+    from observations.models import ObservationSnapshot
 
 from .policy import ScrollPolicy, scroll_with_policy
 from .results import Reason, ScrollResult, Strategy

@@ -29,7 +29,10 @@ from __future__ import annotations
 from .assignment import assign_target_ids
 from .ids import new_snapshot_id
 from .models import OBSERVATION_SCHEMA_VERSION, ObservationSnapshot, Target
-from protocol_models.models import ProtocolModelError
+try:
+    from ..protocol_models.models import ProtocolModelError
+except ImportError:  # target-local deployment
+    from protocol_models.models import ProtocolModelError
 
 
 def build_snapshot(

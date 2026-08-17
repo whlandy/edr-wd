@@ -44,10 +44,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from action_catalog import (
-    ActionSpec,
-    backend_capability_view,
-)
+try:
+    from ..action_catalog import ActionSpec, backend_capability_view
+    from ..observation_bridge import invalidate_after_mutation
+except ImportError:  # target-local deployment
+    from action_catalog import ActionSpec, backend_capability_view
+    from observation_bridge import invalidate_after_mutation
 
 from . import cache
 from .conditions import (
@@ -75,7 +77,6 @@ from .runtime import (
     BackendNotConfiguredError,
     get_backend,
 )
-from observation_bridge import invalidate_after_mutation
 
 
 # Module-level default dispatch map; built lazily on first call.

@@ -20,6 +20,7 @@ Backend selection:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
 import os
@@ -44,6 +45,13 @@ try:  # Installed package / `python -m target.server`.
     from .scroll.window_args import resolve_window as _resolve_window
     from .scroll.window_args import window_doc as _window_doc
     from .file_transfer import download_chunk, stat_file, upload_chunk
+    from .recording.service import (
+        RecordingService,
+        error_result as _recording_error,
+        source_factory_for_backend as _recording_source_factory,
+    )
+    from .recording.indicator import tkinter_indicator_factory as _recording_indicator_factory
+    from .recording.evidence import capture_redacted_window_frame as _capture_redacted_frame
 except ImportError:  # Target-local `python server.py` deployment compatibility.
     from automation import create_backend
     from automation.base import AutomationBackend
@@ -57,6 +65,13 @@ except ImportError:  # Target-local `python server.py` deployment compatibility.
     from scroll.window_args import resolve_window as _resolve_window
     from scroll.window_args import window_doc as _window_doc
     from file_transfer import download_chunk, stat_file, upload_chunk
+    from recording.service import (
+        RecordingService,
+        error_result as _recording_error,
+        source_factory_for_backend as _recording_source_factory,
+    )
+    from recording.indicator import tkinter_indicator_factory as _recording_indicator_factory
+    from recording.evidence import capture_redacted_window_frame as _capture_redacted_frame
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -91,6 +106,14 @@ except Exception as _e:  # pragma: no cover — defensive startup guard
 # runtime port instead of assuming the default 8765.
 _server_host = "127.0.0.1"
 _server_port = 8765
+
+_recording_service = RecordingService(
+    target_name=os.environ.get("EDR_WD_TARGET_NAME", "target"),
+    backend=_backend_kind,
+    source_factory=_recording_source_factory(_backend_kind, _backend),
+    indicator_factory=_recording_indicator_factory,
+    backend_object=_backend,
+)
 
 
 def _backend_unavailable(tool_name: str) -> str:
@@ -972,6 +995,91 @@ def transfer_download(
 )
 def transfer_stat(relative_path: str) -> str:
     return json.dumps(stat_file(relative_path), ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Scoped desktop recording management
+# ---------------------------------------------------------------------------
+
+@mcp.tool(name="start_recording", description="Start a target-local, process/window-scoped desktop recording session. Fails if the platform capture source or required permissions are unavailable.")
+def start_recording(name: str, process_name: str, window_title: str, lease_seconds: float = 300.0) -> str:
+    try:
+        result = _recording_service.start(name=name, process_name=process_name, window_title=window_title, lease_seconds=lease_seconds)
+    except Exception as exc:
+        result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="recording_status", description="Return recording state and optionally renew the target-local capture lease.")
+def recording_status(heartbeat: bool = False) -> str:
+    try:
+        result = _recording_service.status(heartbeat=heartbeat)
+    except Exception as exc:
+        result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="pause_recording", description="Pause the active recording. Paused input is not persisted.")
+def pause_recording() -> str:
+    try: result = _recording_service.pause()
+    except Exception as exc: result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="resume_recording", description="Resume the paused recording and renew its lease.")
+def resume_recording() -> str:
+    try: result = _recording_service.resume()
+    except Exception as exc: result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="add_recording_assertion", description="Open the target-local explicit assertion editor for the active recording.")
+def add_recording_assertion() -> str:
+    try: result = _recording_service.assertion()
+    except Exception as exc: result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="stop_recording", description="Stop recording and return the strict raw recording document.")
+def stop_recording() -> str:
+    try: result = _recording_service.stop()
+    except Exception as exc: result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="get_recording_capture", description="Fetch one source-redacted in-memory PNG referenced by a stopped recording event.")
+def get_recording_capture(capture_id: str) -> str:
+    try: result = _recording_service.capture(capture_id=capture_id)
+    except Exception as exc: result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="replay_capture",
+    description=(
+        "Return one source-redacted PNG of the locked window for replay evidence. "
+        "Protected controls and the recorder UI are painted out on the target "
+        "before the frame is encoded, so the caller may persist it into an "
+        "execution report. Requires a verified window lock."
+    ),
+)
+def replay_capture() -> str:
+    if _backend is None:
+        return _backend_unavailable("replay_capture")
+    try:
+        png, metadata = _capture_redacted_frame(_backend)
+    except Exception as exc:
+        return json.dumps({
+            "ok": False,
+            "code": "replay_capture_unavailable",
+            "error": str(exc),
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "capture_scope": "window",
+        "image_b64": base64.b64encode(png).decode("ascii"),
+        **metadata,
+    }, ensure_ascii=False)
 
 
 @mcp.tool(

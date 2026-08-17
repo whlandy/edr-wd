@@ -26,8 +26,12 @@ from __future__ import annotations
 
 from typing import Callable, Optional, Protocol
 
-from action_dispatcher.receipts import ActionReceipt
-from observations.models import ObservationSnapshot
+try:
+    from ..action_dispatcher.receipts import ActionReceipt
+    from ..observations.models import ObservationSnapshot
+except ImportError:
+    from action_dispatcher.receipts import ActionReceipt
+    from observations.models import ObservationSnapshot
 
 from .observer import DiffStrategy, Observer
 from .results import Reason, ScrollResult, Strategy

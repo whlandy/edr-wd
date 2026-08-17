@@ -26,7 +26,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-from action_catalog import ActionSpec, ACTIONS_V1
+try:
+    from ..action_catalog import ActionSpec, ACTIONS_V1
+except ImportError:  # target-local deployment
+    from action_catalog import ActionSpec, ACTIONS_V1
 
 from .models import ActionSequence, TestCase
 from .validator import (
