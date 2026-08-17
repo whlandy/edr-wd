@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://edr-wd.local/schemas/desktop-replay-evaluation.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "taskSuccess", "requiredSteps", "passedSteps", "assertionPassRate", "semanticResolutionRate", "visualFallbackCount", "coordinateFallbackCount", "extraActionCount", "retryCount", "pathFidelity", "cleanupPassed", "traceIntegrity"],
+  "properties": {
+    "schema": {"const": "edr.desktop-replay-evaluation/v1"},
+    "taskSuccess": {"type": "boolean"},
+    "requiredSteps": {"type": "integer", "minimum": 0},
+    "passedSteps": {"type": "integer", "minimum": 0},
+    "assertionPassRate": {"type": "number", "minimum": 0, "maximum": 1},
+    "semanticResolutionRate": {"type": "number", "minimum": 0, "maximum": 1},
+    "visualFallbackCount": {"type": "integer", "minimum": 0},
+    "coordinateFallbackCount": {"type": "integer", "minimum": 0},
+    "extraActionCount": {"type": "integer", "minimum": 0},
+    "retryCount": {"type": "integer", "minimum": 0},
+    "pathFidelity": {"type": "number", "minimum": 0, "maximum": 1},
+    "cleanupPassed": {"type": "boolean"},
+    "traceIntegrity": {"type": "boolean"}
+  }
+}

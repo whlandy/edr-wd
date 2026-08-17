@@ -35,6 +35,7 @@ that drive System Events will fail with "Not authorized".
 from __future__ import annotations
 
 import json
+import base64
 import os
 import re
 import shlex
@@ -243,6 +244,49 @@ class MacOSAccessibilityBackend:
             return {"ok": True, "process_name": app_name, "pid": pid, "title": ""}
         return {"ok": False, "error": "Not connected"}
 
+    def _refresh_connected_window_rectangle(self) -> bool:
+        """Resolve one real CoreGraphics window rectangle for screenshot scope."""
+        snapshot = getattr(self, "_connected_window_snapshot", None)
+        if not isinstance(snapshot, dict):
+            return False
+        if snapshot.get("rectangle_verified") is True:
+            return True
+        pid = snapshot.get("pid") or getattr(self, "_connected_pid", None)
+        owner = str(snapshot.get("owner") or getattr(self, "_connected_app", None) or "").lower()
+        title = str(snapshot.get("title") or "")
+        candidates = []
+        for window in self._list_windows_cg():
+            rectangle = window.get("rectangle")
+            if not isinstance(rectangle, dict):
+                continue
+            if int(rectangle.get("w") or 0) <= 0 or int(rectangle.get("h") or 0) <= 0:
+                continue
+            if pid is not None and window.get("pid") != pid:
+                continue
+            if pid is None and owner:
+                actual_owner = str(window.get("app_name") or "").lower()
+                if owner not in actual_owner and actual_owner not in owner:
+                    continue
+            candidates.append(window)
+        if title:
+            titled = [
+                window for window in candidates
+                if str(window.get("window_title") or "") == title
+            ]
+            if titled:
+                candidates = titled
+        if not candidates:
+            return False
+        selected = max(
+            candidates,
+            key=lambda window: (
+                int(window["rectangle"]["w"]) * int(window["rectangle"]["h"])
+            ),
+        )
+        snapshot["rectangle"] = dict(selected["rectangle"])
+        snapshot["rectangle_verified"] = True
+        return True
+
     def _state_matches_lock(self, state: dict, lock: dict) -> bool:
         if not state.get("ok"):
             return False
@@ -375,19 +419,72 @@ class MacOSAccessibilityBackend:
 
     def screenshot(self, path: Optional[str] = None) -> dict:
         """
-        Capture the full screen to `path` (or a default location).
+        Capture the connected window when one is available.  A process-wide
+        recording must never return an unrelated full-desktop frame.
 
         Default location: ~/Desktop/edr-wd-record/artifacts/screenshots/.
         """
-        if not path:
-            path = screenshot_path()
-        # `-x` = no sound; `-t <format>` = format
-        rc, out = _run(["screencapture", "-x", path], timeout=15)
-        if rc != 0:
-            return {"ok": False, "error": f"screencapture failed (rc={rc}): {out.strip()}"}
-        if not Path(path).exists():
-            return {"ok": False, "error": f"screencapture reported success but {path} not created"}
-        return {"ok": True, "path": path}
+        try:
+            import AppKit
+            import Quartz
+
+            snapshot = getattr(self, "_connected_window_snapshot", None)
+            if isinstance(snapshot, dict) and not self._refresh_connected_window_rectangle():
+                return {
+                    "ok": False,
+                    "error": "connected window rectangle could not be verified",
+                }
+            snapshot = getattr(self, "_connected_window_snapshot", None)
+            rectangle = snapshot.get("rectangle") if isinstance(snapshot, dict) else None
+            window_region = None
+            origin = [0, 0]
+            capture_scope = "screen"
+            if isinstance(rectangle, dict) and all(
+                key in rectangle for key in ("x", "y", "w", "h")
+            ):
+                x = int(rectangle["x"])
+                y = int(rectangle["y"])
+                width = int(rectangle["w"])
+                height = int(rectangle["h"])
+                if width <= 0 or height <= 0:
+                    return {"ok": False, "error": "connected window rectangle is empty"}
+                window_region = Quartz.CGRectMake(x, y, width, height)
+                origin = [x, y]
+                capture_scope = "window"
+
+            image = Quartz.CGWindowListCreateImage(
+                window_region if window_region is not None else Quartz.CGRectInfinite,
+                Quartz.kCGWindowListOptionOnScreenOnly,
+                Quartz.kCGNullWindowID,
+                Quartz.kCGWindowImageDefault,
+            )
+            if image is None:
+                return {"ok": False, "error": "CoreGraphics returned no screenshot"}
+            representation = AppKit.NSBitmapImageRep.alloc().initWithCGImage_(image)
+            png_type = getattr(
+                AppKit, "NSBitmapImageFileTypePNG", getattr(AppKit, "NSPNGFileType", None)
+            )
+            data = representation.representationUsingType_properties_(png_type, {})
+            png_bytes = bytes(data)
+            width = int(Quartz.CGImageGetWidth(image))
+            height = int(Quartz.CGImageGetHeight(image))
+            result = {
+                "ok": True,
+                "image_b64": base64.b64encode(png_bytes).decode("ascii"),
+                "width": width,
+                "height": height,
+                "origin": origin,
+                "capture_scope": capture_scope,
+            }
+            if path is not None:
+                output_path = screenshot_path(path)
+                Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(output_path).write_bytes(png_bytes)
+                result["path"] = output_path
+                result["saved_to"] = output_path
+            return result
+        except Exception as exc:
+            return {"ok": False, "error": f"CoreGraphics screenshot failed: {exc}"}
 
     def list_windows(self) -> dict:
         """
@@ -466,12 +563,22 @@ class MacOSAccessibilityBackend:
                 "enabled": True,
             })
 
-        seen = {(w.get("pid"), w.get("window_title"), w.get("app_name")) for w in windows}
+        by_identity = {
+            (window.get("pid"), window.get("window_title"), window.get("app_name")): window
+            for window in windows
+        }
         for w in self._list_windows_cg():
             key = (w.get("pid"), w.get("window_title"), w.get("app_name"))
-            if key not in seen:
+            existing = by_identity.get(key)
+            if existing is None:
                 windows.append(w)
-                seen.add(key)
+                by_identity[key] = w
+            elif existing.get("rectangle") is None and w.get("rectangle") is not None:
+                # System Events gives reliable titles but no bounds.  Preserve
+                # its identity and enrich it with the matching CG rectangle so
+                # recorder_ui and protected-window masks can be enforced.
+                existing["rectangle"] = dict(w["rectangle"])
+                existing["source"] = "system_events+cgwindowlist"
 
         return {"ok": True, "windows": windows, "count": len(windows)}
 
@@ -1805,12 +1912,32 @@ on describeElement(e, depth, pathText, controlId, windowName)
     try
         set descText to cleanText(description of e)
     end try
-    try
-        set valueText to cleanText(value of e)
-    end try
+    -- Secure text values must never cross the source boundary.  The role is
+    -- resolved first, so skip AXValue entirely for password fields.
+    if roleText does not contain "SecureTextField" and roleText does not contain "Password" then
+        try
+            set valueText to cleanText(value of e)
+        end try
+    end if
     set identifierText to ""
     set subroleText to ""
     set enabledText to boolText(e, "enabled")
+    set focusedText to "unknown"
+    try
+        if focused of e then
+            set focusedText to "true"
+        else
+            set focusedText to "false"
+        end if
+    end try
+    set selectedText to "unknown"
+    try
+        if selected of e then
+            set selectedText to "true"
+        else
+            set selectedText to "false"
+        end if
+    end try
     set xText to ""
     set yText to ""
     set wText to ""
@@ -1825,7 +1952,7 @@ on describeElement(e, depth, pathText, controlId, windowName)
         set wText to (item 1 of sizeValue) as text
         set hText to (item 2 of sizeValue) as text
     end try
-    return (controlId as text) & tab & (depth as text) & tab & cleanText(windowName) & tab & roleText & tab & subroleText & tab & titleText & tab & descText & tab & valueText & tab & identifierText & tab & enabledText & tab & xText & tab & yText & tab & wText & tab & hText & tab & pathText
+    return (controlId as text) & tab & (depth as text) & tab & cleanText(windowName) & tab & roleText & tab & subroleText & tab & titleText & tab & descText & tab & valueText & tab & identifierText & tab & enabledText & tab & xText & tab & yText & tab & wText & tab & hText & tab & focusedText & tab & selectedText & tab & pathText
 end describeElement
 
 on walkElement(e, depth, pathText, windowName)
@@ -1878,7 +2005,7 @@ return outText
             if not raw.strip():
                 continue
             parts = raw.split("\t")
-            if len(parts) < 15:
+            if len(parts) < 17:
                 continue
             def _int_or_none(value: str) -> Optional[int]:
                 try:
@@ -1897,6 +2024,23 @@ return outText
             if x is not None and y is not None and w is not None and h is not None:
                 rect = {"x": x, "y": y, "w": w, "h": h}
             enabled_value = parts[9].strip().lower()
+            role_value = parts[3]
+            subrole_value = parts[4]
+            protected = (
+                "securetextfield" in role_value.lower()
+                or "securetextfield" in subrole_value.lower()
+                or "password" in role_value.lower()
+                or "password" in subrole_value.lower()
+            )
+            safe_value = "" if protected else parts[7]
+            role_lower = role_value.lower()
+            checked = None
+            if "checkbox" in role_lower or "radiobutton" in role_lower:
+                normalized_value = safe_value.strip().lower()
+                if normalized_value in {"1", "true", "yes", "on", "checked"}:
+                    checked = True
+                elif normalized_value in {"0", "false", "no", "off", "unchecked"}:
+                    checked = False
             controls.append({
                 "control_id": control_id,
                 "depth": depth,
@@ -1905,15 +2049,19 @@ return outText
                 "class_name": parts[3],
                 "subrole": parts[4],
                 "title": parts[5],
-                "text": parts[5] or parts[6] or parts[7],
+                "text": parts[5] or parts[6] or safe_value,
                 "description": parts[6],
-                "value": parts[7],
+                "value": safe_value,
                 "automation_id": parts[8],
                 "identifier": parts[8],
                 "is_enabled": enabled_value != "false",
                 "is_visible": rect is not None,
                 "rectangle": rect,
-                "path": parts[14],
+                "focused": parts[14].strip().lower() == "true",
+                "selected": parts[15].strip().lower() == "true",
+                "checked": checked,
+                "path": parts[16],
+                "protected": protected,
             })
         return controls
 

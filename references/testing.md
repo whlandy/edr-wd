@@ -86,6 +86,79 @@ python3 scripts/test_profile_resolution.py
 python3 scripts/test_target_config_platforms.py
 ```
 
+## Desktop Recording And Golden Replay
+
+Recording is target-scoped and requires a unique process/window match. Start the
+recorder only after the target MCP server is ready:
+
+```bash
+python3 -m agent.cli --target TARGET record start \
+  --name policy-flow \
+  --process-name EDRClient.exe \
+  --window-title '^EDRClient$'
+
+python3 -m agent.cli --target TARGET record status
+python3 -m agent.cli --target TARGET record pause
+python3 -m agent.cli --target TARGET record resume
+python3 -m agent.cli --target TARGET record assert
+python3 -m agent.cli --target TARGET record stop --output-root recordings
+```
+
+`record start` connects, locks, and verifies the owning window before installing
+listen-only hooks. `record stop` drains the target queue, retrieves each
+source-redacted capture once, validates its digest, and writes `recording.json`,
+`case.json`, `golden-trace.json`, generated pytest, `compile-report.json`, and
+deduplicated observation assets under `OUTPUT_ROOT/<safe-flow-name>/`.
+When the target has `app_profile` in its configuration, `record stop` binds it
+into the generated golden trace automatically; `--profile PROFILE` overrides
+that value.
+
+An existing recording can be recompiled offline:
+
+```bash
+python3 -m agent.cli record compile recordings/policy-flow/recording.json \
+  --output-root recordings --profile windows_hisec
+```
+
+Replay accepts only a ready golden trace whose catalog and profile binding match
+the current runtime:
+
+```bash
+python3 -m agent.cli --target TARGET replay \
+  recordings/policy-flow/golden-trace.json \
+  --profile windows_hisec \
+  --trace-root result-report/replay-traces
+```
+
+Use `--confirm-action ACTION_ID` for each action that requires out-of-band
+confirmation. `semantic_only` is the default replay mode;
+`--replay-mode semantic_first` or `visual_only` must be explicit. Recording and
+replay cannot be active on the same target at the same time.
+
+The raw recording's required `captureDiagnostics` fields make queue loss and
+correlator errors compilation failures instead of silently accepting a partial
+flow. Recorded scroll and drag, and unbound window transitions, remain visible
+as incomplete steps. The platform adapters do not yet synthesize automatic
+window-transition events.
+
+Focused offline checks:
+
+```bash
+python3 -m pytest -q test_case/test_recording
+```
+
+Live recording acceptance is opt-in and requires an intentionally configured
+target and desktop session:
+
+```bash
+EDR_WD_RECORDING_E2E=1 python3 -m pytest -q \
+  test_case/test_e2e/test_recording_live_e2e.py
+```
+
+Passing the offline fake-session double-replay test does not replace the live
+gate: Windows and macOS must each record a real flow and replay it twice after
+fresh application starts before the feature is declared complete.
+
 ## E2E Naming
 
 Use platform/profile naming:

@@ -33,7 +33,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Tuple
 
-from observations.models import ObservationSnapshot, Target
+try:
+    from ..observations.models import ObservationSnapshot, Target
+except ImportError:
+    from observations.models import ObservationSnapshot, Target
 
 if TYPE_CHECKING:
     from .results import Strategy

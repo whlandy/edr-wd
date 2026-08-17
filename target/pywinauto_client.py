@@ -726,6 +726,14 @@ class WindowsGUI:
                 control_type = str(ctrl.control_type())
             except Exception:
                 pass
+            is_password = None
+            try:
+                is_password = bool(ctrl.element_info.is_password)
+            except Exception:
+                try:
+                    is_password = bool(ctrl.legacy_properties().get("IsPassword"))
+                except Exception:
+                    pass
 
             results.append({
                 "class_name": cls,
@@ -737,6 +745,7 @@ class WindowsGUI:
                 "depth": depth,
                 "automation_id": automation_id,
                 "control_type": control_type,
+                "is_password": is_password,
             })
         except Exception:
             pass
@@ -1019,23 +1028,28 @@ class WindowsGUI:
                             "error": f"screen grab failed: imagegrab={imagegrab_error}; gdi={gdi_error}",
                         }
 
-            output_path = screenshot_path(path)
-            parent = os.path.dirname(output_path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            img.save(output_path)
-
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             b64 = base64.b64encode(buf.getvalue()).decode()
-            return {
+            result = {
                 "ok": True,
-                "saved_to": output_path,
-                "path": output_path,
                 "image_b64": b64,
                 "width": img.width,
                 "height": img.height,
+                "origin": [int(win.rectangle().left), int(win.rectangle().top)],
+                "capture_scope": "window",
             }
+            # The MCP contract says an omitted path returns in-memory PNG.
+            # This is also required by recording source-redaction: an
+            # unredacted frame must not be written before masking.
+            if path is not None:
+                output_path = screenshot_path(path)
+                parent = os.path.dirname(output_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                img.save(output_path)
+                result.update({"saved_to": output_path, "path": output_path})
+            return result
         except Exception as e:
             logger.exception("screenshot failed")
             return {"ok": False, "error": str(e)}

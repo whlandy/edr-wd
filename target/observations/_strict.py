@@ -19,7 +19,10 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from protocol_models.models import ProtocolModelError
+try:
+    from ..protocol_models.models import ProtocolModelError
+except ImportError:  # target-local deployment
+    from protocol_models.models import ProtocolModelError
 
 
 def _require_str(value: Any, *, path: str, field_name: str) -> str:

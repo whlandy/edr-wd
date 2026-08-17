@@ -45,8 +45,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from action_catalog import ActionSpec
-from protocol_models.models import ProtocolModelError
+try:
+    from ..action_catalog import ActionSpec
+    from ..protocol_models.models import ProtocolModelError
+except ImportError:  # target-local deployment
+    from action_catalog import ActionSpec
+    from protocol_models.models import ProtocolModelError
 
 from .enums import (
     ARCHITECTURE_P0_3_OBSERVATION_CODES,

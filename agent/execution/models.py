@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
-from action_dispatcher import ActionReceipt
+from target.action_dispatcher import ActionReceipt
 
 
 # ---------------------------------------------------------------------------

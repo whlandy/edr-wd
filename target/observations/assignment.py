@@ -40,7 +40,10 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
-from protocol_models.canonical_json import canonical_bytes
+try:
+    from ..protocol_models.canonical_json import canonical_bytes
+except ImportError:  # target-local deployment
+    from protocol_models.canonical_json import canonical_bytes
 
 from .fingerprint import (
     IDENTITY_FIELDS,

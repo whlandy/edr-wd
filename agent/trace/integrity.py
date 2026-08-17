@@ -20,7 +20,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
-from protocol_models.canonical_json import canonical_bytes, canonical_sha256
+from target.protocol_models.canonical_json import canonical_bytes, canonical_sha256
 
 from .events import TraceEvent, from_dict
 

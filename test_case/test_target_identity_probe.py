@@ -17,6 +17,7 @@ def test_macos_probe_verifies_live_identity():
         (0, "edr-mac29\nuser\n"),
         (0, "edr-mac29\n14.5.1\n"),
         (0, "3.13.0\n"),
+        (0, "macos target deps ok\n"),
     ]
 
     with patch("agent.lifecycle.macos.run_ssh", side_effect=responses):

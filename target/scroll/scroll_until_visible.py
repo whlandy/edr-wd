@@ -56,7 +56,10 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
-from observations.models import ObservationSnapshot, Target
+try:
+    from ..observations.models import ObservationSnapshot, Target
+except ImportError:
+    from observations.models import ObservationSnapshot, Target
 
 from .actions import PlannedAction
 from .controller import NavigationMode, PageController

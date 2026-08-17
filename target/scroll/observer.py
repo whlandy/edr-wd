@@ -33,8 +33,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional, Union
 
-from observations.models import ObservationSnapshot, Target
-from observations.snapshot import build_snapshot
+try:
+    from ..observations.models import ObservationSnapshot, Target
+    from ..observations.snapshot import build_snapshot
+except ImportError:
+    from observations.models import ObservationSnapshot, Target
+    from observations.snapshot import build_snapshot
 
 
 # A single digest (TREE_DIGEST/SCREENSHOT) or a set of per-target

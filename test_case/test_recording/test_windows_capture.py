@@ -1,0 +1,688 @@
+from __future__ import annotations
+
+import threading
+
+import pytest
+
+from target.recording.models import (
+    CaptureScope,
+    ObservedTarget,
+    RawCaptureEvent,
+    RecordingModelError,
+)
+from target.recording.source import CompositeHookDriver, HookPacket, QueuedCaptureSource
+from target.recording.windows import WindowsUIACorrelator
+from target.recording.session import CaptureSessionState, RecordingSession
+
+pytestmark = pytest.mark.unit
+
+
+SCOPE = CaptureScope("win-dev", "windows_pywinauto", "EDRClient.exe", "^EDRClient$")
+
+
+class _FakeDriver:
+    def __init__(self) -> None:
+        self.emit = None
+        self.stopped = False
+        self.stop_called = threading.Event()
+
+    def start(self, emit) -> None:
+        self.emit = emit
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.stop_called.set()
+
+
+class _BlockingCorrelator:
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def correlate(self, packet, scope, sequence):
+        self.entered.set()
+        self.release.wait(timeout=2)
+        return RawCaptureEvent(
+            sequence=sequence,
+            wall_time=packet.wall_time,
+            monotonic_ms=packet.monotonic_ms,
+            type="pointer_click",
+            scope=scope,
+            input={"button": "left"},
+        )
+
+
+class _DroppingCorrelator:
+    def correlate(self, packet, scope, sequence):
+        if packet.kind == "drop":
+            return None
+        return RawCaptureEvent(
+            sequence=sequence,
+            wall_time=packet.wall_time,
+            monotonic_ms=packet.monotonic_ms,
+            type="pointer_click",
+            scope=scope,
+            input={},
+        )
+
+
+class _FlushCorrelator:
+    def correlate(self, packet, scope, sequence):
+        return None
+
+    def flush(self, scope, sequence):
+        return RawCaptureEvent(
+            sequence=sequence,
+            wall_time="2026-08-17T00:00:01.000Z",
+            monotonic_ms=1000,
+            type="text_commit",
+            scope=scope,
+            input={"value": "final-value"},
+            observed_target=ObservedTarget(
+                "OBS-FLUSH", "T0001", "sha256:edit", "Edit", "username",
+                protected=False,
+            ),
+        )
+
+
+class _Resolver:
+    def __init__(self, *, process="EDRClient.exe", title="EDRClient", element=None) -> None:
+        self.process = process
+        self.title = title
+        self.hit_tests = 0
+        self.element = element or {
+            "controlType": "Button",
+            "automationId": "btnApply",
+            "text": "应用",
+            "rect": [10, 20, 110, 60],
+            "protected": False,
+        }
+
+    def foreground(self):
+        return {"processName": self.process, "windowTitle": self.title, "pid": 42}
+
+    def cursor_position(self):
+        return (50, 40)
+
+    def element_at(self, x, y):
+        self.hit_tests += 1
+        return dict(self.element)
+
+    def refresh(self, target):
+        return dict(self.element)
+
+    def focused(self):
+        return dict(self.element)
+
+
+def _packet(kind="pointer_up", monotonic_ms=100, button="left"):
+    return HookPacket(
+        kind=kind,
+        monotonic_ms=monotonic_ms,
+        wall_time="2026-08-17T00:00:00.000Z",
+        screen_point=(50, 40),
+        button=button,
+    )
+
+
+def test_native_callback_only_enqueues_while_slow_correlation_runs_on_worker():
+    driver = _FakeDriver()
+    correlator = _BlockingCorrelator()
+    captured = []
+    source = QueuedCaptureSource(
+        scope=SCOPE,
+        sink=lambda event: captured.append(event) or True,
+        driver=driver,
+        correlator=correlator,
+    )
+    source.start()
+
+    # This is the native callback path.  It returns even though correlation is
+    # blocked on another thread.
+    driver.emit(_packet())
+    assert correlator.entered.wait(timeout=1)
+    assert captured == []
+    correlator.release.set()
+    source.stop()
+
+    assert driver.stopped is True
+    assert [event.sequence for event in captured] == [1]
+
+
+def test_session_stop_releases_lock_and_drains_pre_stop_hook_packets():
+    driver = _FakeDriver()
+    correlator = _BlockingCorrelator()
+    session = RecordingSession("REC-1", "flow", SCOPE)
+    source = QueuedCaptureSource(
+        scope=SCOPE,
+        sink=session.ingest,
+        driver=driver,
+        correlator=correlator,
+    )
+    session.attach_source(source)
+    session.start()
+    driver.emit(_packet())
+    assert correlator.entered.wait(timeout=1)
+    result = {}
+
+    def stop_session():
+        result["receipt"], result["recording"] = session.stop()
+
+    stopper = threading.Thread(target=stop_session)
+    stopper.start()
+    assert driver.stop_called.wait(timeout=1)
+    correlator.release.set()
+    stopper.join(timeout=2)
+
+    assert not stopper.is_alive()
+    assert result["receipt"].state is CaptureSessionState.STOPPED
+    assert [event.sequence for event in result["recording"].events] == [1]
+
+
+def test_worker_originated_lease_stop_cannot_deadlock_when_queue_is_full():
+    class _Clock:
+        value = 1.0
+
+        def __call__(self):
+            return self.value
+
+    clock = _Clock()
+    driver = _FakeDriver()
+    correlator = _BlockingCorrelator()
+    session = RecordingSession(
+        "REC-1", "flow", SCOPE, lease_seconds=1.0, monotonic=clock,
+    )
+    source = QueuedCaptureSource(
+        scope=SCOPE,
+        sink=session.ingest,
+        driver=driver,
+        correlator=correlator,
+        queue_size=1,
+    )
+    session.attach_source(source)
+    session.start()
+    driver.emit(_packet(monotonic_ms=100))
+    assert correlator.entered.wait(timeout=1)
+    driver.emit(_packet(monotonic_ms=200))  # fills the sole pending slot
+    clock.value = 3.0
+    correlator.release.set()
+
+    source._worker.join(timeout=2)
+
+    assert not source._worker.is_alive()
+    assert driver.stopped is True
+    assert session.status().state is CaptureSessionState.STOPPED
+    assert session.status().reason == "recording_lease_expired"
+
+
+def test_queue_overflow_is_persisted_in_raw_capture_diagnostics():
+    driver = _FakeDriver()
+    correlator = _BlockingCorrelator()
+    session = RecordingSession("REC-1", "flow", SCOPE)
+    source = QueuedCaptureSource(
+        scope=SCOPE,
+        sink=session.ingest,
+        driver=driver,
+        correlator=correlator,
+        queue_size=1,
+    )
+    session.attach_source(source)
+    session.start()
+    driver.emit(_packet(monotonic_ms=100))
+    assert correlator.entered.wait(timeout=1)
+    driver.emit(_packet(monotonic_ms=200))
+    driver.emit(_packet(monotonic_ms=300))
+    assert source.dropped_packets == 1
+    correlator.release.set()
+
+    _, recording = session.stop()
+
+    assert recording.capture_diagnostics == {
+        "droppedPackets": 1,
+        "correlationErrorCount": 0,
+    }
+
+
+def test_session_stop_flushes_the_final_focused_text_commit_before_stopping():
+    driver = _FakeDriver()
+    session = RecordingSession("REC-1", "flow", SCOPE)
+    source = QueuedCaptureSource(
+        scope=SCOPE,
+        sink=session.ingest,
+        driver=driver,
+        correlator=_FlushCorrelator(),
+    )
+    session.attach_source(source)
+    session.start()
+
+    _, recording = session.stop()
+
+    assert [event.type for event in recording.events] == ["text_commit"]
+    assert recording.events[0].input == {"value": "final-value"}
+
+
+def test_dropped_packets_do_not_create_sequence_gaps():
+    driver = _FakeDriver()
+    captured = []
+    source = QueuedCaptureSource(
+        scope=SCOPE,
+        sink=lambda event: captured.append(event) or True,
+        driver=driver,
+        correlator=_DroppingCorrelator(),
+    )
+    source.start()
+    driver.emit(_packet("drop", 100))
+    driver.emit(_packet("pointer_up", 200))
+    source.stop()
+    assert [event.sequence for event in captured] == [1]
+
+
+def test_windows_uia_correlator_rejects_out_of_scope_before_hit_testing():
+    resolver = _Resolver(process="Other.exe")
+    event = WindowsUIACorrelator(resolver).correlate(_packet(), SCOPE, 1)
+    assert event is None
+    assert resolver.hit_tests == 0
+
+
+def test_windows_uia_correlator_builds_click_with_semantic_target():
+    resolver = _Resolver()
+    event = WindowsUIACorrelator(resolver, double_click_ms=650).correlate(
+        _packet(), SCOPE, 1,
+    )
+    assert event is not None
+    assert event.type == "pointer_click"
+    assert event.input["screenPoint"] == [50, 40]
+    assert event.observed_target.automation_id == "btnApply"
+    assert event.observed_target.protected is False
+    assert event.evidence == {
+        "foregroundPid": 42, "doubleClickIntervalMs": 650,
+    }
+
+
+def test_windows_correlator_groups_only_a_same_target_double_click_causally():
+    correlator = WindowsUIACorrelator(_Resolver(), double_click_ms=650)
+    first = correlator.correlate(_packet(monotonic_ms=100), SCOPE, 1)
+    second = correlator.correlate(_packet(monotonic_ms=350), SCOPE, 2)
+
+    assert first.causal_id == second.causal_id
+
+
+def test_assertion_preselection_performs_a_fresh_scoped_pointer_hit_test():
+    resolver = _Resolver()
+    source = QueuedCaptureSource(
+        scope=SCOPE,
+        sink=lambda _event: True,
+        driver=_FakeDriver(),
+        correlator=WindowsUIACorrelator(resolver),
+    )
+
+    observed = source.current_observed_target()
+
+    assert observed.automation_id == "btnApply"
+    assert resolver.hit_tests == 1
+
+
+def test_assertion_preselection_never_hit_tests_an_out_of_scope_window():
+    resolver = _Resolver(process="Other.exe")
+    source = QueuedCaptureSource(
+        scope=SCOPE,
+        sink=lambda _event: True,
+        driver=_FakeDriver(),
+        correlator=WindowsUIACorrelator(resolver),
+    )
+
+    assert source.current_observed_target() is None
+    assert resolver.hit_tests == 0
+
+
+def test_windows_uia_correlator_emits_toggle_state_instead_of_duplicate_click():
+    resolver = _Resolver(element={
+        "controlType": "CheckBox",
+        "automationId": "backupEnabled",
+        "text": "启用备份",
+        "rect": [10, 20, 110, 60],
+        "protected": False,
+        "toggleState": True,
+    })
+    event = WindowsUIACorrelator(resolver).correlate(_packet(), SCOPE, 1)
+    assert event.type == "toggle_change"
+    assert event.input == {"value": True}
+
+
+def test_windows_uia_correlator_does_not_turn_right_click_on_checkbox_into_toggle():
+    resolver = _Resolver(element={
+        "controlType": "CheckBox",
+        "automationId": "backupEnabled",
+        "text": "启用备份",
+        "rect": [10, 20, 110, 60],
+        "protected": False,
+        "toggleState": True,
+    })
+
+    event = WindowsUIACorrelator(resolver).correlate(
+        _packet(button="right"), SCOPE, 1,
+    )
+
+    assert event.type == "pointer_click"
+    assert event.input["button"] == "right"
+
+
+def test_windows_uia_correlator_redacts_protected_text_at_source():
+    resolver = _Resolver(element={
+        "controlType": "Edit",
+        "automationId": "password",
+        "text": "密码",
+        "rect": [10, 20, 110, 60],
+        "protected": True,
+        # A buggy platform wrapper may expose this key.  It must not escape.
+        "value": "do-not-persist",
+    })
+    correlator = WindowsUIACorrelator(resolver)
+    first = correlator.correlate(_packet(), SCOPE, 1)
+    assert first.type == "pointer_click"
+    assert correlator.correlate(HookPacket(
+        kind="text_activity",
+        monotonic_ms=150,
+        wall_time="2026-08-17T00:00:00.050Z",
+    ), SCOPE, 2) is None
+    committed = correlator.correlate(HookPacket(
+        kind="key_command",
+        monotonic_ms=200,
+        wall_time="2026-08-17T00:00:00.100Z",
+        key="ENTER",
+    ), SCOPE, 2)
+    assert isinstance(committed, tuple)
+    text_event, key_event = committed
+    assert text_event.type == "text_commit"
+    assert text_event.input == {
+        "textSource": {"kind": "env", "name": "EDR_WD_SECRET_2"}
+    }
+    assert "do-not-persist" not in str(text_event.to_dict())
+    assert key_event.sequence == 3
+
+
+def test_clicking_through_an_unchanged_edit_does_not_create_text_commit():
+    resolver = _Resolver(element={
+        "controlType": "Edit", "automationId": "username", "text": "用户名",
+        "rect": [10, 20, 210, 60], "protected": False, "value": "alice",
+    })
+    correlator = WindowsUIACorrelator(resolver)
+    assert correlator.correlate(_packet(monotonic_ms=100), SCOPE, 1).type == "pointer_click"
+    resolver.element = {
+        "controlType": "Button", "automationId": "btnApply", "text": "应用",
+        "rect": [10, 80, 110, 120], "protected": False,
+    }
+
+    event = correlator.correlate(_packet(monotonic_ms=200), SCOPE, 2)
+
+    assert not isinstance(event, tuple)
+    assert event.type == "pointer_click"
+
+
+def test_keyboard_space_on_focused_checkbox_emits_toggle_not_text_activity():
+    resolver = _Resolver(element={
+        "controlType": "CheckBox", "automationId": "backupEnabled",
+        "text": "启用备份", "rect": [10, 20, 210, 60],
+        "protected": False, "toggleState": True,
+    })
+    correlator = WindowsUIACorrelator(resolver)
+
+    event = correlator.correlate(HookPacket(
+        kind="key_command",
+        monotonic_ms=100,
+        wall_time="2026-08-17T00:00:00.000Z",
+        key="SPACE",
+    ), SCOPE, 1)
+
+    assert event.type == "toggle_change"
+    assert event.input == {"value": True}
+
+
+def test_keyboard_edit_command_marks_focused_text_dirty_without_persisting_clipboard():
+    resolver = _Resolver(element={
+        "controlType": "Edit", "automationId": "username", "text": "用户名",
+        "rect": [10, 20, 210, 60], "protected": False, "value": "pasted-value",
+    })
+    correlator = WindowsUIACorrelator(resolver)
+
+    assert correlator.correlate(HookPacket(
+        kind="key_command",
+        monotonic_ms=100,
+        wall_time="2026-08-17T00:00:00.000Z",
+        key="V",
+        modifiers=("CTRL",),
+    ), SCOPE, 1) is None
+    committed = correlator.flush(SCOPE, 1)
+
+    assert committed.input == {"value": "pasted-value"}
+    assert "clipboard" not in str(committed.to_dict()).lower()
+
+
+def test_text_activity_tracks_focused_edit_without_recording_raw_keys_and_flushes_on_stop():
+    resolver = _Resolver(element={
+        "controlType": "Edit",
+        "automationId": "username",
+        "text": "用户名",
+        "rect": [10, 20, 210, 60],
+        "protected": False,
+        "value": "alice",
+    })
+    correlator = WindowsUIACorrelator(resolver)
+    activity = HookPacket(
+        kind="text_activity",
+        monotonic_ms=100,
+        wall_time="2026-08-17T00:00:00.000Z",
+    )
+
+    assert correlator.correlate(activity, SCOPE, 1) is None
+    committed = correlator.flush(SCOPE, 1)
+
+    assert committed.type == "text_commit"
+    assert committed.input == {"value": "alice"}
+    assert activity.key is None
+
+
+class _PositionalResolver(_Resolver):
+    """Return a different control depending on where the pointer is."""
+
+    def __init__(self, elements) -> None:
+        super().__init__()
+        self.elements = elements
+
+    def element_at(self, x, y):
+        self.hit_tests += 1
+        for (left, top, right, bottom), element in self.elements:
+            if left <= x <= right and top <= y <= bottom:
+                return dict(element)
+        return None
+
+
+def _pointer(kind, point, monotonic_ms, button="left"):
+    return HookPacket(
+        kind=kind,
+        monotonic_ms=monotonic_ms,
+        wall_time="2026-08-17T00:00:00.000Z",
+        screen_point=point,
+        button=button,
+    )
+
+
+def _slider_resolver():
+    return _PositionalResolver([
+        (
+            (100, 100, 140, 140),
+            {
+                "controlType": "Thumb", "automationId": "sliderThumb",
+                "text": "阈值", "rect": [100, 100, 140, 140], "protected": False,
+            },
+        ),
+        (
+            (300, 200, 400, 240),
+            {
+                "controlType": "Slider", "automationId": "sliderTrack",
+                "text": "", "rect": [300, 200, 400, 240], "protected": False,
+            },
+        ),
+    ])
+
+
+def test_a_press_alone_records_nothing_until_its_release_classifies_it():
+    correlator = WindowsUIACorrelator(_slider_resolver(), drag_threshold=(4, 4))
+    assert correlator.correlate(_pointer("pointer_down", (110, 130), 100), SCOPE, 1) is None
+
+
+def test_press_and_release_beyond_the_drag_threshold_records_a_drag_commit():
+    correlator = WindowsUIACorrelator(_slider_resolver(), drag_threshold=(4, 4))
+    correlator.correlate(_pointer("pointer_down", (110, 130), 100), SCOPE, 1)
+    event = correlator.correlate(_pointer("pointer_up", (305, 210), 500), SCOPE, 1)
+
+    assert event.type == "drag_commit"
+    assert event.observed_target.automation_id == "sliderThumb"
+    assert event.input["screenPoint"] == [110, 130]
+    assert event.input["endPoint"] == [305, 210]
+    assert event.input["durationSeconds"] == 0.4
+    assert event.input["endTarget"]["automationId"] == "sliderTrack"
+    assert event.input["endTarget"]["rect"] == [300, 200, 400, 240]
+    # The release target's identity must stay free of observation-local IDs.
+    assert "snapshotId" not in event.input["endTarget"]
+    assert "targetId" not in event.input["endTarget"]
+
+
+def test_a_release_within_the_drag_threshold_stays_an_ordinary_click():
+    correlator = WindowsUIACorrelator(_slider_resolver(), drag_threshold=(4, 4))
+    correlator.correlate(_pointer("pointer_down", (110, 130), 100), SCOPE, 1)
+    event = correlator.correlate(_pointer("pointer_up", (113, 132), 180), SCOPE, 1)
+
+    assert event.type == "pointer_click"
+    assert "endTarget" not in event.input
+
+
+def test_a_release_with_a_different_button_than_the_press_is_not_a_drag():
+    correlator = WindowsUIACorrelator(_slider_resolver(), drag_threshold=(4, 4))
+    correlator.correlate(_pointer("pointer_down", (110, 130), 100, button="left"), SCOPE, 1)
+    event = correlator.correlate(_pointer("pointer_up", (305, 210), 500, button="right"), SCOPE, 1)
+
+    assert event.type == "pointer_click"
+
+
+def test_a_drag_onto_an_unresolvable_release_point_keeps_an_explicit_null_end_target():
+    correlator = WindowsUIACorrelator(_slider_resolver(), drag_threshold=(4, 4))
+    correlator.correlate(_pointer("pointer_down", (110, 130), 100), SCOPE, 1)
+    event = correlator.correlate(_pointer("pointer_up", (900, 900), 500), SCOPE, 1)
+
+    assert event.type == "drag_commit"
+    assert event.input["endTarget"] is None
+
+
+def _transition(kind, monotonic_ms, *, process="EDRClient.exe", title="策略详情", pid=42):
+    return HookPacket(
+        kind="window_transition",
+        monotonic_ms=monotonic_ms,
+        wall_time="2026-08-17T00:00:00.000Z",
+        native={"kind": kind, "processName": process, "title": title, "pid": pid},
+    )
+
+
+def _click_then_transition(packet, *, transition_window_ms=3000):
+    correlator = WindowsUIACorrelator(
+        _Resolver(), double_click_ms=650, transition_window_ms=transition_window_ms,
+    )
+    click = correlator.correlate(_packet(monotonic_ms=100), SCOPE, 1)
+    return correlator, click, correlator.correlate(packet, SCOPE, 2)
+
+
+def test_a_window_opening_after_a_click_is_bound_to_that_click():
+    _, click, event = _click_then_transition(_transition("opened", 700))
+
+    assert event.type == "window_transition"
+    assert event.causal_id == click.causal_id
+    assert event.input["kind"] == "opened"
+    assert event.input["title"] == "策略详情"
+    assert event.input["processName"] == "EDRClient.exe"
+    # The wait is derived from the latency the recording actually observed.
+    assert event.input["timeoutSeconds"] == 5.0
+
+
+def test_a_slow_window_gets_a_proportionally_longer_replay_timeout():
+    _, _, event = _click_then_transition(_transition("opened", 2600))
+    assert event.input["timeoutSeconds"] == 7.5
+
+
+def test_a_window_transition_no_recent_action_explains_is_not_recorded():
+    correlator = WindowsUIACorrelator(_Resolver())
+    assert correlator.correlate(_transition("opened", 700), SCOPE, 1) is None
+
+
+def test_a_window_transition_outside_the_correlation_window_is_not_recorded():
+    _, _, event = _click_then_transition(
+        _transition("opened", 9000), transition_window_ms=3000,
+    )
+    assert event is None
+
+
+def test_a_transition_belonging_to_another_process_is_not_recorded():
+    _, _, event = _click_then_transition(_transition("opened", 700, process="Other.exe"))
+    assert event is None
+
+
+def test_a_dialog_title_outside_the_recording_scope_still_binds():
+    """A click almost always opens a window whose title differs from the scope."""
+    _, click, event = _click_then_transition(
+        _transition("opened", 700, title="确认删除"),
+    )
+    assert event is not None
+    assert event.input["title"] == "确认删除"
+    assert event.causal_id == click.causal_id
+
+
+def test_a_window_close_records_a_closed_transition():
+    _, click, event = _click_then_transition(_transition("closed", 500))
+    assert event.input["kind"] == "closed"
+    assert event.causal_id == click.causal_id
+
+
+class _FailingDriver:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def start(self, emit) -> None:
+        raise RecordingModelError("recording_permission_missing", "no permission")
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def test_composite_driver_starts_every_driver_with_one_emitter():
+    first, second = _FakeDriver(), _FakeDriver()
+    composite = CompositeHookDriver(first, second)
+    sink = lambda packet: None
+
+    composite.start(sink)
+
+    assert first.emit is sink and second.emit is sink
+
+
+def test_composite_driver_stops_started_drivers_when_a_later_one_fails():
+    started, failing = _FakeDriver(), _FailingDriver()
+    composite = CompositeHookDriver(started, failing)
+
+    with pytest.raises(RecordingModelError):
+        composite.start(lambda packet: None)
+
+    assert started.stopped is True
+
+
+def test_composite_driver_stops_every_driver_even_after_a_failure():
+    class _RaisingStop(_FakeDriver):
+        def stop(self):
+            super().stop()
+            raise RuntimeError("unhook failed")
+
+    raising, healthy = _RaisingStop(), _FakeDriver()
+    composite = CompositeHookDriver(healthy, raising)
+    composite.start(lambda packet: None)
+
+    with pytest.raises(RuntimeError):
+        composite.stop()
+
+    assert healthy.stopped is True and raising.stopped is True

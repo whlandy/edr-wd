@@ -85,6 +85,8 @@ def test_schema_expectation_enum_matches_p1_4():
         "action_ok", "window_open", "window_closed",
         "active_window_owner", "control_exists", "control_absent",
         "control_text_equals", "control_text_contains",
+        "control_value_equals", "control_checked_equals",
+        "control_enabled_equals",
         "window_text_contains", "visual_evidence_captured",
     }
     assert set(PLAN_JSON_SCHEMA["$defs"]["Expectation"]

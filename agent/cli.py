@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import hashlib
 import json
 import subprocess
 import sys
@@ -13,8 +16,19 @@ from pathlib import Path
 from agent import target_manager
 from agent.e2e_report import create_run_dir, persist_target_screenshot
 from agent.file_transfer import download_file, upload_file
+from agent.execution import AtomicExecutor
+from agent.execution.confirmation import ConfirmationGate, ExecutionContext
+from agent.trace.store import TraceStore
+from agent.recording.artifacts import write_compilation_artifacts
+from agent.recording.compiler import compile_recording
+from agent.recording.mcp_runtime import MCPActionDispatch, MCPObservationProvider
+from agent.recording.replay import ReplayRuntime, load_golden_trace, replay_golden_trace
+from agent.recording.pillow_matcher import PillowTemplateMatcher
+from agent.recording.visual import SafeVisualResolver
 from agent.subagent.target_agent import TargetSubAgent
 from agent.target_config import TargetConfig, add_config_arguments, run_config_command
+from target.recording.models import RawRecording
+from target.action_catalog import ACTIONS_V1, CATALOG_VERSION, catalog_digest, get_spec
 
 
 def _print_result(result: object) -> int:
@@ -448,6 +462,31 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("local_path")
     download.add_argument("--overwrite", action="store_true")
     download.add_argument("--no-scp-fallback", action="store_true")
+
+    record = sub.add_parser("record", help="Compile or manage a scoped desktop recording")
+    record.add_argument("action", choices=["compile", "start", "status", "pause", "resume", "assert", "stop"])
+    record.add_argument("recording", nargs="?", help="recording.json for the compile action")
+    record.add_argument("--output-root", help="Recording artifact root (compile and stop)")
+    record.add_argument("--name", help="Capture name (start only)")
+    record.add_argument("--process-name", help="Locked application process (start only)")
+    record.add_argument("--window-title", help="Locked application window title regex (start only)")
+    record.add_argument("--lease-seconds", type=float, default=300.0, help="Target-local activity lease (start only)")
+    record.add_argument("--profile", help="Bind generated golden trace to this app profile (compile and stop)")
+    record.add_argument("--timeout", type=float, help="Per-call MCP timeout in seconds")
+    record.add_argument("--no-heartbeat", action="store_true", help="Read status without renewing the recording lease")
+
+    replay = sub.add_parser("replay", help="Replay a ready golden trace through the atomic executor")
+    replay.add_argument("golden_trace")
+    replay.add_argument("--profile", default="default")
+    replay.add_argument("--confirm-action", action="append", default=[], help="Out-of-band confirmation token scoped to one action ID")
+    replay.add_argument("--max-depth", type=int, default=12, help="Fresh control-tree observation depth")
+    replay.add_argument("--trace-root", default="result-report/replay-traces", help="Agent-local append-only replay trace root")
+    replay.add_argument("--replay-mode", choices=["semantic_only", "semantic_first", "visual_only"], default="semantic_only")
+    replay.add_argument(
+        "--persist-screenshots",
+        action="store_true",
+        help="Write target-side source-redacted runtime frames into the replay trace",
+    )
     return parser
 
 
@@ -471,12 +510,185 @@ def _save_screenshot_result(result: dict, target: str) -> dict:
     return {"run_dir": str(run_dir), "screenshot": metadata}
 
 
+def _cmd_record(
+    args: argparse.Namespace,
+    agent: TargetSubAgent,
+    parser: argparse.ArgumentParser,
+    *,
+    profile: str | None = None,
+) -> int:
+    """Manage target-local recording and persist stopped captures locally."""
+    if args.action == "start":
+        missing = [
+            option
+            for option, value in (
+                ("--name", args.name),
+                ("--process-name", args.process_name),
+                ("--window-title", args.window_title),
+            )
+            if not value
+        ]
+        if missing:
+            parser.error(f"record start requires {', '.join(missing)}")
+
+        active = agent.call_tool(
+            "recording_status", {"heartbeat": False}, timeout=args.timeout,
+        )
+        if active.get("ok") and active.get("state") in {
+            "starting", "recording", "paused", "stopping",
+        }:
+            return _print_result({
+                "ok": False,
+                "code": "recording_session_active",
+                "error": "another target-local recording session is active",
+                "state": active.get("state"),
+            })
+
+        # Recording is allowed only after the existing target ownership path
+        # has resolved and locked one matching application window.
+        connected = agent.call_tool(
+            "connect",
+            {
+                "process_name": args.process_name,
+                "title_re": args.window_title,
+                "timeout": args.timeout or 10.0,
+            },
+            timeout=args.timeout,
+        )
+        if not connected.get("ok"):
+            return _print_result(connected)
+        locked = agent.call_tool(
+            "lock_window",
+            {
+                "process_name": args.process_name,
+                "title_re": args.window_title,
+                "activate": True,
+            },
+            timeout=args.timeout,
+        )
+        if not locked.get("ok"):
+            return _print_result(locked)
+        verified = agent.call_tool(
+            "verify_window_lock",
+            {"activate": True},
+            timeout=args.timeout,
+        )
+        if not verified.get("ok"):
+            return _print_result(verified)
+        result = agent.call_tool(
+            "start_recording",
+            {
+                "name": args.name,
+                "process_name": args.process_name,
+                "window_title": args.window_title,
+                "lease_seconds": args.lease_seconds,
+            },
+            timeout=args.timeout,
+        )
+        return _print_result(result)
+
+    tool_by_action = {
+        "status": "recording_status",
+        "pause": "pause_recording",
+        "resume": "resume_recording",
+        "stop": "stop_recording",
+    }
+    if args.action == "assert":
+        return _print_result(agent.call_tool(
+            "add_recording_assertion", {}, timeout=args.timeout,
+        ))
+
+    tool = tool_by_action[args.action]
+    arguments = {"heartbeat": not args.no_heartbeat} if args.action == "status" else {}
+    result = agent.call_tool(tool, arguments, timeout=args.timeout)
+    if args.action != "stop" or not result.get("ok"):
+        return _print_result(result)
+
+    try:
+        recording = RawRecording.from_dict(result["recording"])
+        compilation = compile_recording(recording, profile=profile)
+        captures: dict[str, bytes] = {}
+        seen_capture_ids: set[str] = set()
+        capture_issues: list[dict] = []
+        for event in recording.events:
+            for evidence_key in ("beforeCapture", "capture"):
+                metadata = event.evidence.get(evidence_key)
+                capture_id = metadata.get("id") if isinstance(metadata, dict) else None
+                if not isinstance(capture_id, str) or capture_id in seen_capture_ids:
+                    continue
+                seen_capture_ids.add(capture_id)
+                fetched = agent.call_tool(
+                    "get_recording_capture", {"capture_id": capture_id}, timeout=args.timeout,
+                )
+                encoded = fetched.get("image_b64") if isinstance(fetched, dict) else None
+                try:
+                    payload = base64.b64decode(encoded, validate=True) if isinstance(encoded, str) else None
+                except (binascii.Error, ValueError):
+                    payload = None
+                digest = (
+                    "sha256:" + hashlib.sha256(payload).hexdigest()
+                    if payload is not None else None
+                )
+                if (
+                    not isinstance(fetched, dict)
+                    or not fetched.get("ok")
+                    or payload is None
+                    or digest != metadata.get("sha256")
+                    or digest != fetched.get("sha256")
+                ):
+                    capture_issues.append({
+                        "code": "recording_capture_fetch_failed",
+                        "sequence": event.sequence,
+                        "evidence": evidence_key,
+                        "captureId": capture_id,
+                    })
+                    continue
+                captures[capture_id] = payload
+        output_root = Path(args.output_root).expanduser() if args.output_root else Path("recordings")
+        artifacts = write_compilation_artifacts(
+            output_root,
+            recording,
+            compilation,
+            captures=captures,
+            artifact_issues=capture_issues,
+        )
+    except (KeyError, OSError, ValueError) as exc:
+        return _print_result({
+            "ok": False,
+            "code": "recording_persistence_failed",
+            "error": str(exc),
+            "target_result": result,
+        })
+    return _print_result({
+        **result,
+        "status": compilation.golden.status,
+        "directory": str(artifacts.directory),
+        "issues": [issue.to_dict() for issue in compilation.issues],
+        "captureIssues": capture_issues,
+    })
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.command == "config":
         return run_config_command(args)
+
+    if args.command == "record" and args.action == "compile":
+        if not args.recording:
+            parser.error("record compile requires recording.json")
+        source = Path(args.recording).expanduser().resolve()
+        recording = RawRecording.from_dict(json.loads(source.read_text(encoding="utf-8")))
+        result = compile_recording(recording, profile=args.profile)
+        output_root = Path(args.output_root).expanduser() if args.output_root else source.parent
+        artifacts = write_compilation_artifacts(output_root, recording, result)
+        return _print_result({
+            "ok": result.golden.status == "ready",
+            "status": result.golden.status,
+            "directory": str(artifacts.directory),
+            "issues": [issue.to_dict() for issue in result.issues],
+        })
 
     target = _target(args)
     if not target:
@@ -585,6 +797,158 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "window":
         return _cmd_window(args, agent, parser, target)
+    if args.command == "record":
+        profile = args.profile
+        if profile is None:
+            try:
+                profile = TargetConfig(args.config).get_target_app_profile(target)
+            except KeyError:
+                profile = None
+        return _cmd_record(args, agent, parser, profile=profile)
+    if args.command == "replay":
+        try:
+            golden = load_golden_trace(args.golden_trace)
+        except (OSError, ValueError) as exc:
+            return _print_result({
+                "ok": False,
+                "code": getattr(exc, "code", "golden_trace_invalid"),
+                "error": str(exc),
+                "path": getattr(exc, "path", ""),
+            })
+        if golden.status != "ready":
+            return _print_result({
+                "ok": False,
+                "code": "golden_trace_incomplete",
+                "error": "only ready golden traces can replay",
+            })
+        if (
+            golden.catalog.get("version") != CATALOG_VERSION
+            or golden.catalog.get("digest") != catalog_digest()
+        ):
+            return _print_result({
+                "ok": False,
+                "code": "golden_catalog_mismatch",
+                "error": "golden trace catalog binding differs from the replay runtime",
+            })
+        expected_profile = golden.environment.get("profile")
+        if expected_profile and expected_profile != args.profile:
+            return _print_result({
+                "ok": False,
+                "code": "golden_profile_mismatch",
+                "error": "golden trace profile differs from the replay execution profile",
+            })
+        active_recording = agent.call_tool("recording_status", {"heartbeat": False})
+        if active_recording.get("ok") and active_recording.get("state") in {"recording", "paused"}:
+            return _print_result({
+                "ok": False,
+                "code": "recording_session_active",
+                "error": "capture and replay cannot run concurrently on the same target",
+            })
+        selectors = [
+            step.selector for step in (*golden.steps, *golden.cleanup)
+            if step.selector is not None
+        ]
+        first_selector = selectors[0] if selectors else None
+        process_name = golden.environment.get("application") or (
+            first_selector.window.get("processName") if first_selector else None
+        )
+        title_re = first_selector.window.get("titleRegex") if first_selector else None
+        if not process_name or not title_re:
+            return _print_result({
+                "ok": False,
+                "code": "replay_scope_missing",
+                "error": "golden trace has no application process/title scope",
+            })
+        connected = agent.call_tool("connect", {
+            "process_name": process_name, "title_re": title_re, "timeout": 10.0,
+        })
+        if not connected.get("ok"):
+            return _print_result(connected)
+        locked = agent.call_tool("lock_window", {
+            "process_name": process_name, "title_re": title_re,
+            "strict": True, "activate": True,
+        })
+        if not locked.get("ok"):
+            return _print_result(locked)
+        verified = agent.call_tool("verify_window_lock", {"activate": True})
+        if not verified.get("ok"):
+            return _print_result(verified)
+
+        trace_store = TraceStore(Path(args.trace_root).expanduser().resolve())
+        trace_store.open()
+        observations = MCPObservationProvider(
+            agent,
+            max_depth=args.max_depth,
+            trace_store=trace_store,
+            capture_screenshot=(
+                args.replay_mode != "semantic_only" or args.persist_screenshots
+            ),
+        )
+        visual_resolver = None
+        if args.replay_mode != "semantic_only":
+            matcher = PillowTemplateMatcher()
+            asset_root = Path(args.golden_trace).expanduser().resolve().parent
+
+            def verified_template_path(template: str, visual: dict | None = None):
+                template_path = (asset_root / template).resolve()
+                if asset_root != template_path and asset_root not in template_path.parents:
+                    return None
+                if visual is not None:
+                    expected = visual.get("elementSha256")
+                    if not isinstance(expected, str) or not template_path.is_file():
+                        return None
+                    actual = "sha256:" + hashlib.sha256(template_path.read_bytes()).hexdigest()
+                    if actual != expected:
+                        return None
+                return template_path
+
+            def match_template(template: str, observation: dict):
+                template_path = verified_template_path(template)
+                if template_path is None:
+                    return []
+                return matcher(str(template_path), observation)
+
+            visual_resolver = SafeVisualResolver(
+                match_template,
+                template_verifier=lambda template, visual: (
+                    verified_template_path(template, dict(visual)) is not None
+                ),
+            )
+
+        def risk_lookup(action_id: str) -> tuple[str, str]:
+            spec = get_spec(ACTIONS_V1, action_id)
+            return (spec.risk, spec.side_effect) if spec is not None else ("low", "none")
+
+        executor = AtomicExecutor(
+            dispatch=MCPActionDispatch(agent, trace_store=trace_store),
+            observation_provider=observations,
+            confirmation_gate=ConfirmationGate(),
+            risk_lookup=risk_lookup,
+        )
+        run = replay_golden_trace(
+            ReplayRuntime(
+                executor=executor,
+                catalog_version=CATALOG_VERSION,
+                catalog_digest=catalog_digest(),
+                execution_context=ExecutionContext(
+                    profile=args.profile,
+                    confirmation_tokens=frozenset(args.confirm_action),
+                ),
+                trace_store=trace_store,
+                replay_mode=args.replay_mode,
+                visual_resolver=visual_resolver,
+                persist_replay_screenshots=args.persist_screenshots,
+            ),
+            golden,
+        )
+        return _print_result({
+            "ok": run.evaluation.task_success,
+            "case": run.case_result.to_dict(),
+            "cleanup": run.cleanup_result.to_dict() if run.cleanup_result else None,
+            "evaluation": run.evaluation.to_dict(),
+            "trace_directory": str(run.trace_root) if run.trace_root else None,
+            "evaluation_path": str(run.evaluation_path) if run.evaluation_path else None,
+        })
     if args.command == "scroll":
         return _cmd_scroll(args, agent, parser, target)
     if args.command == "page-next":

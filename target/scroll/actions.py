@@ -22,7 +22,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Protocol
 
-from action_dispatcher.receipts import ActionReceipt
+try:
+    from ..action_dispatcher.receipts import ActionReceipt
+except ImportError:
+    from action_dispatcher.receipts import ActionReceipt
 
 # Real dispatcher signature: dispatch(action_id, *, action_code, args,
 # target_ref, request_id, ...) -> ActionReceipt (target/action_dispatcher/

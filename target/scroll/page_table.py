@@ -39,7 +39,10 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from observations.models import ObservationSnapshot
+try:
+    from ..observations.models import ObservationSnapshot
+except ImportError:
+    from observations.models import ObservationSnapshot
 
 from .actions import PlannedAction
 from .controller import NavigationMode, _click_action

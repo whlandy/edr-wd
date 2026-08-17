@@ -52,8 +52,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from action_dispatcher import ActionReceipt
-from protocol_models import (
+from target.action_dispatcher import ActionReceipt
+from target.protocol_models import (
     AtomicTestStep,
     Expectation,
     TestCase,
@@ -121,6 +121,15 @@ class BackendUnavailable(Exception):
     """FR-P1.2-04: backend unreachable at executor start."""
 
 
+class StepMaterializationError(Exception):
+    """A dynamic step could not bind to the current observation."""
+
+    def __init__(self, code: str, message: str, *, details: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = dict(details or {})
+
+
 # ---------------------------------------------------------------------------
 # Helper: timestamp utilities
 # ---------------------------------------------------------------------------
@@ -158,6 +167,7 @@ class AtomicExecutor:
         config: ExecutorConfig | None = None,
         confirmation_gate: ConfirmationGate | None = None,
         risk_lookup: Callable[[str], tuple[str, str]] | None = None,
+        step_materializer: Callable[[AtomicTestStep, Any], AtomicTestStep] | None = None,
     ) -> None:
         self._dispatch = dispatch
         self._observations = observation_provider
@@ -184,6 +194,7 @@ class AtomicExecutor:
             risk_lookup
             or (lambda _action_id: ("low", "none"))
         )
+        self._step_materializer = step_materializer
 
     # -----------------------------------------------------------------
     # Public API
@@ -196,6 +207,7 @@ class AtomicExecutor:
         target_selector: str = "",
         step_results_path: Path | None = None,
         execution_context: ExecutionContext | None = None,
+        step_materializer: Callable[[AtomicTestStep, Any], AtomicTestStep] | None = None,
     ) -> CaseRunResult:
         """Execute every step in `case.steps`.
 
@@ -243,8 +255,9 @@ class AtomicExecutor:
                 abort_reason="backend_unavailable",
             )
 
+        materializer = step_materializer or self._step_materializer
         for step in steps:
-            sr = self.run_step(case, step, snapshot=None)
+            sr = self.run_step(case, step, snapshot=None, step_materializer=materializer)
             step_results.append(sr)
             self._persist(step_results_path, case, step_results)
 
@@ -262,7 +275,7 @@ class AtomicExecutor:
                     # Bounded retry around the *whole step*; the
                     # in-step retry counter resets per step.
                     sr, step_results = self._retry_step(
-                        case, step, sr, step_results,
+                        case, step, sr, step_results, materializer,
                     )
                     if sr.status is StepStatus.FAILED:
                         # Retry exhausted; decide whether to skip
@@ -308,6 +321,7 @@ class AtomicExecutor:
         case: TestCase,
         step: AtomicTestStep,
         snapshot: Mapping[str, Any] | None,
+        step_materializer: Callable[[AtomicTestStep, Any], AtomicTestStep] | None = None,
     ) -> StepResult:
         """Run a single step (also exercised by the retry loop).
 
@@ -355,6 +369,25 @@ class AtomicExecutor:
                 error_payload={"code": "backend_unavailable", "message": str(exc)},
                 transition_expected=transition_expected,
             )
+
+        materializer = step_materializer or self._step_materializer
+        if materializer is not None:
+            try:
+                step = materializer(step, observation)
+            except StepMaterializationError as exc:
+                ended = _utcnow_iso()
+                return self._finalise_blocked(
+                    step,
+                    started,
+                    ended,
+                    start_perf,
+                    error_payload={
+                        "code": exc.code,
+                        "message": str(exc),
+                        "details": exc.details,
+                    },
+                    transition_expected=transition_expected,
+                )
 
         # FR-P1.2-08: target stale -> blocked.
         if step.target_ref is not None and step.target_ref.snapshot_id:
@@ -423,17 +456,25 @@ class AtomicExecutor:
         # 5. EXECUTING -> OBSERVING_AFTER.
         try:
             request_id = f"R-{uuid.uuid4().hex[:12]}"
-            receipt = self._dispatch(
-                action_id=step.action_id,
-                action_code=step.action_code,
-                args=dict(step.args),
-                target_ref=(
-                    _target_ref_to_dict(step.target_ref)
-                    if step.target_ref is not None
-                    else None
-                ),
-                request_id=request_id,
-            )
+            if step.action_id == "observe.assert":
+                receipt = ActionReceipt.from_ok(
+                    action_id="observe.assert",
+                    action_code=step.action_code,
+                    request_id=request_id,
+                    result={"observation_only": True},
+                )
+            else:
+                receipt = self._dispatch(
+                    action_id=step.action_id,
+                    action_code=step.action_code,
+                    args=dict(step.args),
+                    target_ref=(
+                        _target_ref_to_dict(step.target_ref)
+                        if step.target_ref is not None
+                        else None
+                    ),
+                    request_id=request_id,
+                )
         except Exception as exc:  # dispatcher raises on unknown action_id etc.
             ended = _utcnow_iso()
             return self._finalise_blocked(
@@ -608,12 +649,15 @@ class AtomicExecutor:
         step: AtomicTestStep,
         initial: StepResult,
         step_results: list[StepResult],
+        step_materializer: Callable[[AtomicTestStep, Any], AtomicTestStep] | None = None,
     ) -> tuple[StepResult, list[StepResult]]:
         """Bounded retry loop.  Replaces the trailing failed entry."""
         last = initial
         for _ in range(self._config.retry_max):
             # Re-run step from scratch (state machine starts at CREATED).
-            attempt = self.run_step(case, step, snapshot=None)
+            attempt = self.run_step(
+                case, step, snapshot=None, step_materializer=step_materializer,
+            )
             if attempt.status is not StepStatus.FAILED:
                 # Replace the trailing failed entry.
                 step_results.pop()
@@ -711,6 +755,7 @@ def _target_ref_to_dict(target_ref: Any) -> dict[str, Any]:
 __all__ = [
     "AtomicExecutor",
     "ObservationProvider",
+    "StepMaterializationError",
     "BackendUnavailable",
     "IllegalTransition",
 ]

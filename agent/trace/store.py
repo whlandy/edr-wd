@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from protocol_models.canonical_json import canonical_bytes
+from target.protocol_models.canonical_json import canonical_bytes
 
 from .events import (
     SCHEMA_VERSION,

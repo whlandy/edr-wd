@@ -22,7 +22,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from action_dispatcher.receipts import ActionReceipt
+try:
+    from ..action_dispatcher.receipts import ActionReceipt
+except ImportError:
+    from action_dispatcher.receipts import ActionReceipt
 
 from .actions import DispatcherAdapter, PlannedAction
 

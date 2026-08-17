@@ -195,13 +195,13 @@ class WindowsLifecycle:
         # Runtime dependencies
         dep_cmd = (
             f'"{python_path}" -c '
-            f'"import fastmcp, psutil, PIL, pywinauto, pyautogui; '
+            f'"import fastmcp, psutil, PIL, pywinauto, pyautogui, tkinter; '
             f'print(\\"windows target deps ok\\")"'
         )
         rc, out = run_ssh(ssh_cfg, dep_cmd, timeout=20)
         stages["python_dependencies"] = {
             "ok": rc == 0,
-            "requires": ["fastmcp", "psutil", "Pillow", "pywinauto", "PyAutoGUI"],
+            "requires": ["fastmcp", "psutil", "Pillow", "pywinauto", "PyAutoGUI", "tkinter"],
             "output": out.strip()[:300],
         }
         if rc != 0:
