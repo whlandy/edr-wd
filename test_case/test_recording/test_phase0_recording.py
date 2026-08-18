@@ -723,3 +723,52 @@ def test_a_run_on_a_different_target_does_not_cover_the_earlier_scroll():
     result = compile_recording(_recording(*events))
     scrolls = [s for s in result.case.steps if s.action_id == "pointer.scroll"]
     assert scrolls[0].issues == ("compile_scroll_verifier_required",)
+
+
+def _transition_event(sequence, kind, causal_id, *, title=None, ms=None):
+    payload = {"kind": kind, "processName": "EDRClient.exe"}
+    if title is not None:
+        payload["title"] = title
+    event = _event(sequence, "window_transition", ms=ms, input_=payload, causal_id=causal_id)
+    event["observedTarget"] = None
+    return event
+
+
+def test_a_window_that_opened_and_closed_again_asserts_nothing():
+    """Both halves would be kept, asserting the window is present and absent."""
+    result = compile_recording(_recording(
+        _event(1, causal_id="cause-1", ms=100),
+        _transition_event(2, "opened", "cause-1", title="EDRClient", ms=200),
+        _transition_event(3, "closed", "cause-1", title="EDRClient", ms=300),
+    ))
+    assert result.case.steps[0].verifiers == ()
+
+
+def test_a_window_that_stayed_open_still_asserts_it_is_open():
+    result = compile_recording(_recording(
+        _event(1, causal_id="cause-1", ms=100),
+        _transition_event(2, "opened", "cause-1", title="日志中心", ms=200),
+    ))
+    verifiers = result.case.steps[0].verifiers
+    assert [v["expected"]["exists"] for v in verifiers] == [True]
+    assert verifiers[0]["expected"]["title"] == "日志中心"
+
+
+def test_an_unidentifiable_transient_window_asserts_nothing():
+    result = compile_recording(_recording(
+        _event(1, causal_id="cause-1", ms=100),
+        _transition_event(2, "opened", "cause-1", ms=200),
+    ))
+    assert result.case.steps[0].verifiers == ()
+
+
+def test_a_different_window_closing_is_kept():
+    result = compile_recording(_recording(
+        _event(1, causal_id="cause-1", ms=100),
+        _transition_event(2, "opened", "cause-1", title="日志中心", ms=200),
+        _transition_event(3, "closed", "cause-1", title="旧窗口", ms=300),
+    ))
+    verifiers = result.case.steps[0].verifiers
+    assert [(v["expected"].get("title"), v["expected"]["exists"]) for v in verifiers] == [
+        ("日志中心", True), ("旧窗口", False),
+    ]

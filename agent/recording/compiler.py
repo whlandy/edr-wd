@@ -226,6 +226,23 @@ def coalesce_events(
     return tuple(result)
 
 
+def _opposing_window_verifier(
+    step: RecordedStep, kind: str, identity: str,
+) -> Mapping[str, Any] | None:
+    """The verifier this transition cancels out, if the step already has one."""
+    wanted = kind != "opened"
+    for verifier in step.verifiers:
+        if verifier.get("type") != "window_open":
+            continue
+        expected = verifier.get("expected")
+        if not isinstance(expected, Mapping):
+            continue
+        observed = expected.get("title") or expected.get("titleRegex")
+        if observed == identity and bool(expected.get("exists")) is wanted:
+            return verifier
+    return None
+
+
 def _shares_action_cause(
     event: RawCaptureEvent,
     last_action_causal_id: str | None,
@@ -444,6 +461,25 @@ def compile_recording(
                 event, last_action_causal_id, last_action_index is not None,
             )
             if bound:
+                identity = event.input.get("title") or event.input.get("titleRegex")
+                if not identity:
+                    # A transient window with no title cannot be identified,
+                    # so asserting on it would assert on any window at all.
+                    continue
+                previous = steps[last_action_index]
+                opposite = _opposing_window_verifier(previous, transition_kind, identity)
+                if opposite is not None:
+                    # It opened and closed again inside the same action. The
+                    # end state is unchanged, and keeping either half asserts
+                    # something the step did not leave behind — keeping both
+                    # asserts a window is present and absent at once.
+                    steps[last_action_index] = replace(
+                        previous,
+                        verifiers=tuple(
+                            v for v in previous.verifiers if v is not opposite
+                        ),
+                    )
+                    continue
                 expected = {
                     "exists": transition_kind == "opened",
                     "processName": event.input.get("processName") or event.scope.process_name,
