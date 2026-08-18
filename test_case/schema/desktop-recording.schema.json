@@ -3,70 +3,209 @@
   "$id": "https://edr-wd.local/schemas/desktop-recording.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "sessionId", "name", "captureDiagnostics", "events"],
+  "required": [
+    "schema",
+    "sessionId",
+    "name",
+    "captureDiagnostics",
+    "events"
+  ],
   "properties": {
-    "schema": {"const": "edr.desktop-recording/v1"},
-    "sessionId": {"type": "string", "minLength": 1},
-    "name": {"type": "string", "minLength": 1},
+    "schema": {
+      "const": "edr.desktop-recording/v1"
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
     "captureDiagnostics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["droppedPackets", "correlationErrorCount"],
+      "required": [
+        "droppedPackets",
+        "correlationErrorCount"
+      ],
       "properties": {
-        "droppedPackets": {"type": "integer", "minimum": 0},
-        "correlationErrorCount": {"type": "integer", "minimum": 0}
+        "droppedPackets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "correlationErrorCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outOfScopeEvents": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
-    "events": {"type": "array", "items": {"$ref": "#/$defs/event"}}
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/event"
+      }
+    }
   },
   "$defs": {
     "scope": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["target", "backend", "processName", "windowTitle"],
+      "required": [
+        "target",
+        "backend",
+        "processName",
+        "windowTitle"
+      ],
       "properties": {
-        "target": {"type": "string", "minLength": 1},
-        "backend": {"type": "string", "minLength": 1},
-        "processName": {"type": "string", "minLength": 1},
-        "windowTitle": {"type": "string"}
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "backend": {
+          "type": "string",
+          "minLength": 1
+        },
+        "processName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "windowTitle": {
+          "type": "string"
+        }
       }
     },
     "observedTarget": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["snapshotId", "targetId", "fingerprint"],
+      "required": [
+        "snapshotId",
+        "targetId",
+        "fingerprint"
+      ],
       "properties": {
-        "snapshotId": {"type": "string", "minLength": 1},
-        "targetId": {"type": "string", "minLength": 1},
-        "fingerprint": {"type": "string", "minLength": 1},
-        "controlType": {"type": ["string", "null"]},
-        "automationId": {"type": ["string", "null"]},
-        "identifier": {"type": ["string", "null"]},
-        "text": {"type": ["string", "null"]},
-        "rect": {
-          "oneOf": [
-            {"type": "null"},
-            {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer"}}
+        "snapshotId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "targetId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fingerprint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "controlType": {
+          "type": [
+            "string",
+            "null"
           ]
         },
-        "ancestry": {"type": "array", "items": {"type": "object", "additionalProperties": {"type": "string"}}},
-        "protected": {"type": ["boolean", "null"]}
+        "automationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "identifier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rect": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": {
+                "type": "integer"
+              }
+            }
+          ]
+        },
+        "ancestry": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "protected": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
       }
     },
     "capture": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "sha256", "width", "height", "origin", "redacted", "redactions"],
+      "required": [
+        "id",
+        "sha256",
+        "width",
+        "height",
+        "origin",
+        "redacted",
+        "redactions"
+      ],
       "properties": {
-        "id": {"type": "string", "pattern": "^CAP-[0-9a-f]{32}$"},
-        "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-        "width": {"type": "integer", "minimum": 1},
-        "height": {"type": "integer", "minimum": 1},
-        "origin": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer"}},
-        "redacted": {"const": true},
+        "id": {
+          "type": "string",
+          "pattern": "^CAP-[0-9a-f]{32}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "origin": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "integer"
+          }
+        },
+        "redacted": {
+          "const": true
+        },
         "redactions": {
           "type": "array",
-          "items": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "integer"}}
+          "items": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {
+              "type": "integer"
+            }
+          }
         }
       }
     },
@@ -74,17 +213,40 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "foregroundPid": {"type": ["integer", "null"], "minimum": 1},
-        "doubleClickIntervalMs": {"type": "integer", "minimum": 1, "maximum": 5000},
-        "beforeCapture": {"$ref": "#/$defs/capture"},
-        "capture": {"$ref": "#/$defs/capture"},
+        "foregroundPid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "doubleClickIntervalMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5000
+        },
+        "beforeCapture": {
+          "$ref": "#/$defs/capture"
+        },
+        "capture": {
+          "$ref": "#/$defs/capture"
+        },
         "captureError": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["code", "message"],
+          "required": [
+            "code",
+            "message"
+          ],
           "properties": {
-            "code": {"type": "string", "minLength": 1},
-            "message": {"type": "string", "minLength": 1}
+            "code": {
+              "type": "string",
+              "minLength": 1
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         }
       }
@@ -92,57 +254,175 @@
     "assertion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "expected"],
+      "required": [
+        "type",
+        "expected"
+      ],
       "properties": {
-        "type": {"enum": ["text_equals", "text_contains", "value_equals", "visible", "checked", "enabled", "window_open"]},
+        "type": {
+          "enum": [
+            "text_equals",
+            "text_contains",
+            "value_equals",
+            "visible",
+            "checked",
+            "enabled",
+            "window_open"
+          ]
+        },
         "expected": {},
-        "timeoutSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 300}
+        "timeoutSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 300
+        }
       },
       "allOf": [
         {
-          "if": {"properties": {"type": {"enum": ["text_equals", "text_contains", "value_equals"]}}},
-          "then": {"properties": {"expected": {"type": "string"}}}
-        },
-        {
-          "if": {"properties": {"type": {"enum": ["visible", "checked", "enabled"]}}},
-          "then": {"properties": {"expected": {"type": "boolean"}}}
-        },
-        {
-          "if": {"properties": {"type": {"const": "window_open"}}},
-          "then": {"properties": {"expected": {
-            "oneOf": [
-              {"type": "boolean"},
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "exists": {"type": "boolean"},
-                  "processName": {"type": "string"},
-                  "process_name": {"type": "string"},
-                  "title": {"type": "string"},
-                  "titleRegex": {"type": "string"}
-                }
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "text_equals",
+                  "text_contains",
+                  "value_equals"
+                ]
               }
-            ]
-          }}}
+            }
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "visible",
+                  "checked",
+                  "enabled"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "window_open"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "oneOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "exists": {
+                        "type": "boolean"
+                      },
+                      "processName": {
+                        "type": "string"
+                      },
+                      "process_name": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "titleRegex": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
         }
       ]
     },
     "event": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sequence", "wallTime", "monotonicMs", "type", "scope"],
+      "required": [
+        "sequence",
+        "wallTime",
+        "monotonicMs",
+        "type",
+        "scope"
+      ],
       "properties": {
-        "sequence": {"type": "integer", "minimum": 1},
-        "wallTime": {"type": "string", "minLength": 1},
-        "monotonicMs": {"type": "integer", "minimum": 0},
-        "type": {"type": "string", "minLength": 1},
-        "scope": {"$ref": "#/$defs/scope"},
-        "input": {"type": "object"},
-        "observedTarget": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/observedTarget"}]},
-        "evidence": {"$ref": "#/$defs/evidence"},
-        "causalId": {"type": ["string", "null"]},
-        "assertion": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/assertion"}]}
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "wallTime": {
+          "type": "string",
+          "minLength": 1
+        },
+        "monotonicMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "input": {
+          "type": "object"
+        },
+        "observedTarget": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/observedTarget"
+            }
+          ]
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "causalId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "assertion": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/assertion"
+            }
+          ]
+        }
       }
     }
   }

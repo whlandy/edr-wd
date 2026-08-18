@@ -362,6 +362,11 @@ class WindowsUIACorrelator:
         self._pending_press: dict[str, object] | None = None
         self._last_action_causal_id: str | None = None
         self._last_action_ms: int | None = None
+        # Windows this recording caused to open.  Input inside them belongs to
+        # the flow being recorded even though their titles cannot match the
+        # scope regex the user supplied for the entry window.
+        self._derived_scope_titles: set[str] = set()
+        self.out_of_scope_events = 0
         if transition_window_ms < 0:
             raise ValueError("transition_window_ms must be non-negative")
         self._transition_window_ms = transition_window_ms
@@ -610,6 +615,26 @@ class WindowsUIACorrelator:
             foreground=foreground,
         )
 
+    def _in_scope(self, foreground: Mapping[str, object], scope: CaptureScope) -> bool:
+        """Is this foreground window part of the recording's scope?
+
+        The scope starts as the user's process + window-title regex and grows
+        to include every window the recording causally opened.  Without that,
+        a click that opens a dialog is recorded but everything the user then
+        does inside the dialog is silently dropped.
+        """
+        if not self._process_matches(foreground.get("processName"), scope.process_name):
+            return False
+        title = str(foreground.get("windowTitle") or "")
+        try:
+            if re.search(scope.window_title, title):
+                return True
+        except re.error as exc:
+            raise RecordingModelError(
+                "recording_scope_not_unique", str(exc), path="scope.windowTitle"
+            )
+        return title in self._derived_scope_titles
+
     def _window_transition(
         self,
         packet: HookPacket,
@@ -645,6 +670,10 @@ class WindowsUIACorrelator:
         title = packet.native.get("title")
         if isinstance(title, str) and title:
             event_input["title"] = title
+            if kind == "opened":
+                self._derived_scope_titles.add(title)
+            else:
+                self._derived_scope_titles.discard(title)
         return RawCaptureEvent(
             sequence=sequence,
             wall_time=packet.wall_time,
@@ -682,13 +711,12 @@ class WindowsUIACorrelator:
         sequence: int,
     ) -> RawCaptureEvent | tuple[RawCaptureEvent, ...] | None:
         foreground = self._resolver.foreground()
-        if not self._process_matches(foreground.get("processName"), scope.process_name):
+        if not self._in_scope(foreground, scope):
+            # Out-of-scope input is expected (the user may alt-tab), but it
+            # must be countable so a short recording is never mistaken for a
+            # complete one.
+            self.out_of_scope_events += 1
             return None
-        try:
-            if not re.search(scope.window_title, str(foreground.get("windowTitle") or "")):
-                return None
-        except re.error as exc:
-            raise RecordingModelError("recording_scope_not_unique", str(exc), path="scope.windowTitle")
 
         target_data = None
         if packet.screen_point is not None:

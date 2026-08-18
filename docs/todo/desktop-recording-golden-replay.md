@@ -39,6 +39,7 @@ Phase 0 acceptance:
   silently ready golden trace
 - [~] P1.6 Windows fake-hook integration tests complete; authorised live acceptance pending
 - [x] P1.7 Press/release drag correlation and `SetWinEventHook` window-transition capture
+- [x] P1.8 Capture scope grows with causally opened windows; out-of-scope input is counted
 
 ## Phase 2 — macOS Capture
 
@@ -164,3 +165,13 @@ Screenshot lifecycle:
   (`1429 passed, 612 deselected`); regression passes
   (`585 passed, 1456 deselected`). Live acceptance on authorised Windows and
   macOS targets remains the only open gate.
+- 2026-08-18: live Windows capture on 11.26 recorded the `日志中心` click and its
+  causally bound `window_transition`, confirming P1.7 on real hardware. It also
+  showed that input inside the opened window was dropped: transitions were
+  process-scoped while input stayed title-scoped, so a sub-window flow lost
+  every event after the one that opened it. The capture scope now grows with
+  causally opened windows and shrinks when they close, and refused input is
+  counted in `captureDiagnostics.outOfScopeEvents` and reported under the
+  compile report's `diagnostics` rather than dropped silently. Recording tests
+  pass (`160 passed`); full default suite passes (`1447 passed, 612
+  deselected`); regression passes (`585 passed, 1474 deselected`).

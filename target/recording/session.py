@@ -394,6 +394,7 @@ class RecordingSession:
             tuple(self._events),
             {
                 "droppedPackets": int(getattr(self._source, "dropped_packets", 0)),
+                "outOfScopeEvents": int(getattr(self._source, "out_of_scope_events", 0)),
                 "correlationErrorCount": len(
                     getattr(self._source, "correlation_errors", ())
                 ),
