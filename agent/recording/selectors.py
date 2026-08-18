@@ -69,6 +69,34 @@ def _anchor(point: Any, rect: Any) -> dict[str, Any] | None:
     return {"relativePoint": [round(relative_x, 6), round(relative_y, 6)]}
 
 
+#: Ancestors that can own a scroll. A wheel gesture acts on the scrollable
+#: container, so these are searched outward from the hit-tested control.
+_SCROLLABLE_CONTROL_TYPES = (
+    "Table", "List", "Tree", "DataGrid", "Document", "Pane", "ScrollArea",
+)
+
+
+def _scroll_container(target: ObservedTarget) -> dict[str, Any] | None:
+    """The nearest ancestor a scroll gesture actually acts on.
+
+    Hit testing during a scroll returns whichever row sits under the pointer,
+    whose only identity is its own text — text that is different on the next
+    run, so the step would resolve to nothing. The container that scrolls has a
+    stable automation id and is what the gesture was aimed at.
+    """
+    for ancestor in target.ancestry:
+        control_type = str(ancestor.get("controlType") or "")
+        automation_id = ancestor.get("automationId")
+        if not automation_id:
+            continue
+        if control_type in _SCROLLABLE_CONTROL_TYPES:
+            return {
+                "automationId": automation_id,
+                "controlType": control_type,
+            }
+    return None
+
+
 def synthesize_selector(event: RawCaptureEvent) -> ReplaySelector | None:
     target = event.observed_target
     window = _window(event)
@@ -79,6 +107,10 @@ def synthesize_selector(event: RawCaptureEvent) -> ReplaySelector | None:
         return ReplaySelector(window=window, control={})
     if target is None:
         return None
+    if event.type == "scroll_commit":
+        container = _scroll_container(target)
+        if container is not None:
+            return ReplaySelector(window=window, control=container)
     control = _control(_identity(target))
     if control is None:
         return None

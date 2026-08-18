@@ -552,13 +552,51 @@ def test_a_pause_between_bursts_starts_a_new_gesture():
     assert [s.args["clicks"] for s in steps] == [-2, -2]
 
 
-def test_scrolling_a_different_control_starts_a_new_gesture():
-    other = {**_SCROLL_TARGET, "fingerprint": "sha256:other", "automationId": "sideList"}
+def test_content_changing_under_a_still_pointer_is_one_gesture():
+    """Scrolling moves rows past the cursor; that is not a new gesture.
+
+    A live capture hit exactly this: 67 notches from one flick resolved to five
+    different controls as rows scrolled by, and keying on control identity
+    shattered the flick into six steps.
+    """
+    rows = [
+        {**_SCROLL_TARGET, "fingerprint": f"sha256:row{i}", "text": f"日志 {i}"}
+        for i in range(1, 5)
+    ]
+    recording = _recording(*[
+        _scroll(i, ms=i * 20, target=rows[i - 1]) for i in range(1, 5)
+    ])
+    steps = [s for s in compile_recording(recording).case.steps if s.action_id == "pointer.scroll"]
+    assert len(steps) == 1
+
+
+def test_scrolling_somewhere_else_starts_a_new_gesture():
+    def _at(sequence, point, ms):
+        return _event(
+            sequence, "scroll_commit", ms=ms, target=_SCROLL_TARGET,
+            input_={"delta": -120, "screenPoint": point},
+            causal_id=f"cause-{sequence}",
+        )
+
     recording = _recording(
-        _scroll(1), _scroll(2), _scroll(3, target=other), _scroll(4, target=other),
+        _at(1, [400, 300], 20), _at(2, [400, 300], 40),
+        _at(3, [900, 300], 60), _at(4, [900, 300], 80),
     )
     steps = [s for s in compile_recording(recording).case.steps if s.action_id == "pointer.scroll"]
     assert len(steps) == 2
+
+
+def test_a_small_pointer_drift_stays_one_gesture():
+    def _at(sequence, point, ms):
+        return _event(
+            sequence, "scroll_commit", ms=ms, target=_SCROLL_TARGET,
+            input_={"delta": -120, "screenPoint": point},
+            causal_id=f"cause-{sequence}",
+        )
+
+    recording = _recording(_at(1, [400, 300], 20), _at(2, [402, 301], 40))
+    steps = [s for s in compile_recording(recording).case.steps if s.action_id == "pointer.scroll"]
+    assert len(steps) == 1
 
 
 def test_a_single_notch_is_unchanged():
@@ -589,3 +627,48 @@ def test_an_upward_high_resolution_gesture_keeps_its_direction():
     recording = _recording(*[_scroll(i, delta=2, ms=i * 20) for i in range(1, 5)])
     steps = [s for s in compile_recording(recording).case.steps if s.action_id == "pointer.scroll"]
     assert steps[0].args == {"clicks": 1}
+
+
+_LOG_ROW = {
+    "snapshotId": "OBS-1", "targetId": "T0001", "fingerprint": "sha256:row",
+    "controlType": "DataItem", "automationId": "", "text": "用户 admin : 更新语言设置",
+    "protected": False,
+    "ancestry": [
+        {"automationId": "LogCenterWindow.pagedTable.tableView", "controlType": "Table"},
+        {"automationId": "LogCenterWindow.pagedTable", "controlType": "Group"},
+    ],
+}
+
+
+def test_a_scroll_targets_the_container_not_the_row_under_the_pointer():
+    """A row's only identity is its text, which differs on the next run."""
+    result = compile_recording(_recording(_scroll(1, target=_LOG_ROW)))
+    control = result.case.steps[0].selector.control
+    assert control == {
+        "automationId": "LogCenterWindow.pagedTable.tableView",
+        "controlType": "Table",
+    }
+    assert "用户 admin" not in json.dumps(result.case.to_dict(), ensure_ascii=False)
+
+
+def test_a_scroll_without_a_scrollable_ancestor_falls_back_to_the_control():
+    target = {**_LOG_ROW, "automationId": "logList", "ancestry": []}
+    result = compile_recording(_recording(_scroll(1, target=target)))
+    assert result.case.steps[0].selector.control["automationId"] == "logList"
+
+
+def test_an_ancestor_without_an_automation_id_is_not_a_usable_container():
+    target = {
+        **_LOG_ROW,
+        "ancestry": [{"controlType": "Table"}, {"automationId": "outer", "controlType": "Group"}],
+    }
+    result = compile_recording(_recording(_scroll(1, target=target)))
+    # Group is not scrollable and the Table has no id: fall back to the row.
+    assert result.case.steps[0].selector.control.get("name") == "用户 admin : 更新语言设置"
+
+
+def test_clicks_are_unaffected_and_still_target_the_row(): 
+    result = compile_recording(_recording(
+        _event(1, "pointer_click", target=_LOG_ROW, input_={"button": "left"}),
+    ))
+    assert result.case.steps[0].selector.control["name"] == "用户 admin : 更新语言设置"
