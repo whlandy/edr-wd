@@ -993,3 +993,59 @@ def test_a_successful_seed_records_no_error():
     correlator = WindowsUIACorrelator(resolver)
     assert correlator.seed_scope(SCOPE) == ("日志中心",)
     assert correlator.scope_seed_error is None
+
+
+
+def test_stop_degrades_instead_of_discarding_when_correlation_outlives_the_join():
+    """A correlator still running at stop() must not cost the whole recording.
+
+    Live macOS AX correlation can take tens of seconds per packet, so the
+    worker is regularly still inside correlate() when stop() arrives.  The
+    events captured before that point are intact and must be returned; the
+    truncation is reported through correlation_errors so the golden trace
+    stays incomplete (P1.5a) rather than looking clean.
+    """
+    driver = _FakeDriver()
+    correlator = _BlockingCorrelator()
+    captured = []
+    source = QueuedCaptureSource(
+        scope=SCOPE,
+        sink=lambda event: captured.append(event) or True,
+        driver=driver,
+        correlator=correlator,
+        stop_timeout=0.2,
+    )
+    source.start()
+    driver.emit(_packet())
+    assert correlator.entered.wait(timeout=1)
+
+    # The worker is still inside correlate() here, so the join must expire.
+    source.stop()
+
+    assert driver.stopped is True
+    assert any(
+        "did not stop" in message for message in source.correlation_errors
+    ), source.correlation_errors
+    correlator.release.set()
+
+
+def test_stop_reports_no_correlation_error_when_the_worker_finishes_in_time():
+    driver = _FakeDriver()
+    correlator = _BlockingCorrelator()
+    captured = []
+    source = QueuedCaptureSource(
+        scope=SCOPE,
+        sink=lambda event: captured.append(event) or True,
+        driver=driver,
+        correlator=correlator,
+        stop_timeout=5.0,
+    )
+    source.start()
+    driver.emit(_packet())
+    assert correlator.entered.wait(timeout=1)
+    correlator.release.set()
+
+    source.stop()
+
+    assert source.correlation_errors == []
+    assert [event.sequence for event in captured] == [1]
