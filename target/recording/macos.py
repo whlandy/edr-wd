@@ -234,10 +234,20 @@ class MacOSEventTapDriver:
 
 
 class MacOSAXResolver:
-    """Use the existing AX backend tree as the correlation boundary."""
+    """Resolve correlation targets, preferring single-point AX over a tree walk."""
 
-    def __init__(self, backend: Any) -> None:
+    _AX_UNAVAILABLE = object()
+
+    _AUTO_AX = object()
+
+    def __init__(self, backend: Any, *, native_ax: Any = _AUTO_AX) -> None:
         self._backend = backend
+        # `native_ax` is the AX seam.  Left at the default it is auto-detected
+        # from ApplicationServices; pass None to force the tree-walk fallback
+        # (which keeps `backend` authoritative, as the offline tests require),
+        # or a stand-in module to exercise the native path deterministically.
+        if native_ax is not self._AUTO_AX:
+            self._ax_module = native_ax if native_ax is not None else self._AX_UNAVAILABLE
 
     def foreground(self) -> Mapping[str, object]:
         lock_result = self._backend.get_window_lock()
@@ -280,6 +290,182 @@ class MacOSAXResolver:
             },
         }
 
+    # ── Native AX access ──────────────────────────────────────────────────
+    #
+    # Correlation runs once per captured input event, so its cost bounds how
+    # fast a recording can keep up with a person typing.  Enumerating the
+    # whole AX tree through AppleScript costs 10-20 s per call on a real
+    # desktop (and times out outright on some applications), which loses
+    # nearly every event.  The single-point AX APIs answer the same question
+    # in ~3 ms, so they are the primary path and the tree walk stays only as
+    # a fallback for hosts without the AX bindings.
+
+    def _ax(self):
+        """Return the ApplicationServices AX module, or None when missing."""
+        cached = getattr(self, "_ax_module", None)
+        if cached is self._AX_UNAVAILABLE:
+            return None
+        if cached is not None:
+            return cached
+        try:
+            import ApplicationServices as module  # type: ignore[import-not-found]
+        except Exception:
+            self._ax_module = self._AX_UNAVAILABLE
+            return None
+        for name in (
+            "AXUIElementCreateSystemWide",
+            "AXUIElementCopyElementAtPosition",
+            "AXUIElementCopyAttributeValue",
+        ):
+            if not hasattr(module, name):
+                self._ax_module = self._AX_UNAVAILABLE
+                return None
+        self._ax_module = module
+        return module
+
+    def _system_wide(self):
+        element = getattr(self, "_ax_system_wide", None)
+        if element is None:
+            module = self._ax()
+            if module is None:
+                return None
+            element = module.AXUIElementCreateSystemWide()
+            self._ax_system_wide = element
+        return element
+
+    def _attribute(self, element, name: str):
+        module = self._ax()
+        if module is None or element is None:
+            return None
+        try:
+            error, value = module.AXUIElementCopyAttributeValue(element, name, None)
+        except Exception:
+            return None
+        return value if error == 0 else None
+
+    def _text_attribute(self, element, name: str) -> str:
+        value = self._attribute(element, name)
+        if value is None or isinstance(value, (list, tuple, dict)):
+            return ""
+        return str(value)
+
+    def _bool_attribute(self, element, name: str) -> bool:
+        value = self._attribute(element, name)
+        return bool(value) if value is not None else False
+
+    def _ax_rectangle(self, element) -> dict[str, int] | None:
+        module = self._ax()
+        position = self._attribute(element, "AXPosition")
+        size = self._attribute(element, "AXSize")
+        if module is None or position is None or size is None:
+            return None
+        unpack = getattr(module, "AXValueGetValue", None)
+        try:
+            if callable(unpack):
+                ok_position, point = unpack(
+                    position, module.kAXValueCGPointType, None,
+                )
+                ok_size, extent = unpack(size, module.kAXValueCGSizeType, None)
+                if not (ok_position and ok_size):
+                    return None
+                return {
+                    "x": int(point.x), "y": int(point.y),
+                    "w": int(extent.width), "h": int(extent.height),
+                }
+        except Exception:
+            return None
+        return None
+
+    def _ax_ancestry(self, element, *, limit: int = 12) -> list[str]:
+        ancestry: list[str] = []
+        current = self._attribute(element, "AXParent")
+        while current is not None and len(ancestry) < limit:
+            role = self._text_attribute(current, "AXRole")
+            if not role:
+                break
+            ancestry.append(role)
+            current = self._attribute(current, "AXParent")
+        ancestry.reverse()
+        return ancestry
+
+    def _ax_control(self, element) -> Mapping[str, Any] | None:
+        """Build the same control mapping shape that ``dump_tree`` emits.
+
+        Keeping the shape identical is what lets ``_describe`` — and the
+        ``_identity`` that :meth:`refresh` matches on — stay consistent no
+        matter which path produced the control.
+        """
+        if element is None:
+            return None
+        role = self._text_attribute(element, "AXRole")
+        subrole = self._text_attribute(element, "AXSubrole")
+        if not role:
+            return None
+        # Mirrors the AppleScript boundary: a secure field's value must never
+        # be read, let alone leave the target.
+        protected = any(
+            marker in candidate.lower()
+            for candidate in (role, subrole)
+            for marker in ("securetextfield", "password")
+        )
+        value = "" if protected else self._text_attribute(element, "AXValue")
+        title = self._text_attribute(element, "AXTitle")
+        description = self._text_attribute(element, "AXDescription")
+        identifier = self._text_attribute(element, "AXIdentifier")
+        checked = None
+        if "checkbox" in role.lower() or "radiobutton" in role.lower():
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "checked"}:
+                checked = True
+            elif normalized in {"0", "false", "no", "off", "unchecked"}:
+                checked = False
+        rectangle = self._ax_rectangle(element)
+        return {
+            "role": role,
+            "class_name": role,
+            "subrole": subrole,
+            "title": title,
+            "text": title or description or value,
+            "description": description,
+            "value": value,
+            "automation_id": identifier,
+            "identifier": identifier,
+            "is_enabled": self._bool_attribute(element, "AXEnabled"),
+            "is_visible": rectangle is not None,
+            "rectangle": rectangle,
+            "focused": self._bool_attribute(element, "AXFocused"),
+            "selected": self._bool_attribute(element, "AXSelected"),
+            "checked": checked,
+            "protected": protected,
+            "ancestry": self._ax_ancestry(element),
+        }
+
+    def _remember(self, described: Mapping[str, object], element) -> Mapping[str, object]:
+        """Keep the live AX handle so refresh() can re-read without a scan."""
+        handles = getattr(self, "_ax_handles", None)
+        if handles is None:
+            handles = self._ax_handles = {}
+        identity = described.get("_identity")
+        if isinstance(identity, Mapping):
+            key = tuple(sorted((str(k), str(v)) for k, v in identity.items()))
+            handles[key] = element
+            # The recorder only ever refreshes a recent target; keeping the
+            # map small avoids retaining handles for a whole session.
+            if len(handles) > 64:
+                for stale in list(handles)[:-64]:
+                    handles.pop(stale, None)
+        return described
+
+    def _handle_for(self, target: Mapping[str, object]):
+        handles = getattr(self, "_ax_handles", None)
+        identity = target.get("_identity")
+        if not handles or not isinstance(identity, Mapping):
+            return None
+        key = tuple(sorted((str(k), str(v)) for k, v in identity.items()))
+        return handles.get(key)
+
+    # ── Fallback tree walk ────────────────────────────────────────────────
+
     def _controls(self) -> list[Mapping[str, Any]]:
         result = self._backend.dump_tree(max_depth=12)
         if not result.get("ok"):
@@ -287,6 +473,23 @@ class MacOSAXResolver:
         return [item for item in result.get("controls", []) if isinstance(item, Mapping)]
 
     def element_at(self, x: int, y: int) -> Mapping[str, object] | None:
+        system_wide = self._system_wide()
+        if system_wide is not None:
+            module = self._ax()
+            try:
+                error, element = module.AXUIElementCopyElementAtPosition(
+                    system_wide, float(x), float(y), None,
+                )
+            except Exception:
+                error, element = 1, None
+            if error == 0 and element is not None:
+                control = self._ax_control(element)
+                if control is not None:
+                    return self._remember(self._describe(control), element)
+            # A hit test that legitimately lands on no element (empty desktop)
+            # is not a reason to pay for a whole tree walk.
+            if error == 0:
+                return None
         hits = []
         for control in self._controls():
             rect = self._rectangle(control)
@@ -297,6 +500,13 @@ class MacOSAXResolver:
         return self._describe(min(hits, key=lambda item: item[0])[1])
 
     def refresh(self, target: Mapping[str, object]) -> Mapping[str, object]:
+        element = self._handle_for(target)
+        if element is not None:
+            control = self._ax_control(element)
+            if control is not None:
+                return self._remember(self._describe(control), element)
+            # The handle went stale (element destroyed); fall through to the
+            # scan rather than reporting a value that is no longer on screen.
         identity = target.get("_identity") or {}
         for control in self._controls():
             described = self._describe(control)
@@ -305,6 +515,13 @@ class MacOSAXResolver:
         return target
 
     def focused(self) -> Mapping[str, object] | None:
+        system_wide = self._system_wide()
+        if system_wide is not None:
+            element = self._attribute(system_wide, "AXFocusedUIElement")
+            if element is not None:
+                control = self._ax_control(element)
+                if control is not None:
+                    return self._remember(self._describe(control), element)
         for control in self._controls():
             if control.get("focused") is True:
                 return self._describe(control)
