@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
@@ -209,15 +211,200 @@ class TkRecordingIndicator:
             self._thread.join(timeout=5)
 
 
+class SubprocessTkIndicator:
+    """Run the Tk indicator in a child process that owns its main thread.
+
+    macOS Aqua Tk must run on the process main thread.  Driving
+    ``TkRecordingIndicator`` from a worker thread there wedges the whole
+    interpreter: ``start()`` never returns and the process stops responding to
+    SIGINT/SIGQUIT.  The recorder still has to show a visible indicator, so
+    rather than dropping the UI the same Tk code runs in a child process,
+    where it legitimately owns the main thread.  Commands go down as JSON
+    lines on stdin and button presses come back as JSON lines on stdout.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        scope: CaptureScope,
+        callbacks: IndicatorCallbacks,
+        *,
+        startup_timeout: float = 15.0,
+    ) -> None:
+        self.name = name
+        self.scope = scope
+        self.callbacks = callbacks
+        self._startup_timeout = startup_timeout
+        self._process: Any = None
+        self._reader: threading.Thread | None = None
+        self._ready = threading.Event()
+        self._startup_error: str | None = None
+
+    def _send(self, command: str, value: Any = None) -> None:
+        process = self._process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.stdin.write(json.dumps({"command": command, "value": value}) + "\n")
+            process.stdin.flush()
+        except (BrokenPipeError, ValueError):
+            # The child exited (user closed it, or it crashed).  The session
+            # owns recording state, so a dead indicator must not break it.
+            pass
+
+    def _consume(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        for line in process.stdout:
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if message.get("ready") is not None:
+                self._startup_error = message.get("error")
+                self._ready.set()
+                continue
+            callback = message.get("callback")
+            payload = message.get("payload")
+            if callback == "pause":
+                self.callbacks.pause()
+            elif callback == "resume":
+                self.callbacks.resume()
+            elif callback == "stop":
+                self.callbacks.stop()
+            elif callback == "add_assertion":
+                self.callbacks.add_assertion(payload or {})
+
+    def start(self) -> None:
+        import subprocess
+
+        env = dict(os.environ)
+        # The child imports this package; carry the parent's import roots so
+        # it works from a source checkout and from an installed package.
+        env["PYTHONPATH"] = os.pathsep.join(
+            path for path in sys.path if path
+        )
+        self._process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "from target.recording.indicator import _indicator_child_main;"
+                " _indicator_child_main()",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            env=env,
+            text=True,
+        )
+        self._reader = threading.Thread(
+            target=self._consume, name="edr-wd-indicator-reader", daemon=True,
+        )
+        self._reader.start()
+        self._process.stdin.write(json.dumps({
+            "name": self.name, "scope": self.scope.to_dict(),
+        }) + "\n")
+        self._process.stdin.flush()
+        if not self._ready.wait(timeout=self._startup_timeout):
+            self._terminate()
+            raise RecordingModelError(
+                "recording_indicator_unavailable",
+                "recording indicator startup timed out",
+            )
+        if self._startup_error:
+            self._terminate()
+            raise RecordingModelError(
+                "recording_indicator_unavailable", self._startup_error,
+            )
+
+    def _terminate(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except Exception:
+                process.kill()
+        self._process = None
+
+    def pause(self) -> None:
+        self._send("state", "paused")
+
+    def resume(self) -> None:
+        self._send("state", "recording")
+
+    def update_count(self, count: int) -> None:
+        self._send("count", count)
+
+    def open_assertion_editor(self, target: Mapping[str, Any] | None = None) -> None:
+        self._send("assert", dict(target or {}))
+
+    def stop(self) -> None:
+        self._send("stop", None)
+        process = self._process
+        if process is not None:
+            try:
+                process.wait(timeout=5)
+            except Exception:
+                pass
+        self._terminate()
+
+
+def _indicator_child_main() -> None:  # pragma: no cover - child process entry
+    """Child entry point: own the main thread and run the Tk indicator on it."""
+    config = json.loads(sys.stdin.readline())
+    scope = CaptureScope.from_dict(config["scope"])
+
+    def emit(kind: str, payload: Any = None) -> None:
+        sys.stdout.write(json.dumps({"callback": kind, "payload": payload}) + "\n")
+        sys.stdout.flush()
+
+    indicator = TkRecordingIndicator(
+        config["name"],
+        scope,
+        IndicatorCallbacks(
+            pause=lambda: emit("pause"),
+            resume=lambda: emit("resume"),
+            stop=lambda: emit("stop"),
+            add_assertion=lambda payload: emit("add_assertion", payload),
+        ),
+    )
+
+    def announce() -> None:
+        indicator._ready.wait()
+        error = indicator._startup_error
+        sys.stdout.write(json.dumps({
+            "ready": True, "error": None if error is None else str(error),
+        }) + "\n")
+        sys.stdout.flush()
+
+    def pump() -> None:
+        for line in sys.stdin:
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            indicator._commands.put((message.get("command"), message.get("value")))
+
+    threading.Thread(target=announce, daemon=True).start()
+    threading.Thread(target=pump, daemon=True).start()
+    # Tk owns this process's main thread, which is what macOS requires.
+    indicator._run()
+
+
 def tkinter_indicator_factory(
     name: str,
     scope: CaptureScope,
     callbacks: IndicatorCallbacks,
 ) -> RecordingIndicator:
+    if sys.platform == "darwin":
+        return SubprocessTkIndicator(name, scope, callbacks)
     return TkRecordingIndicator(name, scope, callbacks)
 
 
 __all__ = [
     "IndicatorCallbacks", "NullRecordingIndicator", "RecordingIndicator",
-    "TkRecordingIndicator", "tkinter_indicator_factory",
+    "SubprocessTkIndicator", "TkRecordingIndicator", "tkinter_indicator_factory",
 ]

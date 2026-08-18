@@ -95,9 +95,12 @@ class QueuedCaptureSource:
         driver: HookDriver,
         correlator: PacketCorrelator,
         queue_size: int = 2048,
+        stop_timeout: float = 30.0,
     ) -> None:
         if queue_size < 1:
             raise ValueError("queue_size must be positive")
+        if stop_timeout <= 0:
+            raise ValueError("stop_timeout must be positive")
         self.scope = scope
         self._sink = sink
         self._driver = driver
@@ -107,6 +110,7 @@ class QueuedCaptureSource:
         self._paused = threading.Event()
         self._stop_requested = threading.Event()
         self._started = False
+        self._stop_timeout = stop_timeout
         self._sequence = 0
         self.dropped_packets = 0
         self.correlation_errors: list[str] = []
@@ -243,7 +247,19 @@ class QueuedCaptureSource:
             pass
         if self._worker is not None:
             if self._worker is not threading.current_thread():
-                self._worker.join(timeout=5)
+                self._worker.join(timeout=self._stop_timeout)
                 if self._worker.is_alive():
-                    raise RuntimeError("recording correlator worker did not stop")
+                    # The worker is still inside a correlation call.  The
+                    # native driver is already stopped, so no further input
+                    # can be captured and the events collected so far are
+                    # intact.  Raising here would propagate out of
+                    # RecordingSession.stop() and discard the whole
+                    # recording, so record the truncation as a correlation
+                    # error instead: correlationErrorCount then keeps the
+                    # golden trace incomplete (P1.5a) rather than letting a
+                    # short capture look clean.
+                    self.correlation_errors.append(
+                        "correlator worker did not stop within "
+                        f"{self._stop_timeout:g}s; recording truncated"
+                    )
                 self._started = False
