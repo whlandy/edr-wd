@@ -770,3 +770,111 @@ def test_the_scope_only_grows_for_windows_an_action_actually_opened():
     assert correlator.correlate(_transition("opened", 300, title="弹窗"), SCOPE, 1) is None
     assert _record_click(correlator, resolver, "弹窗", 500) is None
     assert correlator.out_of_scope_events == 1
+
+
+def _wheel(monotonic_ms, delta=-120, point=(619, 520)):
+    return HookPacket(
+        kind="scroll",
+        monotonic_ms=monotonic_ms,
+        wall_time="2026-08-18T00:00:00.000Z",
+        screen_point=point,
+        native={"delta": delta},
+    )
+
+
+def _feed(correlator, packets, scope=SCOPE):
+    """Drive the correlator the way the queue worker does, tracking sequence."""
+    produced, sequence = [], 1
+    for packet in packets:
+        result = correlator.correlate(packet, scope, sequence)
+        events = result if isinstance(result, tuple) else () if result is None else (result,)
+        for event in events:
+            assert event.sequence == sequence, "correlator broke sequence contiguity"
+            produced.append(event)
+            sequence += 1
+    return produced, sequence
+
+
+def test_a_wheel_gesture_persists_nothing_until_it_ends():
+    """The step counter must not climb while one flick is still arriving."""
+    correlator = WindowsUIACorrelator(_Resolver())
+    produced, _ = _feed(correlator, [_wheel(100 + i * 16) for i in range(19)])
+    assert produced == []
+
+
+def test_the_gesture_is_recorded_once_when_the_next_input_arrives():
+    correlator = WindowsUIACorrelator(_Resolver())
+    packets = [_wheel(100 + i * 16, delta=-120) for i in range(19)]
+    packets.append(_packet("pointer_up", monotonic_ms=2000))
+
+    produced, _ = _feed(correlator, packets)
+
+    assert [e.type for e in produced] == ["scroll_commit", "pointer_click"]
+    scroll = produced[0]
+    assert scroll.input["delta"] == -120 * 19
+    assert scroll.input["notches"] == 19
+    assert scroll.input["screenPoint"] == [619, 520]
+
+
+def test_a_gesture_still_running_at_stop_is_flushed():
+    correlator = WindowsUIACorrelator(_Resolver())
+    _feed(correlator, [_wheel(100), _wheel(116)])
+
+    flushed = correlator.flush(SCOPE, 1)
+
+    events = flushed if isinstance(flushed, tuple) else (flushed,)
+    assert [e.type for e in events] == ["scroll_commit"]
+    assert events[0].input["notches"] == 2
+
+
+def test_reversing_direction_records_the_first_gesture_and_starts_another():
+    correlator = WindowsUIACorrelator(_Resolver())
+    produced, _ = _feed(correlator, [
+        _wheel(100, delta=-120), _wheel(116, delta=-120),
+        _wheel(132, delta=120), _wheel(148, delta=120),
+    ])
+    assert [e.input["delta"] for e in produced] == [-240]
+    flushed = correlator.flush(SCOPE, 3)
+    assert flushed.input["delta"] == 240
+
+
+def test_scrolling_elsewhere_records_the_first_gesture():
+    correlator = WindowsUIACorrelator(_Resolver())
+    produced, _ = _feed(correlator, [
+        _wheel(100, point=(619, 520)), _wheel(116, point=(619, 520)),
+        _wheel(132, point=(200, 100)),
+    ])
+    assert len(produced) == 1
+    assert produced[0].input["screenPoint"] == [619, 520]
+
+
+def test_a_long_pause_ends_the_gesture():
+    correlator = WindowsUIACorrelator(_Resolver(), )
+    produced, _ = _feed(correlator, [_wheel(100), _wheel(5000)])
+    assert len(produced) == 1
+    assert produced[0].input["notches"] == 1
+
+
+def test_content_moving_under_the_pointer_does_not_split_the_gesture():
+    """Hit testing returns a different row as the list scrolls; irrelevant."""
+    rows = [
+        {"controlType": "DataItem", "automationId": "", "text": f"日志 {i}",
+         "rect": [0, 0, 100, 20], "protected": False}
+        for i in range(4)
+    ]
+
+    class _Scrolling(_Resolver):
+        def __init__(self):
+            super().__init__()
+            self.index = 0
+
+        def element_at(self, x, y):
+            element = rows[min(self.index, len(rows) - 1)]
+            self.index += 1
+            return dict(element)
+
+    correlator = WindowsUIACorrelator(_Scrolling())
+    produced, _ = _feed(correlator, [_wheel(100 + i * 16) for i in range(4)])
+
+    assert produced == []
+    assert correlator.flush(SCOPE, 1).input["notches"] == 4

@@ -121,11 +121,16 @@ class QueuedCaptureSource:
         if not callable(flush):
             return
         try:
-            event = flush(self.scope, self._sequence + 1)
-            if event is not None and self._sink(event):
-                self._sequence = event.sequence
-                if event.observed_target is not None:
-                    self.last_observed_target = event.observed_target
+            flushed = flush(self.scope, self._sequence + 1)
+            events = (
+                flushed if isinstance(flushed, tuple)
+                else () if flushed is None else (flushed,)
+            )
+            for event in events:
+                if self._sink(event):
+                    self._sequence = event.sequence
+                    if event.observed_target is not None:
+                        self.last_observed_target = event.observed_target
         except Exception as exc:
             self.correlation_errors.append(str(exc))
 
