@@ -202,3 +202,48 @@ class AutomationBackend(Protocol):
         text: Optional[str] = None,
         class_name: Optional[str] = None,
     ) -> dict: ...
+
+
+def lock_criteria_mismatch(
+    state: dict,
+    title_re: Optional[str] = None,
+    process_name: Optional[str] = None,
+    pid: Optional[int] = None,
+) -> list[str]:
+    """Name the lock criteria the window in ``state`` does not satisfy.
+
+    ``lock_window`` selects nothing: it locks whichever window ``connect()``
+    already resolved.  Its ``title_re`` / ``process_name`` / ``pid`` arguments
+    therefore describe what the caller *believes* is connected, and a lock that
+    silently stores those beliefs next to a different window's handle sends
+    later pointer actions to the wrong application.  Backends call this to
+    refuse that lock instead of recording it.
+
+    Only criteria whose live counterpart is actually observable are compared —
+    an unknown process name or PID degrades to "cannot contradict", so RDP and
+    other degraded-observation paths keep working.
+    """
+    import re as _re
+
+    mismatch: list[str] = []
+    if title_re:
+        title = state.get("title")
+        if title is not None:
+            try:
+                if not _re.search(title_re, str(title), _re.IGNORECASE):
+                    mismatch.append("title_re")
+            except _re.error:
+                mismatch.append("title_re")
+    if process_name:
+        actual = state.get("process_name")
+        if actual:
+            normalized = str(actual).lower().removesuffix(".exe")
+            if normalized != str(process_name).lower().removesuffix(".exe"):
+                mismatch.append("process_name")
+    if pid is not None and state.get("pid") is not None:
+        try:
+            if int(state["pid"]) != int(pid):
+                mismatch.append("pid")
+        except (TypeError, ValueError):
+            mismatch.append("pid")
+    return mismatch

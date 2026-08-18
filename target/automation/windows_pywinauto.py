@@ -23,6 +23,8 @@ from typing import Optional, Any
 
 import pyautogui
 
+from .base import lock_criteria_mismatch
+
 # pywinauto_client is Windows-only and depends on pywinauto + psutil, which
 # are NOT installed on macOS targets. We import it lazily inside __init__
 # so that `from automation import create_backend; create_backend("macos_…")`
@@ -250,11 +252,35 @@ class WindowsPywinautoBackend:
             state = self._active_window_state()
         if not state.get("ok"):
             return state
+        mismatch = lock_criteria_mismatch(state, title_re, process_name, pid)
+        if mismatch:
+            return {
+                "ok": False,
+                "code": "window_lock_criteria_mismatch",
+                "error": (
+                    "the connected window does not match the requested lock "
+                    "criteria; connect the intended window first"
+                ),
+                "mismatch": mismatch,
+                "requested": {
+                    "title_re": title_re,
+                    "process_name": process_name,
+                    "pid": pid,
+                },
+                "actual": {
+                    "title": state.get("title"),
+                    "process_name": state.get("process_name"),
+                    "pid": state.get("pid"),
+                    "handle": state.get("handle"),
+                },
+            }
+        # Identity always describes the window actually locked; caller
+        # arguments only fill gaps the live observation could not supply.
         lock = {
             "backend": "windows_pywinauto",
             "title_re": title_re or (re.escape(state.get("title") or "") if state.get("title") else None),
-            "process_name": process_name or state.get("process_name"),
-            "pid": pid if pid is not None else state.get("pid"),
+            "process_name": state.get("process_name") or process_name,
+            "pid": state.get("pid") if state.get("pid") is not None else pid,
             "handle": state.get("handle"),
             "strict": bool(strict),
             "snapshot": state,
@@ -813,15 +839,77 @@ class WindowsPywinautoBackend:
         timeout: float = 10.0,
         auto_activate: bool = False,
     ) -> dict:
+        process = process_name or app_name
+        given = [
+            name for name, value in (
+                ("title_re", title_re), ("process_name", process), ("pid", pid),
+            ) if value not in (None, "")
+        ]
+        if not given:
+            return {"ok": False, "error": "Must specify title_re, process_name, pid, or app_name"}
+        if len(given) > 1:
+            # Every supplied criterion must hold.  Dispatching on the first one
+            # and ignoring the rest silently connects to a same-titled window
+            # of a different process, which later shows up as a window lock
+            # whose recorded identity contradicts its handle.
+            return self._connect_matching_all(title_re, process, pid, timeout)
         if title_re:
             return self._gui.connect_by_title(title_re, timeout)
-        if process_name:
-            return self._gui.connect_by_process(process_name, timeout)
-        if pid:
-            return self._gui.connect_by_pid(pid)
-        if app_name:
-            return self._gui.connect_by_process(app_name, timeout)
-        return {"ok": False, "error": "Must specify title_re, process_name, pid, or app_name"}
+        if process:
+            return self._gui.connect_by_process(process, timeout)
+        return self._gui.connect_by_pid(pid)
+
+    def _connect_matching_all(
+        self,
+        title_re: Optional[str],
+        process_name: Optional[str],
+        pid: Optional[int],
+        timeout: float,
+    ) -> dict:
+        """Connect to the one window satisfying every supplied criterion."""
+        found = self._gui.is_window_open(title_re, process_name, None)
+        if not found.get("ok"):
+            return found
+        candidates = [
+            window for window in found.get("windows", [])
+            if pid is None or window.get("process_id") == pid
+        ]
+        criteria = {"title_re": title_re, "process_name": process_name, "pid": pid}
+        if not candidates:
+            return {
+                "ok": False,
+                "code": "connect_target_not_found",
+                "error": "no window satisfies every connect criterion",
+                "criteria": criteria,
+            }
+        if len(candidates) > 1:
+            return {
+                "ok": False,
+                "code": "connect_target_ambiguous",
+                "error": "several windows satisfy every connect criterion",
+                "criteria": criteria,
+                "candidates": [
+                    {
+                        "title": window.get("title"),
+                        "pid": window.get("process_id"),
+                        "handle": window.get("handle"),
+                    }
+                    for window in candidates
+                ],
+            }
+        window = candidates[0]
+        target_pid, handle = window.get("process_id"), window.get("handle")
+        if target_pid is None:
+            return {
+                "ok": False,
+                "code": "connect_target_not_found",
+                "error": "the matching window has no owning process id",
+                "criteria": criteria,
+            }
+        connect_by_window = getattr(self._gui, "connect_by_window", None)
+        if callable(connect_by_window) and handle is not None:
+            return connect_by_window(handle, target_pid, timeout)
+        return self._gui.connect_by_pid(target_pid)
 
     def dump_tree(self, window_title_re: Optional[str] = None, max_depth: int = 10) -> dict:
         return self._gui.dump_tree(window_title_re, max_depth=max_depth)  # type: ignore[arg-type]

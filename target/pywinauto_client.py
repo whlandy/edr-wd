@@ -169,6 +169,32 @@ class WindowsGUI:
             logger.exception("connect_by_process failed")
             return {"ok": False, "error": str(e)}
 
+    def connect_by_window(self, handle: int, pid: int, timeout: float = 10.0) -> dict:
+        """Connect to one specific top-level window by handle.
+
+        `connect_by_pid` binds `top_window()`, which is the wrong window
+        whenever the process owns several. Callers that already resolved an
+        exact window must keep that resolution.
+        """
+        try:
+            self.app = Application(backend=self.backend).connect(process=pid, timeout=timeout)
+            for win in self._desktop_windows_for_pid(pid):
+                if self._wrapper_handle(win) == handle:
+                    self.main_window = win
+                    return {
+                        "ok": True,
+                        "pid": pid,
+                        "handle": handle,
+                        "title": win.window_text(),
+                    }
+            return {
+                "ok": False,
+                "error": f"window handle {handle} is no longer present for pid {pid}",
+            }
+        except Exception as e:
+            logger.exception("connect_by_window failed")
+            return {"ok": False, "error": str(e)}
+
     def connect_by_pid(self, pid: int) -> dict:
         """通过 PID 连接"""
         try:

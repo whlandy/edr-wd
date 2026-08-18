@@ -268,5 +268,74 @@ class TestLockRecordsHandle:
         assert out["lock"]["strict"] is True
 
 
+# ── lock_window validates the caller's criteria ──────────────────────────────
+
+
+def _lockable_backend(state):
+    impl = WindowsPywinautoBackend.__new__(WindowsPywinautoBackend)
+    impl._connected_window_state = lambda: state
+    impl._activate_locked_window = lambda: {"ok": True, "method": "test"}
+    impl.verify_window_lock = lambda activate=True: {"ok": True}
+    impl._window_lock = None
+    return impl
+
+
+class TestLockCriteriaAreValidated:
+    """Two same-titled Qt windows must never produce a mislabelled lock."""
+
+    def test_locking_a_different_process_than_requested_is_refused(self):
+        # connect() resolved HiSecEndpointAgent; the caller believes EDRClient.
+        impl = _lockable_backend(
+            _win32_foreground(title="logo1", pid=6960,
+                              process_name="HiSecEndpointAgent.exe")
+        )
+
+        out = impl.lock_window(title_re="^logo1$", process_name="EDRClient.exe")
+
+        assert out["ok"] is False
+        assert out["code"] == "window_lock_criteria_mismatch"
+        assert out["mismatch"] == ["process_name"]
+        assert out["actual"]["process_name"] == "HiSecEndpointAgent.exe"
+        assert impl._window_lock is None
+
+    def test_locking_a_different_pid_than_requested_is_refused(self):
+        impl = _lockable_backend(_win32_foreground(pid=6960))
+        out = impl.lock_window(pid=5948)
+        assert out["ok"] is False and out["mismatch"] == ["pid"]
+
+    def test_locking_a_non_matching_title_is_refused(self):
+        impl = _lockable_backend(_win32_foreground(title="logo1"))
+        out = impl.lock_window(title_re="^安全防护中心$")
+        assert out["ok"] is False and out["mismatch"] == ["title_re"]
+
+    def test_matching_criteria_lock_and_record_the_live_identity(self):
+        impl = _lockable_backend(_win32_foreground(title="logo1", pid=5948))
+        out = impl.lock_window(title_re="^logo1$", process_name="EDRClient.exe", pid=5948)
+        assert out["ok"] is True
+        assert out["lock"]["pid"] == 5948
+        assert out["lock"]["process_name"] == "EDRClient.exe"
+        assert out["lock"]["handle"] == 1001
+
+    def test_identity_comes_from_the_window_not_the_caller(self):
+        """Even without contradiction, the lock must describe what it holds."""
+        impl = _lockable_backend(
+            _win32_foreground(pid=5948, process_name="EDRClient.exe")
+        )
+        out = impl.lock_window(process_name="edrclient")
+        assert out["ok"] is True
+        assert out["lock"]["process_name"] == "EDRClient.exe"
+
+    def test_unobservable_identity_cannot_contradict_the_request(self):
+        """RDP-degraded states omit process/pid; locking must still work."""
+        state = _win32_foreground()
+        state["process_name"] = None
+        state["pid"] = None
+        impl = _lockable_backend(state)
+        out = impl.lock_window(process_name="EDRClient.exe", pid=5948)
+        assert out["ok"] is True
+        assert out["lock"]["process_name"] == "EDRClient.exe"
+        assert out["lock"]["pid"] == 5948
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])

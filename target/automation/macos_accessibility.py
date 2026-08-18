@@ -45,6 +45,8 @@ from typing import Optional, Any
 
 import pyautogui
 
+from .base import lock_criteria_mismatch
+
 try:
     from artifacts import screenshot_path
 except ImportError:
@@ -284,11 +286,34 @@ class MacOSAccessibilityBackend:
             state = self._frontmost_window_state()
         if not state.get("ok"):
             return state
+        mismatch = lock_criteria_mismatch(state, title_re, process_name, pid)
+        if mismatch:
+            return {
+                "ok": False,
+                "code": "window_lock_criteria_mismatch",
+                "error": (
+                    "the connected window does not match the requested lock "
+                    "criteria; connect the intended window first"
+                ),
+                "mismatch": mismatch,
+                "requested": {
+                    "title_re": title_re,
+                    "process_name": process_name,
+                    "pid": pid,
+                },
+                "actual": {
+                    "title": state.get("title"),
+                    "process_name": state.get("process_name"),
+                    "pid": state.get("pid"),
+                },
+            }
+        # Identity always describes the window actually locked; caller
+        # arguments only fill gaps the live observation could not supply.
         lock = {
             "backend": self.backend,
             "title_re": title_re or (re.escape(state.get("title") or "") if state.get("title") else None),
-            "process_name": process_name or state.get("process_name"),
-            "pid": pid if pid is not None else state.get("pid"),
+            "process_name": state.get("process_name") or process_name,
+            "pid": state.get("pid") if state.get("pid") is not None else pid,
             "strict": bool(strict),
             "snapshot": state,
         }
