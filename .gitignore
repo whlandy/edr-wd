@@ -51,3 +51,6 @@ scripts/macos/
 
 # Local macOS helper build artifacts
 target/scripts/macos/click_security_center
+
+# Recording outputs: captures of a live target desktop, not source.
+recordings/
