@@ -944,3 +944,52 @@ def test_the_capture_source_seeds_the_scope_before_hooks_start():
         assert source.seeded_scope == ("日志中心",)
     finally:
         source.stop()
+
+
+class _BackendResolver(WindowsUIACorrelator):
+    pass
+
+
+def test_scope_seeding_reads_the_backend_window_list():
+    """The backend's enumeration is the one proven to work on a live target."""
+    from target.recording.windows import WindowsUIAResolver
+
+    class _Backend:
+        def list_windows(self):
+            return {"ok": True, "windows": [
+                {"title": "logo1", "process_id": 5948},
+                {"title": "日志中心", "process_id": 5948},
+            ]}
+
+    resolver = WindowsUIAResolver(_Backend())
+    listed = resolver.windows()
+
+    assert [w["title"] for w in listed] == ["logo1", "日志中心"]
+    assert all(w["pid"] == 5948 for w in listed)
+
+
+def test_a_failing_window_enumeration_is_reported_not_silently_empty():
+    """An empty seed with no reason is what dropped 41 of 42 live events."""
+    class _Failing:
+        def windows(self):
+            raise RuntimeError("UIA enumeration unavailable")
+
+    correlator = WindowsUIACorrelator(_Failing())
+
+    assert correlator.seed_scope(SCOPE) == ()
+    assert "UIA enumeration unavailable" in correlator.scope_seed_error
+
+
+def test_a_resolver_without_enumeration_says_so():
+    correlator = WindowsUIACorrelator(_Resolver())
+    assert correlator.seed_scope(SCOPE) == ()
+    assert correlator.scope_seed_error == "resolver cannot enumerate windows"
+
+
+def test_a_successful_seed_records_no_error():
+    resolver = _SeedResolver([
+        {"title": "日志中心", "pid": 42, "processName": "EDRClient.exe"},
+    ])
+    correlator = WindowsUIACorrelator(resolver)
+    assert correlator.seed_scope(SCOPE) == ("日志中心",)
+    assert correlator.scope_seed_error is None
