@@ -323,6 +323,26 @@ class WindowsUIAResolver:
             "_nativeElement": wrapper,
         }
 
+    def windows(self) -> list[Mapping[str, object]]:  # pragma: no cover - Windows only
+        """Top-level windows with their owning process, for scope seeding."""
+        from pywinauto import Desktop
+        import psutil
+
+        found: list[Mapping[str, object]] = []
+        for window in Desktop(backend="uia").windows():
+            try:
+                if not window.is_top_level() or not window.is_visible():
+                    continue
+                pid = int(window.process_id())
+                found.append({
+                    "title": window.window_text() or "",
+                    "pid": pid,
+                    "processName": psutil.Process(pid).name(),
+                })
+            except Exception:
+                continue
+        return found
+
     def element_at(self, x: int, y: int) -> Mapping[str, object] | None:  # pragma: no cover - Windows only
         from pywinauto import Desktop
 
@@ -629,6 +649,33 @@ class WindowsUIACorrelator:
             return None
         return produced[0] if len(produced) == 1 else produced
 
+    def seed_scope(self, scope: CaptureScope) -> tuple[str, ...]:
+        """Admit the application's already-open windows before capture starts.
+
+        Growth by causal transition only covers windows this recording opened.
+        A window that was already on screen when recording began never emits an
+        open event, so without seeding every click inside it is dropped — a
+        live capture lost 102 of 103 events exactly that way.
+        """
+        enumerate_windows = getattr(self._resolver, "windows", None)
+        if not callable(enumerate_windows):
+            return ()
+        try:
+            windows = enumerate_windows()
+        except Exception:
+            return ()
+        seeded = []
+        for window in windows or ():
+            if not isinstance(window, Mapping):
+                continue
+            if not self._process_matches(window.get("processName"), scope.process_name):
+                continue
+            title = window.get("title")
+            if isinstance(title, str) and title:
+                self._derived_scope_titles.add(title)
+                seeded.append(title)
+        return tuple(seeded)
+
     def _in_scope(self, foreground: Mapping[str, object], scope: CaptureScope) -> bool:
         """Is this foreground window part of the recording's scope?
 
@@ -716,6 +763,16 @@ class WindowsUIACorrelator:
         process_name = packet.native.get("processName")
         if not self._process_matches(process_name, scope.process_name):
             return None
+        # The scope follows the window either way. A window that opened on its
+        # own is not a recorded step — nothing the user did explains it — but
+        # they may well click inside it next, and dropping that input silently
+        # is how a recording ends up empty.
+        title = packet.native.get("title")
+        if isinstance(title, str) and title:
+            if kind == "opened":
+                self._derived_scope_titles.add(title)
+            else:
+                self._derived_scope_titles.discard(title)
         if self._last_action_causal_id is None or self._last_action_ms is None:
             return None
         latency_ms = packet.monotonic_ms - self._last_action_ms
@@ -728,13 +785,8 @@ class WindowsUIACorrelator:
             # observed, never on a fixed sleep.
             "timeoutSeconds": min(30.0, max(5.0, round(latency_ms * 3 / 1000, 1))),
         }
-        title = packet.native.get("title")
         if isinstance(title, str) and title:
             event_input["title"] = title
-            if kind == "opened":
-                self._derived_scope_titles.add(title)
-            else:
-                self._derived_scope_titles.discard(title)
         return RawCaptureEvent(
             sequence=sequence,
             wall_time=packet.wall_time,
