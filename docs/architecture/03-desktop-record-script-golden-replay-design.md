@@ -325,7 +325,17 @@ recorder 不会仅凭截图变化推断业务成功。`scroll_commit` 和 `drag_
 `compile_transition_unbound` incomplete step，不能静默删除。
 Windows adapter 通过 `SetWinEventHook` 订阅顶层窗口 show/destroy，macOS adapter 轮询
 `CGWindowListCopyWindowInfo`；两者都只按进程过滤（点击通常打开标题不同的对话框），并由
-correlator 绑定最近一次动作的 `causalId`。`timeoutSeconds` 由实测延迟推导（3 倍，钳制在
+correlator 绑定最近一次动作的 `causalId`。
+
+作用域随因果打开的窗口增长：录制开始时作用域是用户给的 `processName` + `windowTitle`
+正则，每当一次动作导致新窗口打开，该窗口标题加入作用域；窗口关闭时移出。没有这一条，
+"点击打开对话框"会被录下来，而用户随后在对话框里做的一切都被静默丢弃 —— 这正是
+`日志中心` 这类子窗口流程的常态。作用域只对**动作因果打开**的窗口增长，自行弹出的后台
+窗口不会放宽作用域。
+
+作用域外的输入是正常的（用户可能切到别的窗口看一眼），因此不构成 compile issue，但必须
+可计数：`captureDiagnostics.outOfScopeEvents` 记录被拒绝的输入数量，并出现在
+`compile-report.json` 的 `diagnostics` 中，避免把一次"大部分被丢弃"的录制误当作完整录制。`timeoutSeconds` 由实测延迟推导（3 倍，钳制在
 [5, 30] 秒），replay 因此不使用固定 sleep。没有近期动作可解释的窗口变化属于后台噪声，
 不进入录制。
 

@@ -382,6 +382,7 @@ class RawRecording:
     capture_diagnostics: Mapping[str, Any] = field(default_factory=lambda: {
         "droppedPackets": 0,
         "correlationErrorCount": 0,
+        "outOfScopeEvents": 0,
     })
     schema: str = RAW_RECORDING_SCHEMA
 
@@ -395,9 +396,11 @@ class RawRecording:
         _text(self.name, "recording.name")
         diagnostics = _strict(
             self.capture_diagnostics,
-            {"droppedPackets", "correlationErrorCount"},
+            {"droppedPackets", "correlationErrorCount", "outOfScopeEvents"},
             "recording.captureDiagnostics",
         )
+        # outOfScopeEvents post-dates the first recordings; a document written
+        # without it is still valid and reads as zero.
         missing_diagnostics = {
             "droppedPackets", "correlationErrorCount",
         } - set(diagnostics)

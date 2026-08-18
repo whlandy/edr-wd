@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from dataclasses import dataclass, replace
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from target.recording.models import (
     VERIFIER_REQUIRED_EVENT_TYPES,
@@ -53,6 +54,10 @@ class CompilationResult:
     case: RecordedTestCase
     golden: GoldenTrace
     issues: tuple[CompileIssue, ...]
+    #: Capture counts that do not by themselves invalidate a recording but
+    #: explain a short one.  Out-of-scope input is normal (the user may switch
+    #: windows), so it is reported rather than turned into a compile issue.
+    diagnostics: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
     def case_json(self) -> str:
         return canonical_json(self.case.to_dict())
@@ -61,7 +66,11 @@ class CompilationResult:
         return canonical_json(self.golden.to_dict())
 
     def report_dict(self) -> dict[str, Any]:
-        return {"status": self.golden.status, "issues": [x.to_dict() for x in self.issues]}
+        return {
+            "status": self.golden.status,
+            "issues": [x.to_dict() for x in self.issues],
+            "diagnostics": dict(self.diagnostics),
+        }
 
 
 def _same_target(left: RawCaptureEvent, right: RawCaptureEvent) -> bool:
@@ -408,4 +417,6 @@ def compile_recording(
         environment=environment,
         steps=tuple(steps), status=status,
     )
-    return CompilationResult(case, golden, tuple(issues))
+    out_of_scope = recording.capture_diagnostics.get("outOfScopeEvents", 0)
+    diagnostics = {"outOfScopeEvents": int(out_of_scope or 0)}
+    return CompilationResult(case, golden, tuple(issues), diagnostics)

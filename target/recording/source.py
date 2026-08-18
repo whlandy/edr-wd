@@ -129,6 +129,11 @@ class QueuedCaptureSource:
         except Exception as exc:
             self.correlation_errors.append(str(exc))
 
+    @property
+    def out_of_scope_events(self) -> int:
+        """Input the correlator saw but refused as outside the capture scope."""
+        return int(getattr(self._correlator, "out_of_scope_events", 0))
+
     def current_observed_target(self):
         """Return the control currently under the pointer when supported.
 

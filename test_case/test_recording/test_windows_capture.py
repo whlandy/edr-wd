@@ -240,6 +240,7 @@ def test_queue_overflow_is_persisted_in_raw_capture_diagnostics():
     assert recording.capture_diagnostics == {
         "droppedPackets": 1,
         "correlationErrorCount": 0,
+        "outOfScopeEvents": 0,
     }
 
 
@@ -686,3 +687,86 @@ def test_composite_driver_stops_every_driver_even_after_a_failure():
         composite.stop()
 
     assert healthy.stopped is True and raising.stopped is True
+
+
+def _log_center_resolver():
+    """Foreground reports whichever window the caller last selected."""
+
+    class _Switching(_Resolver):
+        def __init__(self):
+            super().__init__()
+            self.window_title = "EDRClient"
+
+        def foreground(self):
+            return {
+                "processName": self.process,
+                "windowTitle": self.window_title,
+                "pid": 42,
+            }
+
+    return _Switching()
+
+
+def _record_click(correlator, resolver, title, ms):
+    resolver.window_title = title
+    return correlator.correlate(_packet(monotonic_ms=ms), SCOPE, 1)
+
+
+def test_input_in_a_window_the_recording_opened_stays_in_scope():
+    """A click that opens a dialog must not orphan everything done inside it."""
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    opening_click = _record_click(correlator, resolver, "EDRClient", 100)
+    transition = correlator.correlate(_transition("opened", 300, title="日志中心"), SCOPE, 2)
+    inside = _record_click(correlator, resolver, "日志中心", 500)
+
+    assert opening_click.type == "pointer_click"
+    assert transition.causal_id == opening_click.causal_id
+    assert inside is not None
+    assert inside.type == "pointer_click"
+    assert correlator.out_of_scope_events == 0
+
+
+def test_a_window_closing_removes_it_from_the_derived_scope_again():
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    _record_click(correlator, resolver, "EDRClient", 100)
+    correlator.correlate(_transition("opened", 300, title="日志中心"), SCOPE, 2)
+    assert _record_click(correlator, resolver, "日志中心", 500) is not None
+
+    _record_click(correlator, resolver, "EDRClient", 700)
+    correlator.correlate(_transition("closed", 900, title="日志中心"), SCOPE, 4)
+
+    assert _record_click(correlator, resolver, "日志中心", 1100) is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_an_unrelated_window_of_the_same_process_stays_out_of_scope():
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    assert _record_click(correlator, resolver, "关于", 100) is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_out_of_scope_input_is_counted_rather_than_silently_dropped():
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    for index in range(3):
+        _record_click(correlator, resolver, "另一个窗口", 100 + index)
+
+    assert correlator.out_of_scope_events == 3
+
+
+def test_the_scope_only_grows_for_windows_an_action_actually_opened():
+    """A background window opening on its own must not widen the scope."""
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    # No preceding action, so the transition is not recorded at all.
+    assert correlator.correlate(_transition("opened", 300, title="弹窗"), SCOPE, 1) is None
+    assert _record_click(correlator, resolver, "弹窗", 500) is None
+    assert correlator.out_of_scope_events == 1
