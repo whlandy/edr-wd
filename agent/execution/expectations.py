@@ -332,6 +332,68 @@ def evaluate_control_text_contains(
                    diagnostic="text not contained")
 
 
+class _ReplayClock:
+    """The clock a time expectation is rendered against.
+
+    A recorded assertion about "today" must mean the day the replay runs, not
+    the day the recording was made, so the pattern is rendered here rather than
+    frozen into the golden trace.  Tests substitute a fixed clock; nothing else
+    should.
+    """
+
+    _now: Callable[[], "datetime"] | None = None
+
+    @classmethod
+    def set(cls, now: Callable[[], "datetime"] | None) -> None:
+        cls._now = now
+
+    @classmethod
+    def now(cls) -> "datetime":
+        from datetime import datetime
+
+        return cls._now() if cls._now is not None else datetime.now()
+
+
+def render_time_pattern(pattern: str, now: "datetime | None" = None) -> str:
+    """Render a strftime pattern against the replay-time clock."""
+    moment = now if now is not None else _ReplayClock.now()
+    return moment.strftime(pattern)
+
+
+def evaluate_control_text_contains_time(
+    step: Any, expectation: Any, observation: Any, action_receipt: ActionReceipt | None,
+) -> ExpectationResult:
+    """Assert a control shows the time *now*, not the time it was recorded.
+
+    `expectation.value` is {"match": {...}, "pattern": "<strftime>"}.  The
+    pattern is rendered when this runs, so a log view recorded showing
+    2026-08-18 still passes on any later day.
+    """
+    raw = expectation.value
+    if not isinstance(raw, dict):
+        return _failed("control_text_contains_time", raw, None, _observation_id(observation),
+                       0, diagnostic="value must be {match, pattern}")
+    pattern = raw.get("pattern")
+    if not isinstance(pattern, str) or not pattern:
+        return _failed("control_text_contains_time", pattern, None,
+                       _observation_id(observation), 0,
+                       diagnostic="pattern must be a non-empty strftime string")
+    try:
+        expected = render_time_pattern(pattern)
+    except (ValueError, TypeError) as exc:
+        return _failed("control_text_contains_time", pattern, None,
+                       _observation_id(observation), 0,
+                       diagnostic=f"invalid strftime pattern: {exc}")
+    control = _find_control(observation, raw.get("match"))
+    actual = _control_text(control)
+    if expected in actual:
+        return _passed("control_text_contains_time", expected, actual,
+                       _observation_id(observation), 0)
+    return _failed("control_text_contains_time", expected, actual,
+                   _observation_id(observation), 0,
+                   diagnostic=f"rendered pattern {pattern!r} not contained")
+
+
 def _evaluate_control_property(expectation_type, property_name, expectation, observation):
     raw = expectation.value
     if not isinstance(raw, dict) or "expected" not in raw:
@@ -491,6 +553,7 @@ EXPECTATION_REGISTRY: dict[str, Callable[..., ExpectationResult]] = {
     "control_checked_equals": evaluate_control_checked_equals,
     "control_enabled_equals": evaluate_control_enabled_equals,
     "window_text_contains": evaluate_window_text_contains,
+    "control_text_contains_time": evaluate_control_text_contains_time,
     "visual_evidence_captured": evaluate_visual_evidence_captured,
 }
 
@@ -515,6 +578,8 @@ __all__ = [
     "EVALUATORS_NOT_AVAILABLE",
     "ExpectationNotAvailable",
     "evaluate_action_ok",
+    "evaluate_control_text_contains_time",
+    "render_time_pattern",
     "evaluate_window_open",
     "evaluate_window_closed",
     "evaluate_active_window_owner",

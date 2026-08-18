@@ -135,6 +135,10 @@ class TkRecordingIndicator:
         dialog = self._tk.Toplevel(self._root)
         dialog.title("Add explicit assertion")
         dialog.attributes("-topmost", True)
+        # assertion accepts: text_equals / text_contains / text_contains_time /
+        # value_equals / visible / checked / enabled / window_open.
+        # text_contains_time takes a strftime pattern (e.g. %Y-%m-%d) which is
+        # rendered at replay time, not the timestamp visible while recording.
         fields = [
             ("assertion", "text_equals"), ("expected", ""),
             ("timeoutSeconds", "10"),

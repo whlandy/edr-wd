@@ -125,7 +125,7 @@ def _validate_assertion(value: Mapping[str, Any]) -> None:
     kind = data.get("type")
     if kind not in {
         "text_equals", "text_contains", "value_equals", "visible", "checked",
-        "enabled", "window_open",
+        "enabled", "window_open", "text_contains_time",
     }:
         raise RecordingModelError(
             "recording_assertion_invalid", f"unsupported assertion {kind!r}",
@@ -137,6 +137,15 @@ def _validate_assertion(value: Mapping[str, Any]) -> None:
             path="event.assertion.expected",
         )
     expected = data["expected"]
+    if kind == "text_contains_time":
+        # `expected` is a strftime pattern, rendered at replay time rather than
+        # the literal timestamp the recorder happened to see.
+        if not isinstance(expected, str) or not expected:
+            raise RecordingModelError(
+                "recording_assertion_invalid",
+                "text_contains_time expected must be a non-empty strftime pattern",
+                path="event.assertion.expected",
+            )
     if kind in {"text_equals", "text_contains", "value_equals"} and not isinstance(expected, str):
         raise RecordingModelError("recording_assertion_invalid", f"{kind} expected must be a string", path="event.assertion.expected")
     if kind in {"visible", "checked", "enabled"} and not isinstance(expected, bool):

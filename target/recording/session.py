@@ -244,14 +244,29 @@ class RecordingSession:
         assertion_type = payload.get("assertion")
         if assertion_type not in {
             "text_equals", "text_contains", "value_equals", "visible",
-            "checked", "enabled", "window_open",
+            "checked", "enabled", "window_open", "text_contains_time",
         }:
             raise RecordingModelError(
                 "recording_assertion_invalid", f"unsupported assertion {assertion_type!r}",
                 path="assertion.assertion",
             )
         expected_value = payload["expected"]
-        if assertion_type in {"text_equals", "text_contains", "value_equals"}:
+        if assertion_type == "text_contains_time":
+            if not isinstance(expected_value, str) or not expected_value:
+                raise RecordingModelError(
+                    "recording_assertion_invalid",
+                    "text_contains_time expected must be a non-empty strftime pattern",
+                    path="assertion.expected",
+                )
+            try:
+                datetime.now().strftime(expected_value)
+            except (ValueError, TypeError) as exc:
+                raise RecordingModelError(
+                    "recording_assertion_invalid",
+                    f"invalid strftime pattern: {exc}",
+                    path="assertion.expected",
+                ) from exc
+        elif assertion_type in {"text_equals", "text_contains", "value_equals"}:
             if not isinstance(expected_value, str):
                 raise RecordingModelError(
                     "recording_assertion_invalid",

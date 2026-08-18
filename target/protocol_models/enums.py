@@ -25,6 +25,9 @@ EXPECTATION_CONTROL_VALUE_EQUALS    = "control_value_equals"
 EXPECTATION_CONTROL_CHECKED_EQUALS  = "control_checked_equals"
 EXPECTATION_CONTROL_ENABLED_EQUALS  = "control_enabled_equals"
 EXPECTATION_WINDOW_TEXT_CONTAINS    = "window_text_contains"
+#: Compares control text against a strftime pattern rendered when the
+#: expectation is evaluated, so a recorded "today" means the replay's today.
+EXPECTATION_CONTROL_TEXT_CONTAINS_TIME = "control_text_contains_time"
 EXPECTATION_VISUAL_EVIDENCE_CAPTURED = "visual_evidence_captured"
 
 VALID_EXPECTATION_TYPES: frozenset[str] = frozenset({
@@ -40,6 +43,7 @@ VALID_EXPECTATION_TYPES: frozenset[str] = frozenset({
     EXPECTATION_CONTROL_CHECKED_EQUALS,
     EXPECTATION_CONTROL_ENABLED_EQUALS,
     EXPECTATION_WINDOW_TEXT_CONTAINS,
+    EXPECTATION_CONTROL_TEXT_CONTAINS_TIME,
     EXPECTATION_VISUAL_EVIDENCE_CAPTURED,
 })
 
@@ -158,6 +162,7 @@ __all__ = [
     "EXPECTATION_CONTROL_ENABLED_EQUALS",
     "EXPECTATION_WINDOW_TEXT_CONTAINS",
     "EXPECTATION_VISUAL_EVIDENCE_CAPTURED",
+    "EXPECTATION_CONTROL_TEXT_CONTAINS_TIME",
     "VALID_EXPECTATION_TYPES",
     # on_error policy
     "ON_ERROR_ABORT",
