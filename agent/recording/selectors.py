@@ -72,7 +72,10 @@ def _anchor(point: Any, rect: Any) -> dict[str, Any] | None:
 def synthesize_selector(event: RawCaptureEvent) -> ReplaySelector | None:
     target = event.observed_target
     window = _window(event)
-    if target is None and event.type == "assertion" and (event.assertion or {}).get("type") == "window_open":
+    if target is None and event.type == "assertion" and (event.assertion or {}).get("type") in {
+        "window_open", "window_text_contains", "window_text_contains_time",
+    }:
+        # Window-scoped assertions carry no control, by design.
         return ReplaySelector(window=window, control={})
     if target is None:
         return None

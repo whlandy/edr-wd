@@ -46,6 +46,7 @@ from .enums import (
     EXPECTATION_WINDOW_CLOSED,
     EXPECTATION_WINDOW_OPEN,
     EXPECTATION_WINDOW_TEXT_CONTAINS,
+    EXPECTATION_WINDOW_TEXT_CONTAINS_TIME,
     VALID_EXPECTATION_TYPES,
 )
 from .models import ProtocolModelError
@@ -129,6 +130,14 @@ _EXPECTATION_TYPE_REGISTRY_RAW: dict[str, ExpectationTypeSpec] = {
     EXPECTATION_WINDOW_TEXT_CONTAINS: ExpectationTypeSpec(
         type=EXPECTATION_WINDOW_TEXT_CONTAINS,
         description="Observed window/tree text contains the value.",
+        required_fields=("value",),
+    ),
+    EXPECTATION_WINDOW_TEXT_CONTAINS_TIME: ExpectationTypeSpec(
+        type=EXPECTATION_WINDOW_TEXT_CONTAINS_TIME,
+        description=(
+            "Window or tree text contains a strftime pattern rendered at "
+            "evaluation time. Needs no control identity."
+        ),
         required_fields=("value",),
     ),
     EXPECTATION_VISUAL_EVIDENCE_CAPTURED: ExpectationTypeSpec(

@@ -263,6 +263,17 @@ def _verifier_expectation(step: RecordedStep, verifier: Mapping[str, Any]) -> Ex
             value=match,
             timeout_seconds=timeout,
         )
+    if kind in {"window_text_contains", "window_text_contains_time"}:
+        # No control identity: the pattern or literal need only appear
+        # somewhere in the window.
+        return Expectation(
+            type=(
+                "window_text_contains_time"
+                if kind == "window_text_contains_time" else "window_text_contains"
+            ),
+            value=expected,
+            timeout_seconds=timeout,
+        )
     if kind == "text_contains_time":
         # The golden trace stores the pattern, never the timestamp the recorder
         # observed; the evaluator renders it against the replay's own clock.

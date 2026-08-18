@@ -312,11 +312,12 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
                         "control_enabled_equals",
                         "window_text_contains",
                         "control_text_contains_time",
+                        "window_text_contains_time",
                         "visual_evidence_captured",
                     ],
                     "description": (
                         "Mirrors the P1.2 / P1.4 expectation "
-                        "registry (14 types)."
+                        "registry (15 types)."
                     ),
                 },
                 "value": {

@@ -70,6 +70,7 @@ def test_registry_has_every_documented_evaluator():
         "control_enabled_equals",
         "window_text_contains",
         "control_text_contains_time",
+        "window_text_contains_time",
         "visual_evidence_captured",
     }
     assert set(EXPECTATION_REGISTRY.keys()) == expected

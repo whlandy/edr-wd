@@ -42,19 +42,24 @@ def _validate_verifier(value: Mapping[str, Any], path: str) -> None:
     if kind not in {
         "text_equals", "text_contains", "value_equals", "visible", "checked",
         "enabled", "window_open", "text_contains_time",
+        "window_text_contains", "window_text_contains_time",
     }:
         raise RecordingModelError(
             "golden_verifier_unsupported", f"unsupported verifier {kind!r}",
             path=f"{path}.type",
         )
     expected = data["expected"]
-    if kind == "text_contains_time" and (not isinstance(expected, str) or not expected):
+    if kind in {"text_contains_time", "window_text_contains_time"} and (
+        not isinstance(expected, str) or not expected
+    ):
         raise RecordingModelError(
             "type_error",
-            "text_contains_time expected must be a non-empty strftime pattern",
+            f"{kind} expected must be a non-empty strftime pattern",
             path=f"{path}.expected",
         )
-    if kind in {"text_equals", "text_contains", "value_equals"} and not isinstance(expected, str):
+    if kind in {
+        "text_equals", "text_contains", "value_equals", "window_text_contains",
+    } and not isinstance(expected, str):
         raise RecordingModelError("type_error", f"{kind} expected must be a string", path=f"{path}.expected")
     if kind in {"visible", "checked", "enabled"} and not isinstance(expected, bool):
         raise RecordingModelError("type_error", f"{kind} expected must be boolean", path=f"{path}.expected")

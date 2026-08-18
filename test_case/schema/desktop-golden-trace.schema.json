@@ -254,7 +254,9 @@
             "checked",
             "enabled",
             "window_open",
-            "text_contains_time"
+            "text_contains_time",
+            "window_text_contains",
+            "window_text_contains_time"
           ]
         },
         "expected": {},
