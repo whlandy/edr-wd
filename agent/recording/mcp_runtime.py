@@ -54,6 +54,33 @@ class MCPObservationProvider:
         self._trace_store = trace_store
         self._capture_screenshot = capture_screenshot
 
+    def focus_window(self, process_name: str, title_regex: str) -> str:
+        """Connect and lock a specific window, then observe it.
+
+        A recorded flow moves between an application's windows. Observation is
+        one window's control tree, so replaying a step that happened in another
+        window requires focusing that window first — otherwise its controls are
+        simply not in the observation and the step resolves to nothing.
+        """
+        connected = self._agent.call_tool("connect", {
+            "process_name": process_name, "title_re": title_regex, "timeout": 10.0,
+        }, timeout=self._timeout)
+        if not isinstance(connected, Mapping) or not connected.get("ok"):
+            raise BackendUnavailable(
+                (connected.get("error") if isinstance(connected, Mapping) else None)
+                or f"cannot connect the window {title_regex!r}"
+            )
+        locked = self._agent.call_tool("lock_window", {
+            "process_name": process_name, "title_re": title_regex,
+            "strict": True, "activate": True,
+        }, timeout=self._timeout)
+        if not isinstance(locked, Mapping) or not locked.get("ok"):
+            raise BackendUnavailable(
+                (locked.get("error") if isinstance(locked, Mapping) else None)
+                or f"cannot lock the window {title_regex!r}"
+            )
+        return self.refresh()
+
     def refresh(self) -> str:
         verified = self._agent.call_tool("verify_window_lock", {"activate": False}, timeout=self._timeout)
         if not isinstance(verified, Mapping) or not verified.get("ok"):

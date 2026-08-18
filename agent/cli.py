@@ -943,6 +943,9 @@ def main(argv: list[str] | None = None) -> int:
                 replay_mode=args.replay_mode,
                 visual_resolver=visual_resolver,
                 persist_replay_screenshots=args.persist_screenshots,
+                window_focus=lambda process_name, title_regex: observations.get_snapshot(
+                    observations.focus_window(process_name, title_regex)
+                ),
             ),
             golden,
         )

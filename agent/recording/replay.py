@@ -8,7 +8,7 @@ import re
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from agent.execution import AtomicExecutor, CaseRunResult, StepMaterializationError, StepStatus
 from agent.execution.confirmation import ExecutionContext
@@ -390,6 +390,7 @@ class GoldenStepMaterializer:
         trace_store: TraceStore | None = None,
         trace_case_id: str | None = None,
         evidence_recorder: "ReplayEvidenceRecorder | None" = None,
+        window_focus: "Callable[[str, str], Any] | None" = None,
     ) -> None:
         if replay_mode not in {"semantic_only", "semantic_first", "visual_only"}:
             raise RecordingModelError(
@@ -410,6 +411,23 @@ class GoldenStepMaterializer:
         self._trace_store = trace_store
         self.trace_case_id = trace_case_id
         self._evidence_recorder = evidence_recorder
+        self._window_focus = window_focus
+        self._focused_window: tuple[str, str] | None = None
+
+    def _focus_for(self, selector: ReplaySelector | None, observation: Any) -> Any:
+        """Bring the step's own window forward, observing it afresh."""
+        if self._window_focus is None or selector is None:
+            return observation
+        process = str(selector.window.get("processName") or "")
+        title_regex = str(selector.window.get("titleRegex") or "")
+        if not process or not title_regex:
+            return observation
+        wanted = (process, title_regex)
+        if wanted == self._focused_window:
+            return observation
+        refreshed = self._window_focus(process, title_regex)
+        self._focused_window = wanted
+        return refreshed if refreshed is not None else observation
 
     def __call__(self, step: AtomicTestStep, observation: Any) -> AtomicTestStep:
         if self._trace_store is not None:
@@ -419,9 +437,10 @@ class GoldenStepMaterializer:
                 case_id=self.trace_case_id,
                 step_id=step.step_id,
             )
+        selector = self._selectors.get(step.step_id)
+        observation = self._focus_for(selector, observation)
         if self._evidence_recorder is not None:
             self._evidence_recorder.record(step, observation)
-        selector = self._selectors.get(step.step_id)
         target_ref = step.target_ref
         candidate = None
         action_id = step.action_id
@@ -551,6 +570,8 @@ class ReplayRuntime:
     trace_store: TraceStore | None = None
     replay_mode: str = "semantic_only"
     visual_resolver: SafeVisualResolver | None = None
+    #: Focus the window a step belongs to and return a fresh observation of it.
+    window_focus: Callable[[str, str], Any] | None = None
     #: Persist source-redacted runtime frames into the trace's screenshots
     #: directory.  Requires a trace store; frames that the target did not
     #: redact are refused rather than written.
@@ -637,6 +658,7 @@ def replay_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRun
             if target.persist_replay_screenshots and target.trace_store is not None
             else None
         ),
+        window_focus=target.window_focus,
     )
     case_result = target.executor.run_case(
         main_case,

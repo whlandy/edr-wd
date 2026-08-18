@@ -8,6 +8,7 @@ the queue worker through :class:`WindowsUIACorrelator`.
 from __future__ import annotations
 
 import ctypes
+import dataclasses
 import hashlib
 import json
 import re
@@ -798,6 +799,19 @@ class WindowsUIACorrelator:
             causal_id=self._last_action_causal_id,
         )
 
+    @staticmethod
+    def _with_window(event: RawCaptureEvent, window: Mapping[str, object]) -> RawCaptureEvent:
+        """Stamp the event with the window it happened in."""
+        title = window.get("windowTitle")
+        if not isinstance(title, str) or not title:
+            return event
+        evidence = dict(event.evidence)
+        evidence["window"] = {
+            "title": title,
+            "processName": str(window.get("processName") or ""),
+        }
+        return dataclasses.replace(event, evidence=evidence)
+
     def correlate(
         self,
         packet: HookPacket,
@@ -806,16 +820,20 @@ class WindowsUIACorrelator:
     ) -> RawCaptureEvent | tuple[RawCaptureEvent, ...] | None:
         if packet.kind == "window_transition":
             return self._window_transition(packet, scope, sequence)
+        foreground = self._resolver.foreground()
         result = self._correlate(packet, scope, sequence)
         produced = (
             result if isinstance(result, tuple)
             else () if result is None else (result,)
         )
-        for event in produced:
+        stamped = tuple(self._with_window(event, foreground) for event in produced)
+        for event in stamped:
             if event.type in ACTION_EVENT_TYPES:
                 self._last_action_causal_id = event.causal_id
                 self._last_action_ms = event.monotonic_ms
-        return result
+        if not stamped:
+            return None
+        return stamped[0] if len(stamped) == 1 else stamped
 
     def _correlate(
         self,

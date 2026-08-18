@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 from target.recording.models import ObservedTarget, RawCaptureEvent
@@ -10,9 +11,18 @@ from .models import ReplaySelector
 
 
 def _window(event: RawCaptureEvent) -> dict[str, Any]:
+    """The window this step belongs to, not the recording's entry window.
+
+    A flow moves between an application's windows; replay has to focus the one
+    each step actually happened in. Recordings made before the window was
+    captured fall back to the capture scope.
+    """
+    recorded = event.evidence.get("window") if isinstance(event.evidence, Mapping) else None
+    title = (recorded or {}).get("title")
+    process = (recorded or {}).get("processName") or event.scope.process_name
     return {
-        "processName": event.scope.process_name,
-        "titleRegex": event.scope.window_title,
+        "processName": process,
+        "titleRegex": f"^{re.escape(title)}$" if title else event.scope.window_title,
     }
 
 
