@@ -447,6 +447,41 @@ def evaluate_window_text_contains(
                    diagnostic="text not found in window or tree")
 
 
+def evaluate_window_text_contains_time(
+    step: Any, expectation: Any, observation: Any, action_receipt: ActionReceipt | None,
+) -> ExpectationResult:
+    """Assert the window shows the time *now*, without naming a control.
+
+    `expectation.value` is the strftime pattern itself.  Writing an assertion
+    should not require knowing a control's automation id: the user knows what
+    the screen must show, not which widget shows it.
+    """
+    pattern = expectation.value
+    if not isinstance(pattern, str) or not pattern:
+        return _failed("window_text_contains_time", pattern, None,
+                       _observation_id(observation), 0,
+                       diagnostic="pattern must be a non-empty strftime string")
+    try:
+        expected = render_time_pattern(pattern)
+    except (ValueError, TypeError) as exc:
+        return _failed("window_text_contains_time", pattern, None,
+                       _observation_id(observation), 0,
+                       diagnostic=f"invalid strftime pattern: {exc}")
+    for window in _windows(observation):
+        text = str(window.get("text") or window.get("title") or "")
+        if expected in text:
+            return _passed("window_text_contains_time", expected, [text],
+                           _observation_id(observation), 0)
+    for control in _controls(observation):
+        text = _control_text(control)
+        if expected in text:
+            return _passed("window_text_contains_time", expected, [text],
+                           _observation_id(observation), 0)
+    return _failed("window_text_contains_time", expected, [],
+                   _observation_id(observation), 0,
+                   diagnostic=f"rendered pattern {pattern!r} not found in window or tree")
+
+
 # ---------------------------------------------------------------------------
 # visual_evidence_captured — P1.4 functional implementation
 # ---------------------------------------------------------------------------
@@ -554,6 +589,7 @@ EXPECTATION_REGISTRY: dict[str, Callable[..., ExpectationResult]] = {
     "control_enabled_equals": evaluate_control_enabled_equals,
     "window_text_contains": evaluate_window_text_contains,
     "control_text_contains_time": evaluate_control_text_contains_time,
+    "window_text_contains_time": evaluate_window_text_contains_time,
     "visual_evidence_captured": evaluate_visual_evidence_captured,
 }
 
@@ -579,6 +615,7 @@ __all__ = [
     "ExpectationNotAvailable",
     "evaluate_action_ok",
     "evaluate_control_text_contains_time",
+    "evaluate_window_text_contains_time",
     "render_time_pattern",
     "evaluate_window_open",
     "evaluate_window_closed",

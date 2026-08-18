@@ -245,17 +245,18 @@ class RecordingSession:
         if assertion_type not in {
             "text_equals", "text_contains", "value_equals", "visible",
             "checked", "enabled", "window_open", "text_contains_time",
+            "window_text_contains", "window_text_contains_time",
         }:
             raise RecordingModelError(
                 "recording_assertion_invalid", f"unsupported assertion {assertion_type!r}",
                 path="assertion.assertion",
             )
         expected_value = payload["expected"]
-        if assertion_type == "text_contains_time":
+        if assertion_type in {"text_contains_time", "window_text_contains_time"}:
             if not isinstance(expected_value, str) or not expected_value:
                 raise RecordingModelError(
                     "recording_assertion_invalid",
-                    "text_contains_time expected must be a non-empty strftime pattern",
+                    f"{assertion_type} expected must be a non-empty strftime pattern",
                     path="assertion.expected",
                 )
             try:
@@ -266,7 +267,9 @@ class RecordingSession:
                     f"invalid strftime pattern: {exc}",
                     path="assertion.expected",
                 ) from exc
-        elif assertion_type in {"text_equals", "text_contains", "value_equals"}:
+        elif assertion_type in {
+            "text_equals", "text_contains", "value_equals", "window_text_contains",
+        }:
             if not isinstance(expected_value, str):
                 raise RecordingModelError(
                     "recording_assertion_invalid",
@@ -335,7 +338,10 @@ class RecordingSession:
             "identifier": payload.get("identifier") or None,
             "text": payload.get("name") or None,
         }
-        if assertion_type != "window_open" and not any(identity.values()):
+        # Window-scoped assertions state what the screen must show, not which
+        # widget shows it, so they never need a control identity.
+        identity_free = {"window_open", "window_text_contains", "window_text_contains_time"}
+        if assertion_type not in identity_free and not any(identity.values()):
             raise RecordingModelError(
                 "recording_target_unresolved", "assertion requires a semantic control identity",
                 path="assertion.selector",
@@ -344,7 +350,7 @@ class RecordingSession:
             json.dumps(identity, ensure_ascii=False, sort_keys=True).encode()
         ).hexdigest()
         observed = None
-        if assertion_type != "window_open":
+        if assertion_type not in identity_free:
             observed = ObservedTarget(
                 snapshot_id="OBS-" + uuid.uuid4().hex,
                 target_id="T0001",

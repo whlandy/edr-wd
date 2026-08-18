@@ -164,3 +164,99 @@ def test_a_recorded_time_assertion_survives_compilation_unchanged():
     assert verifier["expected"] == "%Y-%m-%d"
     # No absolute timestamp may leak into the golden trace.
     assert "2026" not in result.golden_json()
+
+
+# ── window-scoped assertions need no control identity ────────────────────────
+
+
+from agent.execution.expectations import evaluate_window_text_contains_time
+
+
+def _window_observation(text, control_text=""):
+    return {
+        "snapshot_id": "OBS-1",
+        "windows": [{"title": text}],
+        "controls": [{"target_id": "T0001", "text": control_text}],
+    }
+
+
+class _Value:
+    def __init__(self, value):
+        self.value = value
+
+
+def test_a_window_time_assertion_matches_the_window_title():
+    _ReplayClock.set(lambda: REPLAYED_ON)
+    result = evaluate_window_text_contains_time(
+        None, _Value("%Y-%m-%d"), _window_observation("日志 2027-03-02"), None,
+    )
+    assert result.status is StepStatus.PASSED
+
+
+def test_a_window_time_assertion_also_searches_the_control_tree():
+    _ReplayClock.set(lambda: REPLAYED_ON)
+    result = evaluate_window_text_contains_time(
+        None, _Value("%Y-%m-%d"),
+        _window_observation("日志中心", control_text="2027-03-02 21:39  用户登录"),
+        None,
+    )
+    assert result.status is StepStatus.PASSED
+
+
+def test_a_window_time_assertion_fails_when_only_the_recorded_date_is_present():
+    _ReplayClock.set(lambda: REPLAYED_ON)
+    result = evaluate_window_text_contains_time(
+        None, _Value("%Y-%m-%d"),
+        _window_observation("日志中心", control_text="2026-08-18 10:15  用户登录"),
+        None,
+    )
+    assert result.status is StepStatus.FAILED
+    assert result.expected == "2027-03-02"
+
+
+@pytest.mark.parametrize(
+    "assertion_type", ["window_text_contains", "window_text_contains_time"],
+)
+def test_a_window_assertion_is_accepted_without_any_control_identity(assertion_type):
+    """The user knows what the screen must show, not which widget shows it."""
+    session = RecordingSession("REC", "flow", _scope())
+    session.start()
+    expected = "%Y-%m-%d" if assertion_type.endswith("_time") else "管理员"
+
+    session.add_assertion({"assertion": assertion_type, "expected": expected})
+
+    event = session.recording().events[0]
+    assert event.assertion["type"] == assertion_type
+    assert event.observed_target is None
+
+
+def test_a_control_assertion_still_requires_an_identity():
+    session = RecordingSession("REC", "flow", _scope())
+    session.start()
+    with pytest.raises(RecordingModelError) as exc:
+        session.add_assertion({"assertion": "text_equals", "expected": "管理员"})
+    assert exc.value.code == "recording_target_unresolved"
+
+
+def test_a_window_assertion_compiles_to_a_window_only_selector():
+    session = RecordingSession("REC", "flow", _scope())
+    session.start()
+    session.add_assertion({
+        "assertion": "window_text_contains_time", "expected": "%Y-%m-%d",
+    })
+    result = compile_recording(session.recording())
+    step = result.case.steps[0]
+    assert result.golden.status == "ready"
+    assert step.selector.control == {}
+    assert step.verifiers[0]["type"] == "window_text_contains_time"
+
+
+def test_the_window_time_verifier_maps_to_a_pattern_valued_expectation():
+    step = RecordedStep(
+        "step-0001", None, {},
+        ReplaySelector(window={"processName": "EDRClient.exe"}, control={}),
+        verifiers=({"type": "window_text_contains_time", "expected": "%Y-%m-%d"},),
+    )
+    expectation = _verifier_expectation(step, step.verifiers[0])
+    assert expectation.type == "window_text_contains_time"
+    assert expectation.value == "%Y-%m-%d"

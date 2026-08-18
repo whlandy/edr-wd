@@ -88,6 +88,7 @@ def test_schema_expectation_enum_matches_p1_4():
         "control_value_equals", "control_checked_equals",
         "control_enabled_equals",
         "window_text_contains", "control_text_contains_time",
+        "window_text_contains_time",
         "visual_evidence_captured",
     }
     assert set(PLAN_JSON_SCHEMA["$defs"]["Expectation"]
