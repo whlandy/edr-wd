@@ -50,7 +50,7 @@ def _packet():
 
 
 def test_macos_ax_resolver_chooses_smallest_containing_control():
-    resolved = MacOSAXResolver(_AXBackend()).element_at(50, 50)
+    resolved = MacOSAXResolver(_AXBackend(), native_ax=None).element_at(50, 50)
     assert resolved["identifier"] == "btnApply"
     assert resolved["controlType"] == "AXButton"
     assert resolved["rect"] == [20, 30, 120, 70]
@@ -60,7 +60,7 @@ def test_macos_correlator_uses_same_scope_and_semantic_event_contract_as_windows
     backend = _AXBackend()
     scope = CaptureScope("mac-dev", "macos_accessibility", "EDRClient", "^EDRClient$")
     event = MacOSAXCorrelator(
-        MacOSAXResolver(backend), double_click_ms=700,
+        MacOSAXResolver(backend, native_ax=None), double_click_ms=700,
     ).correlate(_packet(), scope, 1)
     assert event.type == "pointer_click"
     assert event.scope == scope
@@ -74,7 +74,7 @@ def test_macos_correlator_uses_same_scope_and_semantic_event_contract_as_windows
 def test_macos_correlator_drops_other_frontmost_application_before_ax_hit_test():
     backend = _AXBackend(process="OtherApp")
     scope = CaptureScope("mac-dev", "macos_accessibility", "EDRClient", "^EDRClient$")
-    event = MacOSAXCorrelator(MacOSAXResolver(backend)).correlate(_packet(), scope, 1)
+    event = MacOSAXCorrelator(MacOSAXResolver(backend, native_ax=None)).correlate(_packet(), scope, 1)
     assert event is None
 
 
@@ -117,7 +117,7 @@ def test_macos_pointer_toggle_uses_normalized_ax_control_type():
     }]
     scope = CaptureScope("mac-dev", "macos_accessibility", "EDRClient", "^EDRClient$")
 
-    event = MacOSAXCorrelator(MacOSAXResolver(backend)).correlate(_packet(), scope, 1)
+    event = MacOSAXCorrelator(MacOSAXResolver(backend, native_ax=None)).correlate(_packet(), scope, 1)
 
     assert event.type == "toggle_change"
     assert event.input == {"value": True}
@@ -131,7 +131,7 @@ def test_macos_focused_ax_text_control_drives_source_redacted_text_activity():
         "rectangle": {"x": 20, "y": 100, "w": 200, "h": 40},
     })
     scope = CaptureScope("mac-dev", "macos_accessibility", "EDRClient", "^EDRClient$")
-    correlator = MacOSAXCorrelator(MacOSAXResolver(backend))
+    correlator = MacOSAXCorrelator(MacOSAXResolver(backend, native_ax=None))
 
     assert correlator.correlate(HookPacket(
         "text_activity", 100, "2026-08-17T00:00:00.000Z",
@@ -182,3 +182,124 @@ def test_macos_screenshot_without_path_returns_in_memory_png(monkeypatch):
     assert base64.b64decode(result["image_b64"]) == png
     assert result["origin"] == [0, 0]
     assert "path" not in result
+
+
+class _FakeAXElement:
+    """Stand-in AXUIElement: a plain attribute bag with a parent link."""
+
+    def __init__(self, attributes, parent=None):
+        self.attributes = attributes
+        self.parent = parent
+
+
+class _FakeAXModule:
+    """Minimal stand-in for the ApplicationServices AX entry points."""
+
+    kAXValueCGPointType = 1
+    kAXValueCGSizeType = 2
+
+    def __init__(self, element_at_point=None, focused=None):
+        self._element_at_point = element_at_point
+        self._focused = focused
+        self.position_calls = 0
+
+    def AXUIElementCreateSystemWide(self):
+        return "system-wide"
+
+    def AXUIElementCopyElementAtPosition(self, element, x, y, _):
+        del element, x, y
+        if self._element_at_point is None:
+            return 1, None
+        return 0, self._element_at_point
+
+    def AXUIElementCopyAttributeValue(self, element, name, _):
+        if element == "system-wide":
+            if name == "AXFocusedUIElement" and self._focused is not None:
+                return 0, self._focused
+            return 1, None
+        if name == "AXParent":
+            return (0, element.parent) if element.parent is not None else (1, None)
+        if name in element.attributes:
+            if name == "AXPosition":
+                self.position_calls += 1
+            return 0, element.attributes[name]
+        return 1, None
+
+    def AXValueGetValue(self, value, kind, _):
+        if kind == self.kAXValueCGPointType:
+            return True, types.SimpleNamespace(x=value[0], y=value[1])
+        return True, types.SimpleNamespace(width=value[0], height=value[1])
+
+
+def _fake_button(**overrides):
+    attributes = {
+        "AXRole": "AXButton",
+        "AXIdentifier": "btnApply",
+        "AXTitle": "应用",
+        "AXPosition": (20, 30),
+        "AXSize": (100, 40),
+        "AXEnabled": True,
+    }
+    attributes.update(overrides)
+    window = _FakeAXElement({"AXRole": "AXWindow"})
+    return _FakeAXElement(attributes, parent=window)
+
+
+def test_macos_native_hit_test_replaces_the_tree_walk():
+    """The per-event hot path must not enumerate the whole AX tree.
+
+    A full dump_tree costs 10-20 s on a live desktop, which loses nearly
+    every captured event, so element_at resolves through the single-point AX
+    API and must not touch the backend at all when it succeeds.
+    """
+    class _ExplodingBackend(_AXBackend):
+        def dump_tree(self, max_depth=12):
+            raise AssertionError("element_at must not walk the tree natively")
+
+    resolver = MacOSAXResolver(
+        _ExplodingBackend(), native_ax=_FakeAXModule(element_at_point=_fake_button()),
+    )
+
+    resolved = resolver.element_at(50, 50)
+
+    assert resolved["identifier"] == "btnApply"
+    assert resolved["controlType"] == "AXButton"
+    assert resolved["rect"] == [20, 30, 120, 70]
+    assert resolved["ancestry"] == ["AXWindow"]
+
+
+def test_macos_native_refresh_rereads_the_cached_handle():
+    element = _fake_button()
+    module = _FakeAXModule(element_at_point=element)
+    resolver = MacOSAXResolver(_AXBackend(), native_ax=module)
+    resolved = resolver.element_at(50, 50)
+    before = module.position_calls
+
+    refreshed = resolver.refresh(resolved)
+
+    assert refreshed["_identity"] == resolved["_identity"]
+    # The handle is re-read rather than re-discovered.
+    assert module.position_calls > before
+
+
+def test_macos_native_hit_test_never_reads_a_secure_field_value():
+    element = _fake_button(
+        AXRole="AXSecureTextField", AXValue="must-not-escape", AXTitle="密码",
+    )
+    resolver = MacOSAXResolver(
+        _AXBackend(), native_ax=_FakeAXModule(element_at_point=element),
+    )
+
+    resolved = resolver.element_at(50, 50)
+
+    assert resolved["protected"] is True
+    assert resolved["value"] is None
+    assert "must-not-escape" not in str(resolved)
+
+
+def test_macos_falls_back_to_the_tree_walk_when_native_ax_is_missing():
+    resolver = MacOSAXResolver(_AXBackend(), native_ax=None)
+
+    resolved = resolver.element_at(50, 50)
+
+    assert resolved["identifier"] == "btnApply"
