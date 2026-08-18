@@ -370,6 +370,7 @@ class WindowsPywinautoBackend:
                 "locked": True,
                 "active": state,
                 "foreground": {"source": state.get("source"), "handle": state.get("handle")},
+                "foreground_verified": True,
                 "degraded": False,
                 "degraded_reason": None,
                 "verification": {
@@ -397,11 +398,42 @@ class WindowsPywinautoBackend:
         if matched:
             return _full({"activation": activation})
 
+        if strict and not state.get("ok"):
+            # There is no input desktop to ask (the session is disconnected or
+            # not rendering), which is a different fact from "another window
+            # owns the foreground".  Verify what remains verifiable — the
+            # locked window still exists and still belongs to the expected
+            # process — and mark the result as never having seen a foreground.
+            # Coordinate dispatch refuses this state separately; observation,
+            # capture and semantic actions do not need a frontmost window.
+            existence = self._headless_lock_ownership(lock)
+            if existence.get("ok") is True:
+                return {
+                    "ok": True,
+                    "locked": True,
+                    "active": state,
+                    "foreground": {"source": state.get("source"), "handle": None},
+                    "foreground_verified": False,
+                    "degraded": True,
+                    "degraded_reason": (
+                        "no input desktop; verified window existence + process ownership"
+                    ),
+                    "verification": {
+                        "source": state.get("source"),
+                        "strict": True,
+                        "method": "headless_existence",
+                        "existence": existence,
+                    },
+                    "lock": lock,
+                    "activation": activation,
+                }
+
         if strict:
             # RDP/foreground could not be verified — block, never dispatch.
             return {
                 "ok": False,
                 "locked": True,
+                "foreground_verified": False,
                 "error": "Window lock mismatch (strict): foreground ownership could not be verified",
                 "code": "verification_unavailable" if not state.get("ok") else "ownership_mismatch",
                 "active": state,
@@ -438,6 +470,7 @@ class WindowsPywinautoBackend:
                 "code": "verification_unavailable",
                 "active": state,
                 "foreground": {"source": state.get("source"), "handle": state.get("handle")},
+                "foreground_verified": False,
                 "degraded": True,
                 "degraded_reason": "strict=False but window existence/ownership could not be confirmed",
                 "verification": {
@@ -455,6 +488,7 @@ class WindowsPywinautoBackend:
             "locked": True,
             "active": state,
             "foreground": {"source": state.get("source"), "handle": state.get("handle")},
+            "foreground_verified": False,
             "degraded": True,
             "degraded_reason": "foreground not verifiable; verified window existence + process ownership",
             "verification": {
@@ -468,11 +502,98 @@ class WindowsPywinautoBackend:
             "activation": activation,
         }
 
-    def _ensure_window_lock(self) -> Optional[dict]:
+    @staticmethod
+    def _win32_window_owner(handle) -> dict:
+        """Existence and owning process of a HWND, without UIA or a desktop.
+
+        The UIA enumerator and the connected-window state both stop answering
+        when the session is not rendering, which is precisely when this check
+        has to work.  ctypes + psutil need neither.
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            hwnd = int(handle)
+            if not user32.IsWindow(hwnd):
+                return {"ok": False, "reason": "locked window handle no longer exists"}
+            pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            owner = int(pid.value)
+            if owner <= 0:
+                return {"ok": False, "reason": "locked window has no owning process"}
+            name = None
+            try:
+                import psutil
+
+                name = psutil.Process(owner).name()
+            except Exception:
+                pass
+            return {
+                "ok": True, "handle": hwnd, "pid": owner,
+                "process_name": name, "source": "win32_owner",
+            }
+        except Exception as exc:
+            return {"ok": False, "reason": f"win32 ownership probe failed: {exc}"}
+
+    def _headless_lock_ownership(self, lock: dict) -> dict:
+        """Confirm the locked window still exists and still belongs to us.
+
+        This is the only evidence available with no input desktop, so it must
+        be positive: anything unconfirmed fails closed rather than granting the
+        degraded pass.
+        """
+        handle = lock.get("handle")
+        if not handle:
+            return {"ok": False, "reason": "lock has no window handle to verify"}
+        owner = self._win32_window_owner(handle)
+        if not owner.get("ok"):
+            return owner
+        expected_pid = lock.get("pid")
+        if expected_pid is not None and int(expected_pid) != owner["pid"]:
+            return {
+                "ok": False,
+                "reason": "locked handle is now owned by a different process id",
+                "owner": owner,
+            }
+        expected_name = lock.get("process_name")
+        if expected_name:
+            actual = str(owner.get("process_name") or "").lower().removesuffix(".exe")
+            if not actual:
+                return {
+                    "ok": False,
+                    "reason": "owning process name could not be resolved",
+                    "owner": owner,
+                }
+            if actual != str(expected_name).lower().removesuffix(".exe"):
+                return {
+                    "ok": False,
+                    "reason": "locked handle is now owned by a different process",
+                    "owner": owner,
+                }
+        return {"ok": True, "owner": owner, "method": "win32_owner"}
+
+    def _ensure_window_lock(self, *, require_foreground: bool = True) -> Optional[dict]:
         check = self.verify_window_lock(activate=True)
-        if check.get("ok"):
-            return None
-        return check
+        if not check.get("ok"):
+            return check
+        if require_foreground and check.get("foreground_verified") is False:
+            # Injecting screen coordinates needs a real frontmost window: with
+            # no input desktop the click would land nowhere, or on whatever
+            # appears later.  Existence alone is not enough to authorise it.
+            return {
+                "ok": False,
+                "locked": True,
+                "code": "input_desktop_unavailable",
+                "error": (
+                    "coordinate input requires a verified foreground window; "
+                    "the session has no input desktop"
+                ),
+                "verification": check.get("verification"),
+                "lock": check.get("lock"),
+            }
+        return None
 
     def _ensure_click_process(self, expected_process_name: Optional[str]) -> Optional[dict]:
         state = self._connected_window_state()

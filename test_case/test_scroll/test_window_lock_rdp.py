@@ -339,3 +339,82 @@ class TestLockCriteriaAreValidated:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
+
+
+# ── headless verification (no input desktop) ─────────────────────────────────
+
+
+def _headless_backend(owner, connected=None):
+    """A backend whose foreground is unresolvable, as when nothing renders."""
+    impl = make_backend(_unavailable(), _lock(strict=True), connected_state=connected or {"ok": False})
+    impl._win32_window_owner = staticmethod(lambda handle: owner)
+    return impl
+
+
+class TestHeadlessVerification:
+    """A disconnected session cannot answer "is my window frontmost?".
+
+    That is not the same as "another window owns the foreground", and must not
+    be reported as one: capture and semantic actions stay possible, coordinate
+    input does not.
+    """
+
+    OWNER = {
+        "ok": True, "handle": 1001, "pid": 6752,
+        "process_name": "EDRClient.exe", "source": "win32_owner",
+    }
+
+    def test_existing_and_correctly_owned_window_passes_without_a_foreground(self):
+        r = _headless_backend(self.OWNER).verify_window_lock(activate=True)
+        assert r["ok"] is True
+        assert r["foreground_verified"] is False
+        assert r["degraded"] is True
+        assert r["verification"]["method"] == "headless_existence"
+
+    def test_a_destroyed_window_still_blocks(self):
+        owner = {"ok": False, "reason": "locked window handle no longer exists"}
+        r = _headless_backend(owner).verify_window_lock(activate=True)
+        assert r["ok"] is False
+        assert r["code"] == "verification_unavailable"
+
+    def test_a_handle_now_owned_by_another_process_blocks(self):
+        owner = {**self.OWNER, "process_name": "HiSecEndpointAgent.exe"}
+        r = _headless_backend(owner).verify_window_lock(activate=True)
+        assert r["ok"] is False
+
+    def test_a_handle_now_owned_by_another_pid_blocks(self):
+        owner = {**self.OWNER, "pid": 9999}
+        r = _headless_backend(owner).verify_window_lock(activate=True)
+        assert r["ok"] is False
+
+    def test_an_unresolvable_process_name_fails_closed(self):
+        owner = {**self.OWNER, "process_name": None}
+        r = _headless_backend(owner).verify_window_lock(activate=True)
+        assert r["ok"] is False
+
+    def test_a_resolvable_foreground_that_mismatches_is_still_an_ownership_error(self):
+        """Headless leniency must not leak into the case where we *can* look."""
+        b = make_backend(
+            _win32_foreground(handle=9000, title="记事本", pid=7777,
+                              process_name="Notepad.exe"),
+            _lock(strict=True),
+        )
+        r = b.verify_window_lock(activate=True)
+        assert r["ok"] is False
+        assert r["code"] == "ownership_mismatch"
+
+
+class TestCoordinateInputStillRefusesHeadless:
+    def test_coordinate_dispatch_refuses_a_lock_with_no_verified_foreground(self):
+        impl = _headless_backend(TestHeadlessVerification.OWNER)
+        error = impl._ensure_window_lock()
+        assert error is not None
+        assert error["code"] == "input_desktop_unavailable"
+
+    def test_non_coordinate_callers_may_opt_out_of_the_foreground_requirement(self):
+        impl = _headless_backend(TestHeadlessVerification.OWNER)
+        assert impl._ensure_window_lock(require_foreground=False) is None
+
+    def test_a_verified_foreground_authorises_coordinate_dispatch(self):
+        b = make_backend(_win32_foreground(), _lock(strict=True))
+        assert b._ensure_window_lock() is None
