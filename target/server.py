@@ -102,6 +102,19 @@ except Exception as _e:  # pragma: no cover — defensive startup guard
     _backend_kind = "unknown"
 
 
+# The unified dispatcher resolves the backend through a registered factory
+# rather than importing this module, which would be circular. Without this
+# registration every execute_action call fails with dispatch_target_missing —
+# the dispatcher is the only path replay has, so it must be wired at import,
+# not lazily on first use.
+try:
+    from .action_dispatcher import set_backend_resolver as _set_backend_resolver
+except ImportError:  # Target-local deployment.
+    from action_dispatcher import set_backend_resolver as _set_backend_resolver
+
+_set_backend_resolver(lambda: _backend)
+
+
 # Server bind metadata. Updated by main() so status() can report the actual
 # runtime port instead of assuming the default 8765.
 _server_host = "127.0.0.1"
