@@ -383,7 +383,7 @@ class _MCPAgent:
     def ensure_ready(self):
         return {"ok": True}
 
-    def call_tool(self, name, arguments):
+    def call_tool(self, name, arguments, timeout=None):
         self.calls.append((name, arguments))
         if name == "recording_status":
             return {"ok": False, "code": "recording_session_missing"}
@@ -428,7 +428,7 @@ def test_mcp_runtime_builds_observation_local_ids_and_dispatches_unified_action(
 
 def test_fresh_observation_refuses_a_lost_window_lock_before_dumping_tree():
     class _LostLockAgent(_MCPAgent):
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, timeout=None):
             if name == "verify_window_lock":
                 self.calls.append((name, arguments))
                 return {"ok": False, "error": "foreground changed"}
@@ -442,7 +442,7 @@ def test_fresh_observation_refuses_a_lost_window_lock_before_dumping_tree():
 
 def test_visual_observation_refuses_a_full_screen_capture():
     class _FullScreenAgent(_MCPAgent):
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, timeout=None):
             if name == "replay_capture":
                 self.calls.append((name, arguments))
                 return {
