@@ -31,7 +31,25 @@ class MacOSPermissionPreflight:
             raise RecordingModelError(
                 "recording_capture_unavailable", f"Quartz unavailable: {exc}"
             ) from exc
-        accessibility = bool(Quartz.AXIsProcessTrusted())
+        # AXIsProcessTrusted lives in HIServices, re-exported by
+        # ApplicationServices. Older pyobjc-framework-Quartz re-exported it
+        # too, but 12.x does not, so resolve it from either module and turn a
+        # genuinely missing symbol into a structured error rather than letting
+        # an AttributeError escape this preflight.
+        ax_is_trusted = getattr(Quartz, "AXIsProcessTrusted", None)
+        if not callable(ax_is_trusted):
+            try:
+                from ApplicationServices import (  # type: ignore[import-not-found]
+                    AXIsProcessTrusted as ax_is_trusted,
+                )
+            except Exception as exc:
+                raise RecordingModelError(
+                    "recording_capture_unavailable",
+                    "AXIsProcessTrusted unavailable: install "
+                    f"pyobjc-framework-ApplicationServices ({exc})",
+                    path="recording.permissions",
+                ) from exc
+        accessibility = bool(ax_is_trusted())
         input_monitoring = True
         preflight = getattr(Quartz, "CGPreflightListenEventAccess", None)
         if callable(preflight):

@@ -13,6 +13,9 @@ dependencies = [
     "PyYAML>=6.0",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    # Supplies AXIsProcessTrusted for the recording permission preflight;
+    # pyobjc-framework-Quartz 12.x no longer re-exports it.
+    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
