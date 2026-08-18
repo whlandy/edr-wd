@@ -38,6 +38,11 @@ class WindowsGUI:
         self.backend = backend
         self.app: Optional[Application] = None
         self.main_window = None
+        # HWND of the connected window, cached at connect time.  Screen capture
+        # must not need a live UIA round-trip: when the session stops rendering
+        # every UIA property read fails, and that is exactly when the GDI
+        # PrintWindow path has to keep working.
+        self._connected_hwnd: int | None = None
 
     # ------------------------------------------------------------------
     # Connection
@@ -51,6 +56,7 @@ class WindowsGUI:
             )
             self.main_window = self.app.window(title_re=title_re)
             self.main_window.wait("visible", timeout=timeout)
+            self._connected_hwnd = self._wrapper_handle(self.main_window)
             return {"ok": True, "title": self.main_window.window_text()}
         except Exception as e:
             logger.exception("connect_by_title failed")
@@ -130,6 +136,7 @@ class WindowsGUI:
                     try:
                         self.app = Application(backend=self.backend).connect(handle=handle, timeout=timeout)
                         self.main_window = self.app.window(handle=handle)
+                        self._connected_hwnd = int(handle)
                         self.main_window.wait("visible", timeout=timeout)
                         return {
                             "ok": True,
@@ -147,6 +154,7 @@ class WindowsGUI:
                 try:
                     self.app = Application(backend=self.backend).connect(process=pid, timeout=timeout)
                     self.main_window = self.app.top_window()
+                    self._connected_hwnd = self._wrapper_handle(self.main_window)
                     self.main_window.wait("visible", timeout=timeout)
                     return {
                         "ok": True,
@@ -181,6 +189,7 @@ class WindowsGUI:
             for win in self._desktop_windows_for_pid(pid):
                 if self._wrapper_handle(win) == handle:
                     self.main_window = win
+                    self._connected_hwnd = int(handle)
                     return {
                         "ok": True,
                         "pid": pid,
@@ -200,6 +209,7 @@ class WindowsGUI:
         try:
             self.app = Application(backend=self.backend).connect(process=pid)
             self.main_window = self.app.top_window()
+            self._connected_hwnd = self._wrapper_handle(self.main_window)
             return {"ok": True, "pid": pid}
         except Exception as e:
             logger.exception("connect_by_pid failed")
@@ -1014,45 +1024,43 @@ class WindowsGUI:
         返回 base64 PNG 或保存到文件。
         """
         try:
-            if self.main_window:
-                win = self.main_window
-            else:
+            win = self.main_window
+            if win is None and not self._connected_hwnd:
                 return {"ok": False, "error": "No window connected"}
 
-            capture_error = None
-            try:
-                img = win.capture_as_image()
-            except Exception as exc:
-                capture_error = str(exc)
-                img = None
-
-            if img is None:
+            errors = {}
+            img = None
+            # Screen-composition paths first: best fidelity while the desktop
+            # is being rendered.  Both need a live session.
+            if win is not None:
                 try:
-                    from PIL import ImageGrab
-
-                    rect = win.rectangle()
-                    bbox = (rect.left, rect.top, rect.right, rect.bottom)
-                    img = ImageGrab.grab(bbox=bbox)
+                    img = win.capture_as_image()
                 except Exception as exc:
-                    imagegrab_error = str(exc)
+                    errors["capture_as_image"] = str(exc)
+                if img is None:
                     try:
-                        img = self._capture_window_with_gdi(win)
-                    except Exception as gdi_exc:
-                        gdi_error = str(gdi_exc)
-                        if capture_error:
-                            return {
-                                "ok": False,
-                                "error": (
-                                    "screen grab failed: "
-                                    f"capture_as_image={capture_error}; "
-                                    f"imagegrab={imagegrab_error}; "
-                                    f"gdi={gdi_error}"
-                                ),
-                            }
-                        return {
-                            "ok": False,
-                            "error": f"screen grab failed: imagegrab={imagegrab_error}; gdi={gdi_error}",
-                        }
+                        from PIL import ImageGrab
+
+                        bounds = self.window_rect_win32(self.window_handle(win))
+                        if bounds is None:
+                            rect = win.rectangle()
+                            bounds = (rect.left, rect.top, rect.right, rect.bottom)
+                        img = ImageGrab.grab(bbox=bounds)
+                    except Exception as exc:
+                        errors["imagegrab"] = str(exc)
+            if img is None:
+                # Background path: asks the window to paint itself, so it keeps
+                # working when nothing is compositing the desktop.
+                try:
+                    img = self._capture_window_with_gdi(win)
+                except Exception as exc:
+                    errors["gdi"] = str(exc)
+                    return {
+                        "ok": False,
+                        "error": "screen grab failed: " + "; ".join(
+                            f"{name}={message}" for name, message in errors.items()
+                        ),
+                    }
 
             buf = io.BytesIO()
             img.save(buf, format="PNG")
@@ -1062,7 +1070,7 @@ class WindowsGUI:
                 "image_b64": b64,
                 "width": img.width,
                 "height": img.height,
-                "origin": [int(win.rectangle().left), int(win.rectangle().top)],
+                "origin": list(self._capture_origin(win)),
                 "capture_scope": "window",
             }
             # The MCP contract says an omitted path returns in-memory PNG.
@@ -1080,21 +1088,72 @@ class WindowsGUI:
             logger.exception("screenshot failed")
             return {"ok": False, "error": str(e)}
 
-    def _capture_window_with_gdi(self, win):
-        """Capture a window image with Win32 GDI when pywinauto/Pillow grabs fail."""
+    def _capture_origin(self, win=None) -> tuple:
+        """Top-left of the captured window, Win32 first so it survives UIA loss."""
+        bounds = self.window_rect_win32(self.window_handle(win))
+        if bounds is not None:
+            return bounds[0], bounds[1]
+        target = win if win is not None else self.main_window
+        rect = target.rectangle()
+        return int(rect.left), int(rect.top)
+
+    def window_handle(self, win=None) -> Optional[int]:
+        """HWND of the connected window, preferring the connect-time cache.
+
+        Reading `.handle` off a UIA wrapper is itself a UIA call, so it fails
+        under exactly the conditions the GDI capture path exists to survive.
+        """
+        if self._connected_hwnd:
+            return self._connected_hwnd
+        target = win if win is not None else self.main_window
+        return self._wrapper_handle(target) if target is not None else None
+
+    @staticmethod
+    def window_rect_win32(hwnd: int) -> Optional[tuple]:
+        """(left, top, right, bottom) straight from Win32, never through UIA."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            rect = wintypes.RECT()
+            if not ctypes.windll.user32.GetWindowRect(int(hwnd), ctypes.byref(rect)):
+                return None
+            return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+        except Exception:
+            return None
+
+    def _capture_geometry(self, win=None) -> tuple:
+        """Resolve (hwnd, left, top, width, height) without needing a live desktop."""
+        hwnd = self.window_handle(win)
+        if not hwnd:
+            raise RuntimeError("window handle unavailable")
+        bounds = self.window_rect_win32(hwnd)
+        if bounds is None:
+            target = win if win is not None else self.main_window
+            if target is None:
+                raise RuntimeError("window rectangle unavailable")
+            rect = target.rectangle()
+            bounds = (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
+        left, top, right, bottom = bounds
+        width, height = right - left, bottom - top
+        if width <= 0 or height <= 0:
+            raise RuntimeError(f"invalid window rectangle: {bounds}")
+        return hwnd, left, top, width, height
+
+    def _capture_window_with_gdi(self, win=None):
+        """Capture a window with Win32 GDI, including while nothing renders it.
+
+        `PrintWindow(PW_RENDERFULLCONTENT)` asks the window to paint itself into
+        a memory DC rather than copying screen pixels, so it does not need the
+        session's desktop to be composited — this is the background-capture
+        path. BitBlt of the screen rectangle stays as a last resort and does
+        require a rendering desktop.
+        """
         import ctypes
         from ctypes import wintypes
         from PIL import Image
 
-        hwnd = self._wrapper_handle(win)
-        if not hwnd:
-            raise RuntimeError("window handle unavailable")
-
-        rect = win.rectangle()
-        width = int(rect.width())
-        height = int(rect.height())
-        if width <= 0 or height <= 0:
-            raise RuntimeError(f"invalid window rectangle: {rect}")
+        hwnd, left, top, width, height = self._capture_geometry(win)
 
         user32 = ctypes.windll.user32
         gdi32 = ctypes.windll.gdi32
@@ -1110,7 +1169,7 @@ class WindowsGUI:
             rendered = user32.PrintWindow(hwnd, mem_dc, 2)
             if not rendered:
                 SRCCOPY = 0x00CC0020
-                copied = gdi32.BitBlt(mem_dc, 0, 0, width, height, screen_dc, rect.left, rect.top, SRCCOPY)
+                copied = gdi32.BitBlt(mem_dc, 0, 0, width, height, screen_dc, left, top, SRCCOPY)
                 if not copied:
                     raise RuntimeError("PrintWindow and BitBlt both failed")
 
