@@ -921,3 +921,96 @@ def test_an_observation_reporting_no_ancestry_cannot_satisfy_a_recorded_chain():
 
     assert calls == []
     assert result.case_result.step_results[0].error["code"] == "replay_target_not_found"
+
+
+# ── a recorded flow spans several windows ────────────────────────────────────
+
+
+def _window_selector(title_regex, automation_id):
+    return ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": title_regex},
+        control={"automationId": automation_id},
+    )
+
+
+class _WindowedObservations(_Observations):
+    """Only the focused window's controls are observable, as on a real target."""
+
+    def __init__(self, windows):
+        super().__init__([])
+        self._windows = windows
+        self.focused = None
+        self.focus_calls = []
+
+    def focus(self, process_name, title_regex):
+        self.focus_calls.append((process_name, title_regex))
+        self.focused = title_regex
+        self.controls = self._windows.get(title_regex, [])
+        return self.get_snapshot(self.refresh())
+
+
+def _control(title, automation_id):
+    return {
+        "process_name": "EDRClient.exe", "window_title": title,
+        "automation_id": automation_id, "control_type": "Button",
+    }
+
+
+def test_replay_focuses_the_window_each_step_was_recorded_in(tmp_path):
+    observations = _WindowedObservations({
+        "^logo1$": [_control("logo1", "logCenterBtn")],
+        "^日志中心$": [_control("日志中心", "operationLogBtn")],
+    })
+    calls = []
+
+    def dispatch(**kwargs):
+        calls.append(kwargs)
+        return ActionReceipt.from_ok(
+            action_id=kwargs["action_id"], action_code=kwargs["action_code"],
+            request_id=kwargs["request_id"], result={"ok": True},
+        )
+
+    runtime = ReplayRuntime(
+        AtomicExecutor(dispatch=dispatch, observation_provider=observations),
+        "1.0.0", "sha256:catalog",
+        window_focus=observations.focus,
+    )
+    golden = _golden(
+        RecordedStep("step-0001", "gui.click", {}, _window_selector("^logo1$", "logCenterBtn")),
+        RecordedStep("step-0002", "gui.click", {}, _window_selector("^日志中心$", "operationLogBtn")),
+    )
+
+    result = replay_golden_trace(runtime, golden)
+
+    assert result.task_success is True
+    assert len(calls) == 2
+    assert observations.focus_calls == [
+        ("EDRClient.exe", "^logo1$"), ("EDRClient.exe", "^日志中心$"),
+    ]
+
+
+def test_consecutive_steps_in_one_window_focus_it_only_once():
+    observations = _WindowedObservations({
+        "^日志中心$": [_control("日志中心", "operationLogBtn")],
+    })
+
+    def dispatch(**kwargs):
+        return ActionReceipt.from_ok(
+            action_id=kwargs["action_id"], action_code=kwargs["action_code"],
+            request_id=kwargs["request_id"], result={"ok": True},
+        )
+
+    runtime = ReplayRuntime(
+        AtomicExecutor(dispatch=dispatch, observation_provider=observations),
+        "1.0.0", "sha256:catalog",
+        window_focus=observations.focus,
+    )
+    golden = _golden(
+        RecordedStep("step-0001", "gui.click", {}, _window_selector("^日志中心$", "operationLogBtn")),
+        RecordedStep("step-0002", "gui.click", {}, _window_selector("^日志中心$", "operationLogBtn")),
+    )
+
+    result = replay_golden_trace(runtime, golden)
+
+    assert result.task_success is True
+    assert observations.focus_calls == [("EDRClient.exe", "^日志中心$")]

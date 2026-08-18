@@ -67,6 +67,7 @@ def test_macos_correlator_uses_same_scope_and_semantic_event_contract_as_windows
     assert event.observed_target.identifier == "btnApply"
     assert event.evidence == {
         "foregroundPid": 7, "doubleClickIntervalMs": 700,
+        "window": {"title": "EDRClient", "processName": "EDRClient"},
     }
 
 
