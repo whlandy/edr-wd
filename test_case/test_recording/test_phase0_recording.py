@@ -493,3 +493,99 @@ def test_canonical_documents_validate_against_strict_json_schemas():
     ):
         schema = json.loads((schema_root / schema_name).read_text(encoding="utf-8"))
         jsonschema.validate(document, schema)
+
+
+# ── scroll gestures compile as one action, not one per notch ─────────────────
+
+
+_SCROLL_TARGET = {
+    "snapshotId": "OBS-1", "targetId": "T0001", "fingerprint": "sha256:list",
+    "controlType": "List", "automationId": "logList", "text": "操作日志",
+    "protected": False,
+}
+
+
+def _scroll(sequence, delta=-120, ms=None, causal_id=None, target=None):
+    return _event(
+        sequence, "scroll_commit",
+        ms=ms if ms is not None else sequence * 60,
+        target=target if target is not None else _SCROLL_TARGET,
+        input_={"delta": delta, "screenPoint": [400, 300]},
+        causal_id=causal_id or f"cause-{sequence}",
+    )
+
+
+def test_one_wheel_gesture_compiles_into_one_scroll_step():
+    recording = _recording(*[_scroll(i) for i in range(1, 11)])
+    result = compile_recording(recording)
+    steps = [s for s in result.case.steps if s.action_id == "pointer.scroll"]
+    assert len(steps) == 1
+    # Ten notches of -120 replay as one ten-click scroll.
+    assert steps[0].args == {"clicks": -10}
+
+
+def test_the_merged_gesture_keeps_the_last_notch_cause_so_a_verifier_binds():
+    """A user binds the assertion after scrolling, i.e. to the final notch."""
+    events = [_scroll(i) for i in range(1, 4)]
+    events.append(_bound_assertion(4, "cause-3"))
+    result = compile_recording(_recording(*events))
+    assert result.golden.status == "ready"
+    assert len(result.case.steps) == 1
+    assert result.case.steps[0].verifiers[0]["type"] == "visible"
+
+
+def test_reversing_direction_starts_a_new_gesture():
+    recording = _recording(
+        _scroll(1, delta=-120), _scroll(2, delta=-120),
+        _scroll(3, delta=120), _scroll(4, delta=120),
+    )
+    steps = [s for s in compile_recording(recording).case.steps if s.action_id == "pointer.scroll"]
+    assert [s.args["clicks"] for s in steps] == [-2, 2]
+
+
+def test_a_pause_between_bursts_starts_a_new_gesture():
+    recording = _recording(
+        _scroll(1, ms=1000), _scroll(2, ms=1100),
+        _scroll(3, ms=5000), _scroll(4, ms=5100),
+    )
+    steps = [s for s in compile_recording(recording).case.steps if s.action_id == "pointer.scroll"]
+    assert [s.args["clicks"] for s in steps] == [-2, -2]
+
+
+def test_scrolling_a_different_control_starts_a_new_gesture():
+    other = {**_SCROLL_TARGET, "fingerprint": "sha256:other", "automationId": "sideList"}
+    recording = _recording(
+        _scroll(1), _scroll(2), _scroll(3, target=other), _scroll(4, target=other),
+    )
+    steps = [s for s in compile_recording(recording).case.steps if s.action_id == "pointer.scroll"]
+    assert len(steps) == 2
+
+
+def test_a_single_notch_is_unchanged():
+    result = compile_recording(_recording(_scroll(1)))
+    step = result.case.steps[0]
+    assert step.args == {"clicks": -1}
+    assert "notches" not in step.args
+
+
+def test_a_high_resolution_wheel_still_replays_as_movement():
+    """RDP forwards trackpad scroll in units far below WHEEL_DELTA."""
+    recording = _recording(*[
+        _scroll(i, delta=-3, ms=i * 20) for i in range(1, 11)
+    ])
+    steps = [s for s in compile_recording(recording).case.steps if s.action_id == "pointer.scroll"]
+    assert len(steps) == 1
+    # -30 raw units is well under one notch, but the user did scroll.
+    assert steps[0].args == {"clicks": -1}
+
+
+def test_a_standard_wheel_keeps_its_notch_count():
+    recording = _recording(*[_scroll(i, delta=-120, ms=i * 20) for i in range(1, 6)])
+    steps = [s for s in compile_recording(recording).case.steps if s.action_id == "pointer.scroll"]
+    assert steps[0].args == {"clicks": -5}
+
+
+def test_an_upward_high_resolution_gesture_keeps_its_direction():
+    recording = _recording(*[_scroll(i, delta=2, ms=i * 20) for i in range(1, 5)])
+    steps = [s for s in compile_recording(recording).case.steps if s.action_id == "pointer.scroll"]
+    assert steps[0].args == {"clicks": 1}

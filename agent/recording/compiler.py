@@ -81,11 +81,77 @@ def _same_target(left: RawCaptureEvent, right: RawCaptureEvent) -> bool:
     )
 
 
-def coalesce_events(events: Iterable[RawCaptureEvent], *, double_click_ms: int = 500) -> tuple[RawCaptureEvent, ...]:
+def _scroll_run_length(
+    source: list[RawCaptureEvent], index: int, coalesce_ms: int,
+) -> int:
+    """How many consecutive notches belong to one scroll gesture.
+
+    A wheel gesture arrives as a burst of one-notch events. Compiling each
+    notch into its own step multiplies the verifier a user must bind and
+    describes the flow as ten scrolls when they performed one. Only a run on
+    the same target, in the same direction, within the burst window merges —
+    reversing direction is a new gesture, and summing across it would cancel
+    the movement out.
+    """
+    first = source[index]
+    delta = first.input.get("delta", 0)
+    if not isinstance(delta, (int, float)) or isinstance(delta, bool) or delta == 0:
+        return 1
+    sign = 1 if delta > 0 else -1
+    length = 1
+    while index + length < len(source):
+        candidate = source[index + length]
+        previous = source[index + length - 1]
+        candidate_delta = candidate.input.get("delta", 0)
+        if (
+            candidate.type != "scroll_commit"
+            or not isinstance(candidate_delta, (int, float))
+            or isinstance(candidate_delta, bool)
+            or candidate_delta == 0
+            or (1 if candidate_delta > 0 else -1) != sign
+            or not _same_target(previous, candidate)
+            or candidate.monotonic_ms - previous.monotonic_ms > coalesce_ms
+        ):
+            break
+        length += 1
+    return length
+
+
+def coalesce_events(
+    events: Iterable[RawCaptureEvent],
+    *,
+    double_click_ms: int = 500,
+    scroll_coalesce_ms: int = 500,
+) -> tuple[RawCaptureEvent, ...]:
     """Coalesce deterministic pairs without discarding unsupported events."""
     source = list(events); result: list[RawCaptureEvent] = []; index = 0
     while index < len(source):
         current = source[index]
+        if current.type == "scroll_commit":
+            run = _scroll_run_length(source, index, scroll_coalesce_ms)
+            if run > 1:
+                last = source[index + run - 1]
+                total = sum(source[index + offset].input.get("delta", 0) for offset in range(run))
+                evidence = dict(last.evidence)
+                if "beforeCapture" in current.evidence:
+                    evidence["beforeCapture"] = current.evidence["beforeCapture"]
+                if "captureError" in current.evidence:
+                    evidence["captureError"] = current.evidence["captureError"]
+                result.append(RawCaptureEvent(
+                    sequence=current.sequence,
+                    wall_time=last.wall_time,
+                    monotonic_ms=last.monotonic_ms,
+                    type="scroll_commit",
+                    scope=current.scope,
+                    input={**current.input, "delta": total, "notches": run},
+                    observed_target=current.observed_target,
+                    evidence=evidence,
+                    # The gesture ends on the last notch, and a verifier the
+                    # user binds afterwards binds to that notch's cause.
+                    causal_id=last.causal_id,
+                ))
+                index += run
+                continue
         recorded_double_click_ms = current.evidence.get("doubleClickIntervalMs")
         threshold = (
             recorded_double_click_ms
@@ -234,7 +300,17 @@ def _compile_event(event: RawCaptureEvent, step_no: int) -> tuple[RecordedStep, 
         args = {"item": event.input.get("value")}
     elif event.type == "scroll_commit":
         delta = event.input.get("delta", 0)
-        args = {"clicks": int(delta / 120) if isinstance(delta, (int, float)) else 0}
+        delta = delta if isinstance(delta, (int, float)) and not isinstance(delta, bool) else 0
+        # WHEEL_DELTA is 120 per notch, but high-resolution sources — an RDP
+        # client forwarding trackpad scroll, for one — report far smaller
+        # units. Dividing those by 120 truncates a real gesture to "do not
+        # scroll", so a gesture that moved always replays as at least one
+        # notch in its own direction. The bound result verifier is what proves
+        # the movement was enough; it fails loudly if it was not.
+        clicks = int(delta / 120)
+        if clicks == 0 and delta != 0:
+            clicks = 1 if delta > 0 else -1
+        args = {"clicks": clicks}
         # A scroll only proves something when an explicit content/position
         # verifier is bound to it.  compile_recording enforces that after
         # causally bound assertions have been folded into the step.
