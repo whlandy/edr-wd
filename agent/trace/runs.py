@@ -447,7 +447,7 @@ class RunContext:
         Idempotent: merges into the existing environment map."""
         if self.state == RunState.FINALIZED:
             raise InvalidStateTransitionError(
-                f"cannot record_environment in state {self.state}"
+                f"cannot record_environment in state {self.state.name}"
             )
         for k, v in environment.items():
             if not isinstance(k, str) or not isinstance(v, str):
@@ -458,7 +458,7 @@ class RunContext:
         """Record which targets the run was requested against."""
         if self.state == RunState.FINALIZED:
             raise InvalidStateTransitionError(
-                f"cannot record_requested_targets in state {self.state}"
+                f"cannot record_requested_targets in state {self.state.name}"
             )
         for t in targets:
             if not isinstance(t, str):
@@ -489,7 +489,7 @@ class RunContext:
         """
         if self.state == RunState.FINALIZED:
             raise InvalidStateTransitionError(
-                f"cannot add_case_attempt in state {self.state}"
+                f"cannot add_case_attempt in state {self.state.name}"
             )
         safe_case_id = sanitize_identifier(case_id)
         safe_trace_id = sanitize_identifier(trace_id)
@@ -531,7 +531,7 @@ class RunContext:
         """
         if self.state == RunState.FINALIZED:
             raise InvalidStateTransitionError(
-                f"cannot record_metric in state {self.state}"
+                f"cannot record_metric in state {self.state.name}"
             )
         self._metrics.append(MetricRecord.make(key, value))
 
@@ -554,7 +554,7 @@ class RunContext:
         """
         if self.state == RunState.FINALIZED:
             raise InvalidStateTransitionError(
-                f"cannot finalize in state {self.state}"
+                f"cannot finalize in state {self.state.name}"
             )
         self.state = RunState.FINALIZED
         self._ended_at = now_utc_iso()
