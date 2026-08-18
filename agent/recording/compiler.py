@@ -81,17 +81,52 @@ def _same_target(left: RawCaptureEvent, right: RawCaptureEvent) -> bool:
     )
 
 
+def _scroll_point(event: RawCaptureEvent) -> tuple[int, int] | None:
+    point = event.input.get("screenPoint")
+    if not isinstance(point, (list, tuple)) or len(point) != 2:
+        return None
+    try:
+        return int(point[0]), int(point[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _same_scroll_origin(
+    left: RawCaptureEvent, right: RawCaptureEvent, tolerance: int,
+) -> bool:
+    """Is this the same gesture, judged by where the pointer is?
+
+    Not by which control is under it: scrolling moves content beneath a
+    stationary pointer, so the hit-tested control changes several times inside
+    a single flick.  Keying coalescing on control identity therefore shatters
+    one gesture into as many steps as rows happened to pass by — in a live
+    capture, 67 notches became six steps for that reason alone.  The pointer is
+    what actually holds still.
+    """
+    if left.scope != right.scope:
+        return False
+    first, second = _scroll_point(left), _scroll_point(right)
+    if first is None or second is None:
+        return False
+    return (
+        abs(first[0] - second[0]) <= tolerance
+        and abs(first[1] - second[1]) <= tolerance
+    )
+
+
 def _scroll_run_length(
     source: list[RawCaptureEvent], index: int, coalesce_ms: int,
+    point_tolerance: int = 4,
 ) -> int:
     """How many consecutive notches belong to one scroll gesture.
 
-    A wheel gesture arrives as a burst of one-notch events. Compiling each
-    notch into its own step multiplies the verifier a user must bind and
-    describes the flow as ten scrolls when they performed one. Only a run on
-    the same target, in the same direction, within the burst window merges —
-    reversing direction is a new gesture, and summing across it would cancel
-    the movement out.
+    A wheel gesture arrives as a burst of notches, and a trackpad forwarded
+    over RDP keeps sending a decaying tail after the finger lifts. Compiling
+    each notch into its own step multiplies the verifier a user must bind and
+    describes one flick as dozens of scrolls. Only a run from the same pointer
+    position, in the same direction, within the burst window merges — reversing
+    direction is a new gesture, and summing across it would cancel the movement
+    out.
     """
     first = source[index]
     delta = first.input.get("delta", 0)
@@ -109,7 +144,7 @@ def _scroll_run_length(
             or isinstance(candidate_delta, bool)
             or candidate_delta == 0
             or (1 if candidate_delta > 0 else -1) != sign
-            or not _same_target(previous, candidate)
+            or not _same_scroll_origin(previous, candidate, point_tolerance)
             or candidate.monotonic_ms - previous.monotonic_ms > coalesce_ms
         ):
             break
