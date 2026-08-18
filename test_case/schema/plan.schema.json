@@ -62,7 +62,7 @@
           "type": "integer"
         },
         "type": {
-          "description": "Mirrors the P1.2 / P1.4 expectation registry (13 types).",
+          "description": "Mirrors the P1.2 / P1.4 expectation registry (14 types).",
           "enum": [
             "action_ok",
             "window_open",
@@ -76,6 +76,7 @@
             "control_checked_equals",
             "control_enabled_equals",
             "window_text_contains",
+            "control_text_contains_time",
             "visual_evidence_captured"
           ],
           "type": "string"

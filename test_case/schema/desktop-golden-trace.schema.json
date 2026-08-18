@@ -253,7 +253,8 @@
             "visible",
             "checked",
             "enabled",
-            "window_open"
+            "window_open",
+            "text_contains_time"
           ]
         },
         "expected": {},

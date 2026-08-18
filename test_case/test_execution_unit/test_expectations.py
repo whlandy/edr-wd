@@ -54,7 +54,7 @@ def _err_receipt():
     )
 
 
-def test_registry_has_all_thirteen_evaluators():
+def test_registry_has_every_documented_evaluator():
     """Recording replay extends state assertions without removing existing evaluators."""
     expected = {
         "action_ok",
@@ -69,6 +69,7 @@ def test_registry_has_all_thirteen_evaluators():
         "control_checked_equals",
         "control_enabled_equals",
         "window_text_contains",
+        "control_text_contains_time",
         "visual_evidence_captured",
     }
     assert set(EXPECTATION_REGISTRY.keys()) == expected

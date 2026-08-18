@@ -37,6 +37,7 @@ from .enums import (
     EXPECTATION_CONTROL_ABSENT,
     EXPECTATION_CONTROL_EXISTS,
     EXPECTATION_CONTROL_TEXT_CONTAINS,
+    EXPECTATION_CONTROL_TEXT_CONTAINS_TIME,
     EXPECTATION_CONTROL_TEXT_EQUALS,
     EXPECTATION_CONTROL_VALUE_EQUALS,
     EXPECTATION_CONTROL_CHECKED_EQUALS,
@@ -99,6 +100,15 @@ _EXPECTATION_TYPE_REGISTRY_RAW: dict[str, ExpectationTypeSpec] = {
     EXPECTATION_CONTROL_TEXT_CONTAINS: ExpectationTypeSpec(
         type=EXPECTATION_CONTROL_TEXT_CONTAINS,
         description="Normalized control text contains the value.",
+        required_fields=("selector", "value"),
+    ),
+    EXPECTATION_CONTROL_TEXT_CONTAINS_TIME: ExpectationTypeSpec(
+        type=EXPECTATION_CONTROL_TEXT_CONTAINS_TIME,
+        description=(
+            "Normalized control text contains a strftime pattern rendered "
+            "against the clock at evaluation time, so a recorded 'today' "
+            "means the day the replay runs."
+        ),
         required_fields=("selector", "value"),
     ),
     EXPECTATION_CONTROL_VALUE_EQUALS: ExpectationTypeSpec(
