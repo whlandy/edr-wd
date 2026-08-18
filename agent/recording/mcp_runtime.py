@@ -40,9 +40,14 @@ class MCPObservationProvider:
         max_depth: int = 12,
         trace_store: TraceStore | None = None,
         capture_screenshot: bool = False,
+        timeout: float | None = None,
     ) -> None:
         self._agent = agent
         self._max_depth = max_depth
+        # Observation is several tool calls plus, in visual modes, a redacted
+        # window capture. The per-call default is sized for a single cheap
+        # call and times out well before that finishes on a live target.
+        self._timeout = timeout
         self._counter = 0
         self._latest: str | None = None
         self._snapshots: dict[str, dict] = {}
@@ -50,14 +55,14 @@ class MCPObservationProvider:
         self._capture_screenshot = capture_screenshot
 
     def refresh(self) -> str:
-        verified = self._agent.call_tool("verify_window_lock", {"activate": False})
+        verified = self._agent.call_tool("verify_window_lock", {"activate": False}, timeout=self._timeout)
         if not isinstance(verified, Mapping) or not verified.get("ok"):
             raise BackendUnavailable(
                 (verified.get("error") if isinstance(verified, Mapping) else None)
                 or "window ownership verification failed"
             )
-        lock_result = self._agent.call_tool("get_window_lock", {})
-        tree = self._agent.call_tool("dump_tree", {"max_depth": self._max_depth})
+        lock_result = self._agent.call_tool("get_window_lock", {}, timeout=self._timeout)
+        tree = self._agent.call_tool("dump_tree", {"max_depth": self._max_depth}, timeout=self._timeout)
         if not tree.get("ok"):
             raise BackendUnavailable(tree.get("error") or "dump_tree failed")
         lock = lock_result.get("lock") if lock_result.get("ok") else None
@@ -123,7 +128,7 @@ class MCPObservationProvider:
             # replay_capture is the target-side source-redacted path.  Using it
             # rather than the raw screenshot tool is what makes a runtime frame
             # safe to persist into an execution report.
-            screenshot = self._agent.call_tool("replay_capture", {})
+            screenshot = self._agent.call_tool("replay_capture", {}, timeout=self._timeout)
             if not isinstance(screenshot, Mapping):
                 raise BackendUnavailable("replay_capture response is invalid")
             if screenshot.get("capture_scope") != "window":
@@ -187,9 +192,16 @@ class MCPObservationProvider:
 
 
 class MCPActionDispatch:
-    def __init__(self, agent: Any, *, trace_store: TraceStore | None = None) -> None:
+    def __init__(
+        self,
+        agent: Any,
+        *,
+        trace_store: TraceStore | None = None,
+        timeout: float | None = None,
+    ) -> None:
         self._agent = agent
         self._trace_store = trace_store
+        self._timeout = timeout
 
     def __call__(
         self,
@@ -222,7 +234,7 @@ class MCPActionDispatch:
             "args": dict(args),
             "target_ref": dict(target_ref or {}),
             "request_id": request_id,
-        })
+        }, timeout=self._timeout)
         if not isinstance(result, Mapping) or "code" not in result:
             receipt = normalize(
                 result,

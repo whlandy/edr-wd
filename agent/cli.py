@@ -483,6 +483,10 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--trace-root", default="result-report/replay-traces", help="Agent-local append-only replay trace root")
     replay.add_argument("--replay-mode", choices=["semantic_only", "semantic_first", "visual_only"], default="semantic_only")
     replay.add_argument(
+        "--timeout", type=float, default=60.0,
+        help="Per-call MCP timeout for replay observation and dispatch",
+    )
+    replay.add_argument(
         "--persist-screenshots",
         action="store_true",
         help="Write target-side source-redacted runtime frames into the replay trace",
@@ -883,6 +887,7 @@ def main(argv: list[str] | None = None) -> int:
             capture_screenshot=(
                 args.replay_mode != "semantic_only" or args.persist_screenshots
             ),
+            timeout=args.timeout,
         )
         visual_resolver = None
         if args.replay_mode != "semantic_only":
@@ -920,7 +925,7 @@ def main(argv: list[str] | None = None) -> int:
             return (spec.risk, spec.side_effect) if spec is not None else ("low", "none")
 
         executor = AtomicExecutor(
-            dispatch=MCPActionDispatch(agent, trace_store=trace_store),
+            dispatch=MCPActionDispatch(agent, trace_store=trace_store, timeout=args.timeout),
             observation_provider=observations,
             confirmation_gate=ConfirmationGate(),
             risk_lookup=risk_lookup,
