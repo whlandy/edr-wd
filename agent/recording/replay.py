@@ -69,10 +69,41 @@ def _control_match(candidate: Any, control: Mapping[str, Any]) -> bool:
             return False
     expected_ancestry = control.get("ancestry") or []
     if expected_ancestry:
-        actual_ancestry = _get(candidate, "ancestry") or []
-        if list(actual_ancestry) != list(expected_ancestry):
+        actual_ancestry = list(_get(candidate, "ancestry") or [])
+        # The recorder walks the UIA tree; the replay observation reports
+        # whatever depth its own dump provides, often none. Demanding equality
+        # makes a selector that can never match, so the recorded chain need
+        # only be contained in the observed one, nearest ancestor first.
+        if not _ancestry_contains(actual_ancestry, list(expected_ancestry)):
             return False
     return True
+
+
+def _ancestry_contains(actual: list, expected: list) -> bool:
+    if not expected:
+        return True
+    if len(actual) < len(expected):
+        return False
+    return all(
+        _ancestor_matches(actual[index], expected[index])
+        for index in range(len(expected))
+    )
+
+
+def _ancestor_matches(actual: Any, expected: Any) -> bool:
+    if not isinstance(expected, Mapping):
+        return actual == expected
+    if not isinstance(actual, Mapping):
+        return False
+    return all(
+        str(actual.get(key) or actual.get(_snake(key)) or "") == str(value)
+        for key, value in expected.items()
+        if value not in (None, "")
+    )
+
+
+def _snake(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
 def resolve_replay_selector(selector: ReplaySelector, observation: Any) -> TargetRef:

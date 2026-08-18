@@ -815,3 +815,109 @@ def test_replay_without_a_runtime_frame_persists_nothing(tmp_path):
         event.event_type is EventType.SCREENSHOT_PERSISTED
         for event in store.read_events()
     )
+
+
+# ── ancestry must not turn a unique id into an unmatchable selector ──────────
+
+
+def test_a_uniquely_identified_control_carries_no_ancestry():
+    """The recorder walks the tree; the replay observation may report none."""
+    from agent.recording.selectors import synthesize_selector
+    from target.recording.models import CaptureScope, ObservedTarget, RawCaptureEvent
+
+    event = RawCaptureEvent(
+        sequence=1, wall_time="2026-08-18T00:00:00Z", monotonic_ms=1,
+        type="pointer_click",
+        scope=CaptureScope("t", "windows_pywinauto", "EDRClient.exe", "^logo1$"),
+        input={"button": "left"},
+        observed_target=ObservedTarget(
+            "OBS-1", "T0001", "sha256:x", "Button",
+            automation_id="EdrMainWindow.logCenterBtn", text="日志中心",
+            ancestry=({"automationId": "EdrMainWindow.operationWidget",
+                       "controlType": "Group"},),
+        ),
+    )
+
+    control = synthesize_selector(event).control
+
+    assert control["automationId"] == "EdrMainWindow.logCenterBtn"
+    assert "ancestry" not in control
+
+
+def test_a_control_without_a_strong_id_still_keeps_its_ancestry():
+    from agent.recording.selectors import synthesize_selector
+    from target.recording.models import CaptureScope, ObservedTarget, RawCaptureEvent
+
+    event = RawCaptureEvent(
+        sequence=1, wall_time="2026-08-18T00:00:00Z", monotonic_ms=1,
+        type="pointer_click",
+        scope=CaptureScope("t", "windows_pywinauto", "EDRClient.exe", "^logo1$"),
+        input={"button": "left"},
+        observed_target=ObservedTarget(
+            "OBS-1", "T0001", "sha256:x", "DataItem",
+            text="管理员",
+            ancestry=({"automationId": "table", "controlType": "Table"},),
+        ),
+    )
+
+    assert synthesize_selector(event).control["ancestry"] == [
+        {"automationId": "table", "controlType": "Table"},
+    ]
+
+
+def _ancestry_selector(ancestry):
+    return ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"controlType": "DataItem", "name": "管理员", "ancestry": ancestry},
+    )
+
+
+def _row(ancestry):
+    return {
+        "process_name": "EDRClient.exe", "window_title": "EDRClient",
+        "control_type": "DataItem", "text": "管理员", "ancestry": ancestry,
+    }
+
+
+def test_a_recorded_chain_matches_a_deeper_observed_one():
+    runtime, _, calls = _runtime([_row([
+        {"automation_id": "table", "control_type": "Table"},
+        {"automation_id": "page", "control_type": "Group"},
+        {"automation_id": "root", "control_type": "Window"},
+    ])])
+    step = RecordedStep(
+        "step-0001", "gui.click", {},
+        _ancestry_selector([{"automationId": "table", "controlType": "Table"}]),
+    )
+
+    result = replay_golden_trace(runtime, _golden(step))
+
+    assert result.task_success is True and len(calls) == 1
+
+
+def test_a_chain_that_disagrees_still_fails_to_match():
+    runtime, _, calls = _runtime([_row([
+        {"automation_id": "other", "control_type": "Table"},
+    ])])
+    step = RecordedStep(
+        "step-0001", "gui.click", {},
+        _ancestry_selector([{"automationId": "table", "controlType": "Table"}]),
+    )
+
+    result = replay_golden_trace(runtime, _golden(step))
+
+    assert calls == []
+    assert result.case_result.step_results[0].error["code"] == "replay_target_not_found"
+
+
+def test_an_observation_reporting_no_ancestry_cannot_satisfy_a_recorded_chain():
+    runtime, _, calls = _runtime([_row([])])
+    step = RecordedStep(
+        "step-0001", "gui.click", {},
+        _ancestry_selector([{"automationId": "table", "controlType": "Table"}]),
+    )
+
+    result = replay_golden_trace(runtime, _golden(step))
+
+    assert calls == []
+    assert result.case_result.step_results[0].error["code"] == "replay_target_not_found"

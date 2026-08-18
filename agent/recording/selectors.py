@@ -22,16 +22,22 @@ def _control(identity: Mapping[str, Any]) -> dict[str, Any] | None:
         "identifier": identity.get("identifier"),
         "controlType": identity.get("controlType"),
         "name": identity.get("text"),
-        "ancestry": [dict(x) for x in (identity.get("ancestry") or [])],
         "fingerprint": identity.get("fingerprint"),
     }
     control = {k: v for k, v in control.items() if v not in (None, [], "")}
-    stable_identity = (
-        identity.get("automationId") or identity.get("identifier")
-        or (identity.get("controlType") and identity.get("text"))
-    )
-    if not stable_identity:
+    strong_identity = identity.get("automationId") or identity.get("identifier")
+    if not strong_identity and not (
+        identity.get("controlType") and identity.get("text")
+    ):
         return None
+    # Ancestry only earns its place when the control cannot identify itself.
+    # It is captured by walking the UIA tree, which is not how the replay-time
+    # observation reports it, so requiring it to match narrows the selector to
+    # nothing while adding no discriminating power a unique id does not have.
+    if not strong_identity:
+        ancestry = [dict(x) for x in (identity.get("ancestry") or [])]
+        if ancestry:
+            control["ancestry"] = ancestry
     return control
 
 
