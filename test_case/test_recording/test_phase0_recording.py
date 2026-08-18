@@ -290,10 +290,10 @@ _DRAG_INPUT = {
 }
 
 
-def _bound_assertion(sequence: int, causal_id: str, **overrides) -> dict:
+def _bound_assertion(sequence: int, causal_id: str, *, ms: int | None = None, **overrides) -> dict:
     assertion = {"type": "visible", "expected": True, "timeoutSeconds": 5.0}
     assertion.update(overrides)
-    return _event(sequence, "assertion", assertion=assertion, causal_id=causal_id)
+    return _event(sequence, "assertion", ms=ms, assertion=assertion, causal_id=causal_id)
 
 
 @pytest.mark.parametrize(
@@ -672,3 +672,54 @@ def test_clicks_are_unaffected_and_still_target_the_row():
         _event(1, "pointer_click", target=_LOG_ROW, input_={"button": "left"}),
     ))
     assert result.case.steps[0].selector.control["name"] == "用户 admin : 更新语言设置"
+
+
+def test_a_verifier_on_the_last_scroll_covers_the_run_before_it():
+    """Scrolling twice and asserting once is one claim, not two."""
+    events = [
+        _scroll(1, ms=100, causal_id="cause-1"),
+        _scroll(2, ms=5000, causal_id="cause-2"),
+        _bound_assertion(3, "cause-2", ms=5100),
+    ]
+    result = compile_recording(_recording(*events))
+    scrolls = [s for s in result.case.steps if s.action_id == "pointer.scroll"]
+    assert len(scrolls) == 2
+    assert result.golden.status == "ready"
+    assert scrolls[0].issues == ()
+
+
+def test_an_unverified_run_is_still_incomplete():
+    events = [_scroll(1, ms=100), _scroll(2, ms=5000)]
+    result = compile_recording(_recording(*events))
+    assert result.golden.status == "incomplete"
+    assert all(
+        s.issues == ("compile_scroll_verifier_required",)
+        for s in result.case.steps if s.action_id == "pointer.scroll"
+    )
+
+
+def test_an_action_between_scrolls_breaks_the_run():
+    """A click in between means the earlier scroll stands on its own."""
+    events = [
+        _scroll(1, ms=100, causal_id="cause-1"),
+        _event(2, "pointer_click", ms=2000, causal_id="cause-2"),
+        _scroll(3, ms=4000, causal_id="cause-3"),
+        _bound_assertion(4, "cause-3", ms=4100),
+    ]
+    result = compile_recording(_recording(*events))
+    scrolls = [s for s in result.case.steps if s.action_id == "pointer.scroll"]
+    assert scrolls[0].issues == ("compile_scroll_verifier_required",)
+    assert scrolls[1].issues == ()
+
+
+def test_a_run_on_a_different_target_does_not_cover_the_earlier_scroll():
+    other = {**_SCROLL_TARGET, "fingerprint": "sha256:other", "automationId": "sideList"}
+    events = [
+        _scroll(1, ms=100, causal_id="cause-1"),
+        _event(2, "scroll_commit", ms=5000, target=other,
+               input_={"delta": -120, "screenPoint": [900, 300]}, causal_id="cause-2"),
+        _bound_assertion(3, "cause-2", ms=5100),
+    ]
+    result = compile_recording(_recording(*events))
+    scrolls = [s for s in result.case.steps if s.action_id == "pointer.scroll"]
+    assert scrolls[0].issues == ("compile_scroll_verifier_required",)

@@ -501,8 +501,25 @@ def compile_recording(
             if event.type in VERIFIER_REQUIRED_EVENT_TYPES:
                 verifier_required[last_action_index] = (event.type, event.sequence)
 
+    def _run_is_verified(index: int) -> bool:
+        """Is this step covered by a verifier bound later in the same run?
+
+        Scrolling twice and asserting once is one claim about where the list
+        ended up, not two. Demanding separate proof for the intermediate
+        gesture asks the user to verify a state they never asserted, so a
+        verifier bound to a later step of an uninterrupted run on the same
+        target satisfies the earlier ones too.
+        """
+        step = steps[index]
+        for later in steps[index + 1:]:
+            if later.action_id != step.action_id or later.selector != step.selector:
+                return False
+            if later.verifiers:
+                return True
+        return False
+
     for index, (event_type, sequence) in verifier_required.items():
-        if steps[index].verifiers:
+        if steps[index].verifiers or _run_is_verified(index):
             continue
         code, message = _VERIFIER_REQUIRED_ISSUE[event_type]
         issue = CompileIssue(code, sequence, message)
