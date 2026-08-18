@@ -111,6 +111,7 @@ class QueuedCaptureSource:
         self.dropped_packets = 0
         self.correlation_errors: list[str] = []
         self.last_observed_target = None
+        self.seeded_scope: tuple[str, ...] = ()
         self._flushed = False
 
     def _flush_pending(self) -> None:
@@ -208,6 +209,14 @@ class QueuedCaptureSource:
     def start(self) -> None:
         if self._started:
             raise RuntimeError("capture source already started")
+        # Admit the application's existing windows before any input arrives:
+        # scope growth by transition only sees windows opened from here on.
+        seed = getattr(self._correlator, "seed_scope", None)
+        if callable(seed):
+            try:
+                self.seeded_scope = tuple(seed(self.scope) or ())
+            except Exception as exc:
+                self.correlation_errors.append(str(exc))
         self._started = True
         self._stop_requested.clear()
         self._flushed = False

@@ -761,15 +761,18 @@ def test_out_of_scope_input_is_counted_rather_than_silently_dropped():
     assert correlator.out_of_scope_events == 3
 
 
-def test_the_scope_only_grows_for_windows_an_action_actually_opened():
-    """A background window opening on its own must not widen the scope."""
+def test_a_window_opening_on_its_own_is_not_a_step_but_is_still_in_scope():
+    """Nothing the user did explains it, so it is not a recorded action.
+
+    The scope still follows it: they may click inside it next, and dropping
+    that input is how a recording ends up empty.
+    """
     resolver = _log_center_resolver()
     correlator = WindowsUIACorrelator(resolver)
 
-    # No preceding action, so the transition is not recorded at all.
     assert correlator.correlate(_transition("opened", 300, title="弹窗"), SCOPE, 1) is None
-    assert _record_click(correlator, resolver, "弹窗", 500) is None
-    assert correlator.out_of_scope_events == 1
+    assert _record_click(correlator, resolver, "弹窗", 500) is not None
+    assert correlator.out_of_scope_events == 0
 
 
 def _wheel(monotonic_ms, delta=-120, point=(619, 520)):
@@ -878,3 +881,65 @@ def test_content_moving_under_the_pointer_does_not_split_the_gesture():
 
     assert produced == []
     assert correlator.flush(SCOPE, 1).input["notches"] == 4
+
+
+class _SeedResolver(_Resolver):
+    """Reports the application's already-open windows."""
+
+    def __init__(self, windows):
+        super().__init__()
+        self._windows = windows
+        self.window_title = "EDRClient"
+
+    def foreground(self):
+        return {"processName": self.process, "windowTitle": self.window_title, "pid": 42}
+
+    def windows(self):
+        return self._windows
+
+
+def test_a_window_already_open_when_recording_starts_is_in_scope():
+    """A live capture lost 102 of 103 events to exactly this gap."""
+    resolver = _SeedResolver([
+        {"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe"},
+        {"title": "日志中心", "pid": 42, "processName": "EDRClient.exe"},
+    ])
+    correlator = WindowsUIACorrelator(resolver)
+
+    seeded = correlator.seed_scope(SCOPE)
+
+    assert set(seeded) == {"EDRClient", "日志中心"}
+    assert _record_click(correlator, resolver, "日志中心", 100) is not None
+    assert correlator.out_of_scope_events == 0
+
+
+def test_seeding_admits_only_the_scoped_application():
+    resolver = _SeedResolver([
+        {"title": "日志中心", "pid": 42, "processName": "EDRClient.exe"},
+        {"title": "logo1", "pid": 60, "processName": "HiSecEndpointAgent.exe"},
+        {"title": "记事本", "pid": 70, "processName": "Notepad.exe"},
+    ])
+    correlator = WindowsUIACorrelator(resolver)
+    assert correlator.seed_scope(SCOPE) == ("日志中心",)
+
+
+def test_a_resolver_that_cannot_enumerate_windows_seeds_nothing():
+    correlator = WindowsUIACorrelator(_Resolver())
+    assert correlator.seed_scope(SCOPE) == ()
+
+
+def test_the_capture_source_seeds_the_scope_before_hooks_start():
+    resolver = _SeedResolver([
+        {"title": "日志中心", "pid": 42, "processName": "EDRClient.exe"},
+    ])
+    correlator = WindowsUIACorrelator(resolver)
+    driver = _FakeDriver()
+    source = QueuedCaptureSource(
+        scope=SCOPE, sink=lambda event: True, driver=driver, correlator=correlator,
+    )
+
+    source.start()
+    try:
+        assert source.seeded_scope == ("日志中心",)
+    finally:
+        source.stop()
