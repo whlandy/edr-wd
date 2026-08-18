@@ -22,7 +22,8 @@ from agent.trace.store import TraceStore
 from agent.recording.artifacts import write_compilation_artifacts
 from agent.recording.compiler import compile_recording
 from agent.recording.mcp_runtime import MCPActionDispatch, MCPObservationProvider
-from agent.recording.replay import ReplayRuntime, load_golden_trace, replay_golden_trace
+from agent.recording.replay import load_golden_trace, replay_golden_trace
+from agent.recording.runtime import build_replay_runtime
 from agent.recording.pillow_matcher import PillowTemplateMatcher
 from agent.recording.visual import SafeVisualResolver
 from agent.subagent.target_agent import TargetSubAgent
@@ -848,107 +849,24 @@ def main(argv: list[str] | None = None) -> int:
                 "code": "recording_session_active",
                 "error": "capture and replay cannot run concurrently on the same target",
             })
-        selectors = [
-            step.selector for step in (*golden.steps, *golden.cleanup)
-            if step.selector is not None
-        ]
-        first_selector = selectors[0] if selectors else None
-        process_name = golden.environment.get("application") or (
-            first_selector.window.get("processName") if first_selector else None
-        )
-        title_re = first_selector.window.get("titleRegex") if first_selector else None
-        if not process_name or not title_re:
-            return _print_result({
-                "ok": False,
-                "code": "replay_scope_missing",
-                "error": "golden trace has no application process/title scope",
-            })
-        connected = agent.call_tool("connect", {
-            "process_name": process_name, "title_re": title_re, "timeout": 10.0,
-        })
-        if not connected.get("ok"):
-            return _print_result(connected)
-        locked = agent.call_tool("lock_window", {
-            "process_name": process_name, "title_re": title_re,
-            "strict": True, "activate": True,
-        })
-        if not locked.get("ok"):
-            return _print_result(locked)
-        verified = agent.call_tool("verify_window_lock", {"activate": True})
-        if not verified.get("ok"):
-            return _print_result(verified)
-
-        trace_store = TraceStore(Path(args.trace_root).expanduser().resolve())
-        trace_store.open()
-        observations = MCPObservationProvider(
-            agent,
-            max_depth=args.max_depth,
-            trace_store=trace_store,
-            capture_screenshot=(
-                args.replay_mode != "semantic_only" or args.persist_screenshots
-            ),
-            timeout=args.timeout,
-        )
-        visual_resolver = None
-        if args.replay_mode != "semantic_only":
-            matcher = PillowTemplateMatcher()
-            asset_root = Path(args.golden_trace).expanduser().resolve().parent
-
-            def verified_template_path(template: str, visual: dict | None = None):
-                template_path = (asset_root / template).resolve()
-                if asset_root != template_path and asset_root not in template_path.parents:
-                    return None
-                if visual is not None:
-                    expected = visual.get("elementSha256")
-                    if not isinstance(expected, str) or not template_path.is_file():
-                        return None
-                    actual = "sha256:" + hashlib.sha256(template_path.read_bytes()).hexdigest()
-                    if actual != expected:
-                        return None
-                return template_path
-
-            def match_template(template: str, observation: dict):
-                template_path = verified_template_path(template)
-                if template_path is None:
-                    return []
-                return matcher(str(template_path), observation)
-
-            visual_resolver = SafeVisualResolver(
-                match_template,
-                template_verifier=lambda template, visual: (
-                    verified_template_path(template, dict(visual)) is not None
-                ),
-            )
-
-        def risk_lookup(action_id: str) -> tuple[str, str]:
-            spec = get_spec(ACTIONS_V1, action_id)
-            return (spec.risk, spec.side_effect) if spec is not None else ("low", "none")
-
-        executor = AtomicExecutor(
-            dispatch=MCPActionDispatch(agent, trace_store=trace_store, timeout=args.timeout),
-            observation_provider=observations,
-            confirmation_gate=ConfirmationGate(),
-            risk_lookup=risk_lookup,
-        )
-        run = replay_golden_trace(
-            ReplayRuntime(
-                executor=executor,
-                catalog_version=CATALOG_VERSION,
-                catalog_digest=catalog_digest(),
-                execution_context=ExecutionContext(
-                    profile=args.profile,
-                    confirmation_tokens=frozenset(args.confirm_action),
-                ),
-                trace_store=trace_store,
+        try:
+            runtime = build_replay_runtime(
+                agent,
+                golden,
+                profile=args.profile,
+                trace_root=args.trace_root,
+                asset_root=Path(args.golden_trace).expanduser().resolve().parent,
                 replay_mode=args.replay_mode,
-                visual_resolver=visual_resolver,
-                persist_replay_screenshots=args.persist_screenshots,
-                window_focus=lambda process_name, title_regex: observations.get_snapshot(
-                    observations.focus_window(process_name, title_regex)
-                ),
-            ),
-            golden,
-        )
+                max_depth=args.max_depth,
+                timeout=args.timeout,
+                persist_screenshots=args.persist_screenshots,
+                confirm_actions=args.confirm_action,
+            )
+        except RecordingModelError as exc:
+            return _print_result({
+                "ok": False, "code": exc.code, "error": str(exc), "path": exc.path,
+            })
+        run = replay_golden_trace(runtime, golden)
         return _print_result({
             "ok": run.evaluation.task_success,
             "case": run.case_result.to_dict(),
