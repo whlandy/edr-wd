@@ -354,6 +354,7 @@ class WindowsUIACorrelator:
         double_click_ms: int | None = None,
         drag_threshold: tuple[int, int] | None = None,
         transition_window_ms: int = 3000,
+        scroll_gesture_ms: int = 500,
     ) -> None:
         self._resolver = resolver or WindowsUIAResolver()
         self._active_edit: Mapping[str, object] | None = None
@@ -362,6 +363,10 @@ class WindowsUIACorrelator:
         self._pending_press: dict[str, object] | None = None
         self._last_action_causal_id: str | None = None
         self._last_action_ms: int | None = None
+        self._pending_scroll: dict[str, object] | None = None
+        if scroll_gesture_ms < 0:
+            raise ValueError("scroll_gesture_ms must be non-negative")
+        self._scroll_gesture_ms = scroll_gesture_ms
         # Windows this recording caused to open.  Input inside them belongs to
         # the flow being recorded even though their titles cannot match the
         # scope regex the user supplied for the entry window.
@@ -594,7 +599,7 @@ class WindowsUIACorrelator:
         self,
         scope: CaptureScope,
         sequence: int,
-    ) -> RawCaptureEvent | None:
+    ) -> RawCaptureEvent | tuple[RawCaptureEvent, ...] | None:
         """Commit the final focused value when recording stops."""
         foreground = self._resolver.foreground()
         if not self._process_matches(foreground.get("processName"), scope.process_name):
@@ -604,7 +609,12 @@ class WindowsUIACorrelator:
                 return None
         except re.error:
             return None
-        return self._text_commit(
+        # A recording can stop with the wheel still spinning; that gesture is
+        # real input and must not be dropped just because nothing followed it.
+        scrolled = self._flush_scroll(scope, sequence)
+        if scrolled is not None:
+            sequence += 1
+        committed = self._text_commit(
             packet=HookPacket(
                 kind="flush",
                 monotonic_ms=int(time.monotonic() * 1000),
@@ -614,6 +624,10 @@ class WindowsUIACorrelator:
             sequence=sequence,
             foreground=foreground,
         )
+        produced = tuple(x for x in (scrolled, committed) if x is not None)
+        if not produced:
+            return None
+        return produced[0] if len(produced) == 1 else produced
 
     def _in_scope(self, foreground: Mapping[str, object], scope: CaptureScope) -> bool:
         """Is this foreground window part of the recording's scope?
@@ -634,6 +648,53 @@ class WindowsUIACorrelator:
                 "recording_scope_not_unique", str(exc), path="scope.windowTitle"
             )
         return title in self._derived_scope_titles
+
+    def _scroll_continues(self, packet: HookPacket) -> bool:
+        """Does this notch belong to the gesture already in progress?
+
+        Scrolling moves content under a stationary pointer, so the control the
+        pointer is over changes constantly and cannot decide this. The pointer
+        position, direction and cadence can.
+        """
+        pending = self._pending_scroll
+        if pending is None or packet.kind != "scroll":
+            return False
+        delta = packet.native.get("delta", 0)
+        if not isinstance(delta, (int, float)) or isinstance(delta, bool) or delta == 0:
+            return False
+        if (1 if delta > 0 else -1) != pending["sign"]:
+            return False
+        if packet.monotonic_ms - int(pending["last_ms"]) > self._scroll_gesture_ms:
+            return False
+        point, origin = packet.screen_point, pending["point"]
+        if point is None or origin is None:
+            return False
+        return (
+            abs(point[0] - origin[0]) <= self._drag_threshold[0]
+            and abs(point[1] - origin[1]) <= self._drag_threshold[1]
+        )
+
+    def _flush_scroll(self, scope: CaptureScope, sequence: int) -> RawCaptureEvent | None:
+        """Emit the accumulated gesture as the single event it always was."""
+        pending = self._pending_scroll
+        self._pending_scroll = None
+        if pending is None:
+            return None
+        return RawCaptureEvent(
+            sequence=sequence,
+            wall_time=str(pending["wall_time"]),
+            monotonic_ms=int(pending["last_ms"]),
+            type="scroll_commit",
+            scope=scope,
+            input={
+                "delta": pending["delta"],
+                "screenPoint": list(pending["point"]),
+                "notches": pending["notches"],
+            },
+            observed_target=pending["observed"],
+            evidence={"foregroundPid": pending["pid"]},
+            causal_id=str(pending["causal_id"]),
+        )
 
     def _window_transition(
         self,
@@ -726,16 +787,30 @@ class WindowsUIACorrelator:
             target_data = focused() if callable(focused) else None
         observed = self._observed(target_data)
 
+        if self._scroll_continues(packet):
+            pending = self._pending_scroll
+            pending["delta"] += packet.native.get("delta", 0)
+            pending["notches"] = int(pending["notches"]) + 1
+            pending["last_ms"] = packet.monotonic_ms
+            pending["wall_time"] = packet.wall_time
+            pending["pid"] = foreground.get("pid")
+            return None
+
+        # Any other input ends the gesture, and the gesture is recorded before
+        # whatever ended it.  Nothing is persisted while the wheel is still
+        # turning, so one flick is one step rather than one step per notch.
+        pending_scroll = self._flush_scroll(scope, sequence)
+        if pending_scroll is not None:
+            sequence += 1
+
         if packet.kind == "pointer_down":
-            # A press only becomes evidence once its release proves whether the
-            # user clicked or dragged.  Nothing is persisted here.
             self._pending_press = {
                 "point": tuple(packet.screen_point or ()),
                 "button": packet.button or "left",
                 "monotonic_ms": packet.monotonic_ms,
                 "observed": observed,
             }
-            return None
+            return pending_scroll
 
         if packet.kind == "text_activity":
             focused = getattr(self._resolver, "focused", None)
@@ -746,7 +821,7 @@ class WindowsUIACorrelator:
             if any(tag in control_type for tag in ("edit", "document", "textfield", "textarea")):
                 self._active_edit = focused_target
                 self._edit_dirty = True
-            return None
+            return pending_scroll
 
         if packet.kind == "key_command":
             control_type = str(
@@ -766,13 +841,13 @@ class WindowsUIACorrelator:
             ):
                 self._active_edit = target_data
                 self._edit_dirty = True
-                return None
+                return pending_scroll
             if (
                 packet.key == "SPACE"
                 and control_type in {"checkbox", "radiobutton"}
                 and (target_data or {}).get("toggleState") is not None
             ):
-                return RawCaptureEvent(
+                toggled = RawCaptureEvent(
                     sequence=sequence,
                     wall_time=packet.wall_time,
                     monotonic_ms=packet.monotonic_ms,
@@ -783,12 +858,13 @@ class WindowsUIACorrelator:
                     evidence={"foregroundPid": foreground.get("pid")},
                     causal_id="CAUSE-" + uuid.uuid4().hex,
                 )
+                return toggled if pending_scroll is None else (pending_scroll, toggled)
             if (
                 packet.key in {"UP", "DOWN", "LEFT", "RIGHT", "HOME", "END"}
                 and control_type in {"listitem", "menuitem", "treeitem", "tabitem"}
                 and (target_data or {}).get("selected") is not None
             ):
-                return RawCaptureEvent(
+                selected = RawCaptureEvent(
                     sequence=sequence,
                     wall_time=packet.wall_time,
                     monotonic_ms=packet.monotonic_ms,
@@ -802,6 +878,7 @@ class WindowsUIACorrelator:
                     evidence={"foregroundPid": foreground.get("pid")},
                     causal_id="CAUSE-" + uuid.uuid4().hex,
                 )
+                return selected if pending_scroll is None else (pending_scroll, selected)
 
         pending_commit = None
         if self._active_edit is not None and (
@@ -835,7 +912,10 @@ class WindowsUIACorrelator:
                     evidence={"foregroundPid": foreground.get("pid")},
                     causal_id="CAUSE-" + uuid.uuid4().hex,
                 )
-                return (pending_commit, event) if pending_commit is not None else event
+                ordered = tuple(
+                    x for x in (pending_scroll, pending_commit, event) if x is not None
+                )
+                return ordered[0] if len(ordered) == 1 else ordered
             control_type = str(
                 (target_data or {}).get("controlType") or ""
             ).lower().removeprefix("ax")
@@ -857,16 +937,30 @@ class WindowsUIACorrelator:
                 self._active_edit = target_data
                 self._edit_dirty = False
         elif packet.kind == "scroll":
-            event_type = "scroll_commit"
-            event_input = {
-                "delta": packet.native.get("delta", 0),
-                "screenPoint": list(packet.screen_point or ()),
+            delta = packet.native.get("delta", 0)
+            if not isinstance(delta, (int, float)) or isinstance(delta, bool) or delta == 0:
+                return pending_scroll
+            self._pending_scroll = {
+                "delta": delta,
+                "notches": 1,
+                "sign": 1 if delta > 0 else -1,
+                "point": tuple(packet.screen_point or ()),
+                "last_ms": packet.monotonic_ms,
+                "wall_time": packet.wall_time,
+                "observed": observed,
+                "pid": foreground.get("pid"),
+                "causal_id": "CAUSE-" + uuid.uuid4().hex,
             }
+            return pending_scroll
         elif packet.kind == "key_command":
             event_type = "key_command"
             event_input = {"key": packet.key, "modifiers": list(packet.modifiers)}
         else:
-            return None
+            return pending_scroll
+        def _emit(*produced):
+            ordered = tuple(x for x in produced if x is not None)
+            return ordered[0] if len(ordered) == 1 else (ordered or None)
+
         evidence = {"foregroundPid": foreground.get("pid")}
         if event_type == "pointer_click":
             evidence["doubleClickIntervalMs"] = self._double_click_ms
@@ -881,7 +975,7 @@ class WindowsUIACorrelator:
             evidence=evidence,
             causal_id=self._causal_id(event_type, packet, observed),
         )
-        return (pending_commit, event) if pending_commit is not None else event
+        return _emit(pending_scroll, pending_commit, event)
 
 
 class WindowsWinEventDriver:
