@@ -246,6 +246,12 @@ class WindowsLowLevelHookDriver:
 class WindowsUIAResolver:
     """Resolve foreground ownership and one UIA element for a hook packet."""
 
+    def __init__(self, backend: object | None = None) -> None:
+        # The automation backend, when the server supplies it. Scope seeding
+        # asks it for the window list rather than enumerating the desktop a
+        # second time.
+        self._backend = backend
+
     def foreground(self) -> Mapping[str, object]:  # pragma: no cover - Windows only
         from ctypes import wintypes
 
@@ -325,23 +331,48 @@ class WindowsUIAResolver:
         }
 
     def windows(self) -> list[Mapping[str, object]]:  # pragma: no cover - Windows only
-        """Top-level windows with their owning process, for scope seeding."""
-        from pywinauto import Desktop
+        """Top-level windows with their owning process, for scope seeding.
+
+        This reuses the backend's own window enumeration rather than walking
+        the desktop again. A second implementation of the same query is how the
+        seed silently came back empty while `list_windows` was returning eight
+        windows on the same machine.
+        """
+        listing = self._backend.list_windows() if self._backend is not None else None
+        if not isinstance(listing, Mapping) or not listing.get("ok"):
+            raise RecordingModelError(
+                "recording_scope_seed_failed",
+                f"window enumeration failed: {listing}",
+                path="scope.seed",
+            )
+        items = listing.get("windows")
+        if not isinstance(items, list):
+            raise RecordingModelError(
+                "recording_scope_seed_failed",
+                "window enumeration returned no windows array",
+                path="scope.seed",
+            )
         import psutil
 
+        names: dict[int, str] = {}
         found: list[Mapping[str, object]] = []
-        for window in Desktop(backend="uia").windows():
-            try:
-                if not window.is_top_level() or not window.is_visible():
-                    continue
-                pid = int(window.process_id())
-                found.append({
-                    "title": window.window_text() or "",
-                    "pid": pid,
-                    "processName": psutil.Process(pid).name(),
-                })
-            except Exception:
+        for window in items:
+            if not isinstance(window, Mapping):
                 continue
+            pid = window.get("process_id") or window.get("pid")
+            if pid is None:
+                continue
+            pid = int(pid)
+            if pid not in names:
+                try:
+                    names[pid] = psutil.Process(pid).name()
+                except Exception:
+                    names[pid] = ""
+            found.append({
+                "title": str(window.get("title") or ""),
+                "pid": pid,
+                "processName": names[pid],
+            })
         return found
 
     def element_at(self, x: int, y: int) -> Mapping[str, object] | None:  # pragma: no cover - Windows only
@@ -658,12 +689,17 @@ class WindowsUIACorrelator:
         open event, so without seeding every click inside it is dropped — a
         live capture lost 102 of 103 events exactly that way.
         """
+        self.scope_seed_error: str | None = None
         enumerate_windows = getattr(self._resolver, "windows", None)
         if not callable(enumerate_windows):
+            self.scope_seed_error = "resolver cannot enumerate windows"
             return ()
         try:
             windows = enumerate_windows()
-        except Exception:
+        except Exception as exc:
+            # Returning an empty seed silently is what made a live recording
+            # drop 41 of 42 events with no indication why.
+            self.scope_seed_error = f"{type(exc).__name__}: {exc}"
             return ()
         seeded = []
         for window in windows or ():
@@ -1214,19 +1250,24 @@ class WindowsWinEventDriver:
         self._thread_id = None
 
 
-def windows_source_factory(scope: CaptureScope, sink: Callable[[RawCaptureEvent], bool]):
-    if sys.platform != "win32":
-        raise RecordingModelError(
-            "recording_capture_unavailable",
-            "windows_pywinauto recording requires a Windows target",
-            path="scope.backend",
+def windows_source_factory(backend: object | None = None):
+    """Build the Windows capture source, optionally bound to the backend."""
+
+    def create(scope: CaptureScope, sink: Callable[[RawCaptureEvent], bool]):
+        if sys.platform != "win32":
+            raise RecordingModelError(
+                "recording_capture_unavailable",
+                "windows_pywinauto recording requires a Windows target",
+                path="scope.backend",
+            )
+        return QueuedCaptureSource(
+            scope=scope,
+            sink=sink,
+            driver=CompositeHookDriver(
+                WindowsLowLevelHookDriver(),
+                WindowsWinEventDriver(scope.process_name),
+            ),
+            correlator=WindowsUIACorrelator(WindowsUIAResolver(backend)),
         )
-    return QueuedCaptureSource(
-        scope=scope,
-        sink=sink,
-        driver=CompositeHookDriver(
-            WindowsLowLevelHookDriver(),
-            WindowsWinEventDriver(scope.process_name),
-        ),
-        correlator=WindowsUIACorrelator(),
-    )
+
+    return create

@@ -87,6 +87,13 @@ class RecordingService:
             "ok": True,
             **self.manager.start(session, before_start=initialize_evidence).to_dict(),
             "scope": scope.to_dict(),
+            # Which of the application's existing windows the capture admitted.
+            # An empty list next to a busy application is the visible symptom
+            # of input being silently refused as out of scope.
+            "seededScope": list(getattr(source, "seeded_scope", ()) or ()),
+            "seededScopeError": getattr(
+                getattr(source, "_correlator", None), "scope_seed_error", None,
+            ),
         }
         if evidence_initialization is not None:
             result["evidenceInitialization"] = evidence_initialization
@@ -131,7 +138,7 @@ def source_factory_for_backend(
     if backend == "windows_pywinauto":
         from .windows import windows_source_factory
 
-        return windows_source_factory
+        return windows_source_factory(backend_object)
     if backend == "macos_accessibility":
         from .macos import macos_source_factory
 

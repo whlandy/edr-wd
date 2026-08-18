@@ -494,3 +494,27 @@ def test_assertion_editor_prefers_current_hover_target_over_last_event():
         "controlType": "CheckBox", "name": "启用备份",
     })
     service.stop()
+
+
+def test_start_reports_which_windows_the_scope_admitted():
+    """An empty seed beside a running application explains dropped input."""
+    from target.recording.service import RecordingService
+
+    class _Source:
+        seeded_scope = ("logo1", "日志中心")
+
+        def start(self): pass
+        def pause(self): pass
+        def resume(self): pass
+        def stop(self): pass
+
+    service = RecordingService(
+        target_name="win", backend="windows_pywinauto",
+        source_factory=lambda scope, sink: _Source(),
+    )
+
+    result = service.start(
+        name="flow", process_name="EDRClient.exe", window_title="^logo1$",
+    )
+
+    assert result["seededScope"] == ["logo1", "日志中心"]
