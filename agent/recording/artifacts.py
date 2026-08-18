@@ -14,7 +14,12 @@ from typing import Iterable, Mapping
 from target.recording.models import RawRecording
 
 from .compiler import CompilationResult, events_for_compiled_steps
-from .generate_pytest import render_pytest, safe_test_name
+from .generate_pytest import (
+    render_conftest,
+    render_pytest,
+    render_pytest_ini,
+    safe_test_name,
+)
 from .models import ReplaySelector, canonical_json
 from .templates import generate_redacted_templates
 from agent.execution import StepMaterializationError
@@ -30,6 +35,8 @@ class RecordingArtifacts:
     case: Path
     golden_trace: Path
     generated_test: Path
+    conftest: Path
+    pytest_ini: Path
     compile_report: Path
 
 
@@ -189,6 +196,8 @@ def write_compilation_artifacts(
         case=directory / "case.json",
         golden_trace=directory / "golden-trace.json",
         generated_test=directory / f"test_{safe_test_name(recording.name)}.py",
+        conftest=directory / "conftest.py",
+        pytest_ini=directory / "pytest.ini",
         compile_report=directory / "compile-report.json",
     )
     if captures:
@@ -198,6 +207,8 @@ def write_compilation_artifacts(
     _atomic_text(artifacts.case, result.case_json())
     _atomic_text(artifacts.golden_trace, result.golden_json())
     _atomic_text(artifacts.generated_test, render_pytest(recording.name))
+    _atomic_text(artifacts.conftest, render_conftest())
+    _atomic_text(artifacts.pytest_ini, render_pytest_ini())
     report = result.report_dict()
     report["artifactIssues"] = [dict(issue) for issue in artifact_issues]
     _atomic_text(artifacts.compile_report, canonical_json(report))

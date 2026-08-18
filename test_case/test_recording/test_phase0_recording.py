@@ -8,7 +8,11 @@ import jsonschema
 
 from agent.recording.compiler import coalesce_events, compile_recording
 from agent.recording.artifacts import write_compilation_artifacts
-from agent.recording.generate_pytest import render_pytest
+from agent.recording.generate_pytest import (
+    render_conftest,
+    render_pytest,
+    render_pytest_ini,
+)
 from agent.recording.models import GoldenTrace, RecordedTestCase, ReplayEvaluation, ReplaySelector
 from agent.cli import main as cli_main
 from target.recording.models import RawRecording, RecordingModelError
@@ -446,8 +450,31 @@ def test_golden_loader_rejects_invalid_verifier_before_replay_can_mutate_ui():
 def test_generated_pytest_is_valid_and_only_uses_public_replay_api():
     source = render_pytest("Policy Flow")
     ast.parse(source)
-    assert "from agent.recording.replay import load_golden_trace, replay_golden_trace" in source
+    assert "from agent.recording.replay import replay_golden_trace" in source
     assert "AtomicExecutor" not in source and "target_id" not in source
+
+
+def test_the_generated_conftest_supplies_the_fixtures_the_test_asks_for():
+    """A recording directory has to be runnable with plain `pytest <dir>`."""
+    test_source = render_pytest("Policy Flow")
+    conftest = render_conftest()
+    ast.parse(conftest)
+
+    for fixture in ("edr_wd_target", "edr_wd_golden"):
+        assert f"def {fixture}(" in conftest, f"{fixture} is requested but never defined"
+        assert fixture in test_source
+    # The runtime is assembled by the shared builder, not a second copy.
+    assert "build_replay_runtime" in conftest
+    assert "AtomicExecutor" not in conftest
+
+
+def test_the_generated_conftest_skips_rather_than_errors_without_a_target():
+    assert "pytest.skip" in render_conftest()
+
+
+def test_the_generated_directory_does_not_inherit_a_marker_filter():
+    """The repository deselects unmarked tests; a delivered recording must not."""
+    assert "addopts =" in render_pytest_ini()
 
 
 def test_task_success_cannot_ignore_assertion_cleanup_or_integrity():
@@ -464,7 +491,8 @@ def test_offline_compilation_writes_complete_rebuildable_artifact_set(tmp_path):
     artifacts = write_compilation_artifacts(tmp_path, recording, result)
     assert {p.name for p in artifacts.directory.iterdir()} == {
         "recording.json", "case.json", "golden-trace.json",
-        "test_policy_flow.py", "compile-report.json",
+        "test_policy_flow.py", "conftest.py", "pytest.ini",
+        "compile-report.json",
     }
     loaded = GoldenTrace.from_dict(json.loads(artifacts.golden_trace.read_text()))
     assert loaded.to_dict() == result.golden.to_dict()

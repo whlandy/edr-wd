@@ -7,6 +7,7 @@ import pytest
 from action_dispatcher import ActionReceipt
 from agent.execution import AtomicExecutor
 from agent.recording.artifacts import write_compilation_artifacts
+from agent.recording.replay import load_golden_trace
 from agent.recording.compiler import compile_recording
 from agent.recording.replay import ReplayRuntime
 from target.action_catalog import CATALOG_VERSION, catalog_digest
@@ -111,11 +112,12 @@ def test_generated_pytest_executes_twice_in_distinct_fresh_sessions(tmp_path):
     )
     namespace = runpy.run_path(str(artifacts.generated_test))
     generated_test = namespace["test_generated_projection"]
+    golden = load_golden_trace(artifacts.golden_trace)
 
     all_snapshot_ids = []
     for session in ("A", "B"):
         runtime, calls = _runtime(session)
-        generated_test(runtime)
+        generated_test(runtime, golden)
         assert len(calls) == 1
         all_snapshot_ids.append(calls[0]["target_ref"]["snapshot_id"])
 
