@@ -40,6 +40,9 @@ Phase 0 acceptance:
 - [~] P1.6 Windows fake-hook integration tests complete; authorised live acceptance pending
 - [x] P1.7 Press/release drag correlation and `SetWinEventHook` window-transition capture
 - [x] P1.8 Capture scope grows with causally opened windows; out-of-scope input is counted
+- [x] P1.9 Scope seeded from the backend window list; seeding failures reported
+- [x] P1.10 Wheel gestures coalesced at capture time, aimed at the scrollable container
+- [x] P1.11 Every event stamped with the window it happened in
 
 ## Phase 2 — macOS Capture
 
@@ -67,6 +70,9 @@ runs with the Phase 1/2 matrix):
 - [x] P3.3 Catalog/profile/incomplete gates and confirmation enforcement
 - [x] P3.4 Replay evaluation projection and append-only trace integration
 - [x] P3.5 Fake-target end-to-end replay, trace-integrity, and cleanup tests
+- [x] P3.6 Per-step window focus, explicit replay timeout, ancestry containment
+- [x] P3.7 Backend resolver registered by the target server
+- [x] P3.8 Generated directory runnable standalone; one shared runtime builder
 
 ## Phase 4 — Protected Visual Fallback
 
@@ -175,3 +181,40 @@ Screenshot lifecycle:
   compile report's `diagnostics` rather than dropped silently. Recording tests
   pass (`160 passed`); full default suite passes (`1447 passed, 612
   deselected`); regression passes (`585 passed, 1474 deselected`).
+- 2026-08-18: a live cross-window capture drove out a run of defects that only
+  a real target could show. `execute_action` had never worked on a live target:
+  the server never registered a backend resolver, so every dispatch returned
+  `dispatch_target_missing` and replay could not execute a single step — every
+  offline test injects its own dispatch callable and never exercises that
+  wiring. Selector synthesis copied captured ancestry into every selector and
+  matching required equality, while the two sides produce different shapes, so
+  nothing ever resolved. A transient window that opened and closed inside one
+  causal window bound both halves to the same step, asserting a window present
+  and absent at once. Replay inherited a per-call timeout sized for a single
+  cheap call.
+
+  Scroll was wrong three ways: coalescing lived in the compiler while the
+  session persisted every notch, so a trackpad flick forwarded over RDP showed
+  as dozens of steps; coalescing keyed on the hit-tested control, which changes
+  as rows pass under a still pointer; and dividing a high-resolution wheel
+  delta by WHEEL_DELTA truncated a real gesture to zero clicks. The step also
+  aimed at whichever row was under the pointer rather than the scrollable
+  container.
+
+  Scope seeding read a desktop enumeration of its own instead of the backend's
+  `list_windows`, returning nothing where the backend returned eight windows,
+  and collapsing any failure into a silent empty seed — one capture recorded
+  one event and refused 102.
+
+  Assertions gained a window-scoped form that needs no control identity, and a
+  time form whose expected value is a strftime pattern rendered at replay
+  time rather than the timestamp the recorder saw.
+
+  The generated script asked for a fixture that existed nowhere, so the
+  deliverable could not be run at all; a recording directory now ships its own
+  conftest and pytest.ini and is assembled by the same runtime builder as
+  `edr-wd replay`.
+
+  Full default suite passes (`1542 passed, 612 deselected`); regression passes
+  (`585 passed, 1569 deselected`). Live cross-window replay is the one gate
+  still open.
