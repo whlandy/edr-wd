@@ -302,17 +302,25 @@ V1 支持：
 | `selection_change` | `gui.select` |
 | `toggle_change` | click + 显式目标状态 expectation |
 | `key_command` | catalog 支持的按键动作；不支持则 incomplete |
-| `scroll_commit` | `pointer.scroll`；缺少因果绑定的内容/位置 verifier 时标为 incomplete |
+| `scroll_commit` | `pointer.scroll`；selector 取最近的**可滚动祖先**而非指针下那一行（行的身份只有它自己的文本，下次运行就不存在）；缺少因果绑定的内容/位置 verifier 时标为 incomplete |
 | `drag_commit` | `pointer.drag`；起点/终点各自解析为稳定 selector + 控件内相对 anchor，缺少结果 verifier 时标为 incomplete |
 | `window_transition` | transition metadata，不单独生成无意义动作 |
 | `assertion` | 只生成 expectation/verifier |
 
 鼠标移动、修饰键单独按下、重复 focus、recorder UI 操作和作用域外事件不落盘。
 
-recorder 不会仅凭截图变化推断业务成功。`scroll_commit` 和 `drag_commit` 必须绑定一条显式
+recorder 不会仅凭截图变化推断业务成功。`WHEEL_DELTA` 是每格 120，但高分辨率来源（RDP 转发的触控板）报的单位远小于一格，实测
+`-1` 到 `-3`。直接除以 120 会把一次真实滚动截断成"不滚"，因此有位移的手势至少回放为
+方向正确的一格；证明位移是否足够是绑定的 verifier 的职责，不够就大声失败。
+
+`scroll_commit` 和 `drag_commit` 必须绑定一条显式
 结果 verifier 才能 ready：用户在 assertion editor 勾选 `bindPrevious`，session 就把该断言的
 `causalId` 设为上一条动作事件的 `causalId`，compiler 再把它折叠成那一步的 verifier。未绑定的
 断言仍保留自己的 observe-only step，不会伪装成动作证明。
+
+同一目标上**连续的**同类动作构成一段，段尾的 verifier 覆盖整段：滚两下再断言一次是一个
+主张，不是两个，要求中间那次单独证明等于要求证明一个用户从未主张过的中间状态。中间夹了
+别的动作、或换了目标，段就断开。
 
 `drag_commit` 由 press/release 对合成：位移超过系统拖拽阈值（`SM_CXDRAG`/`SM_CYDRAG`，
 取不到时回退 4px）才算拖拽，否则仍是 `pointer_click`。起点与终点各自解析为语义 selector，
@@ -327,11 +335,25 @@ Windows adapter 通过 `SetWinEventHook` 订阅顶层窗口 show/destroy，macOS
 `CGWindowListCopyWindowInfo`；两者都只按进程过滤（点击通常打开标题不同的对话框），并由
 correlator 绑定最近一次动作的 `causalId`。
 
-作用域随因果打开的窗口增长：录制开始时作用域是用户给的 `processName` + `windowTitle`
-正则，每当一次动作导致新窗口打开，该窗口标题加入作用域；窗口关闭时移出。没有这一条，
+作用域覆盖该应用的三类窗口，缺一类就会静默丢事件：
+
+1. **录制开始前就开着的** —— 捕获源在钩子启动前用 backend 的 `list_windows` 播种。实测
+   漏掉这一类时，一次日志窗口内的流程只录到 1 个事件、拒掉 102 个；
+2. **被录制动作因果打开的** —— 由 `window_transition` 增长，并记录成该步的 verifier；
+3. **自行弹出的** —— 加入作用域但**不产生步骤**：没有动作能解释它的出现，但用户接下来
+   很可能点它，丢掉那些输入就是录制变空的原因。
+
+窗口关闭时移出作用域。播种必须读 backend 自己的窗口枚举，**不能另写一份 Desktop 遍历** ——
+实测同一台机器上 `list_windows` 返回 8 个窗口时，另写的那份返回 0，且异常被吞成空播种。
+播种失败必须记录原因并通过 `start_recording` 的 `seededScope` / `seededScopeError` 上报。没有这一条，
 "点击打开对话框"会被录下来，而用户随后在对话框里做的一切都被静默丢弃 —— 这正是
 `日志中心` 这类子窗口流程的常态。作用域只对**动作因果打开**的窗口增长，自行弹出的后台
 窗口不会放宽作用域。
+
+每个事件都用 `evidence.window` 记录**它实际发生在哪个窗口**，selector 的 `window` 取这个
+值而不是录制入口的作用域。一次流程会跨越应用的多个窗口，而观察是单个窗口的控件树：回放
+必须知道每一步属于哪个窗口，才能在执行前 connect/lock/observe 切过去（连续同窗口的步骤
+只切一次）。没有这个信息时，回放只能假设入口窗口，后续步骤要找的控件根本不在观察里。
 
 作用域外的输入是正常的（用户可能切到别的窗口看一眼），因此不构成 compile issue，但必须
 可计数：`captureDiagnostics.outOfScopeEvents` 记录被拒绝的输入数量，并出现在
@@ -358,6 +380,18 @@ Compiler 必须执行以下确定性归一化：
 correlator 报错，compiler 就分别产生 `recording_packets_dropped` 或
 `recording_correlation_errors`，并把整个产物标为 incomplete；不得用剩余事件静默生成
 ready 测试。事件中显式 `captureError` 同样使对应步骤 incomplete。
+
+5. 滚轮手势在**捕获期**合并，不是编译期。RDP 转发的触控板惯性滚动会在手指离开后继续发送
+   衰减事件（实测一次弹动 = 1.4 秒内 67 条），而录制器面板显示的是**已持久化的事件数**：
+   合并放在编译期时，用户看到的仍是一格一跳，recording.json 里也仍是几十条。correlator
+   因此在内存里累积手势，滚动过程中一条都不落盘，直到手势结束才记录成一条 `scroll_commit`
+   （带累计 delta 和 `notches`）。结束条件是换方向、指针移开、停顿超阈值、来了别的输入、
+   或停止录制。手势事件排在"结束它的那个动作"之前，顺序不变。
+6. 手势的连续性由**指针位置**判定，不由命中控件判定。滚动的定义就是内容在不动的指针下
+   移动，命中控件在一次弹动里会变好几次（实测 67 条解析出 5 个不同控件），拿它当依据会把
+   一次手势切成好几步。
+7. 合并后的事件保留**最后一格**的 `causalId`。用户是在滚完之后加断言的，绑定指向手势结束处。
+8. 编译期仍保留一份等价合并，作为已录数据的兜底。
 
 ## 8. 稳定 Replay Selector
 
@@ -395,7 +429,9 @@ ready 测试。事件中显式 `captureError` 同样使对应步骤 incomplete�
 
 1. window ownership + stable automation ID/AX identifier；
 2. window ownership + role/control type + accessible name；
-3. 限定祖先容器后的稳定属性；
+3. 限定祖先容器后的稳定属性 —— **只在控件自己没有稳定身份时**才写进 selector。录制端走
+   UIA 树拿祖先，replay observation 报的是它自己那份（这个应用为空），要求两者相等的
+   selector 永远匹配不上；匹配改为"录制链是观察链的前缀包含"，而不是全等；
 4. 唯一 sibling/anchor 文本关系（设计保留，V1 尚未合成 anchor）；
 5. 录制 fingerprint 仅作诊断 evidence；当前录制与 replay observation 的 fingerprint
    算法尚未统一，不能作为跨运行硬匹配条件；
@@ -460,6 +496,28 @@ V1 支持：
 `timeoutSeconds` 必须由 editor 显式保存，范围为 `(0, 300]`，默认 10 秒；不同 assertion
 类型必须在 target 端验证 expected 类型，不能等到 replay 时才把类型错误解释成断言失败。
 
+### 9.1 免控件身份的断言
+
+除 `window_open` 外，早期所有断言都强制要求控件身份（automationId / identifier /
+controlType+text）。写断言的人知道的是**屏幕上该出现什么**，不是**哪个控件负责显示它**，
+这个要求逼着用户去查自己没有的 id，或被动接受录制器随手预选的控件。而在真实数据里，日志
+行是 `DataItem` 且 `automationId` 为空 —— 唯一可用的身份就是它自己的文本，于是出现循环：
+要断言"这行显示今天的日期"，得先知道答案才能提问。
+
+`window_text_contains` 和 `window_text_contains_time` 因此不携带控件，编译成只有 window
+的 selector，对窗口标题和整棵控件树求值。控件级断言仍要求身份 —— 断言某个特定控件是更强
+的主张，不该悄悄放宽。
+
+### 9.2 时间断言
+
+`text_contains_time`（控件级）和 `window_text_contains_time`（窗口级）的 `expected` 是
+**strftime 模式**，不是录制时看到的时间戳，在**断言求值那一刻**渲染。录制时把字面时间戳
+冻进黄金轨迹，那条断言只在录制当天成立；模式则让"今天"始终指回放当天，并在界面仍显示录制
+日期时失败。空模式或非法模式显式失败，不退化成"包含空串"从而匹配一切。
+
+时钟可注入以便测试，生产路径用回放主机的本地时钟。
+
+
 ## 10. 凭据和隐私
 
 ### 10.1 最小捕获
@@ -523,6 +581,8 @@ ID 作为当前事件的 `beforeCapture`。因此第一个步骤的 before 指�
   case.json
   golden-trace.json
   test_<flow>.py
+  conftest.py
+  pytest.ini
   compile-report.json
   assets/
     step-0001-element.png
@@ -536,7 +596,14 @@ ID 作为当前事件的 `beforeCapture`。因此第一个步骤的 before 指�
   transition 和 evidence 语义复用现有协议模型，但 target 使用跨运行 `ReplaySelector`；
 - `golden-trace.json`：带 replay selectors、verifiers 和路径元数据；
 - `test_<flow>.py`：可执行、可审阅的 pytest 入口；
-- `compile-report.json`：歧义、未支持动作、secret review 和风险清单。
+- `conftest.py`：该目录自带的 fixture，连接目标并调用共享 runtime builder；目标不可达时
+  `pytest.skip` 而不是 error；
+- `pytest.ini`：让该目录成为独立的 pytest root。仓库用 marker 过滤（`-m 'unit and not
+  regression'`）会把这个未打标记的测试静默 deselect，交付出去的录制必须跑得起来；
+- `compile-report.json`：歧义、未支持动作、secret review 和风险清单；`diagnostics`
+  记录 `outOfScopeEvents` 这类"不判失败但解释录制为何这么短"的计数。
+
+产物目录是交付物本身：`pytest <目录>` 必须能直接运行，不依赖仓库里的任何 fixture。
 
 capture 下载、base64 或摘要校验失败不会伪造 visual selector；该事实同时写入 CLI 输出与
 `compile-report.json.artifactIssues`。语义 selector 仍可独立审阅，但报告必须明确视觉资产
@@ -576,17 +643,18 @@ Compiler 不允许：
 生成脚本保持轻薄，以 canonical JSON 为输入，不复制 executor 逻辑：
 
 ```python
-from pathlib import Path
-
-from agent.recording.replay import load_golden_trace, replay_golden_trace
+from agent.recording.replay import replay_golden_trace
 
 
-def test_policy_flow(edr_wd_target):
-    case_dir = Path(__file__).parent
-    golden = load_golden_trace(case_dir / "golden-trace.json")
-    result = replay_golden_trace(edr_wd_target, golden)
+def test_policy_flow(edr_wd_target, edr_wd_golden):
+    result = replay_golden_trace(edr_wd_target, edr_wd_golden)
     assert result.task_success, result.summary
 ```
+
+两个 fixture 由同目录的 `conftest.py` 提供，runtime 由
+`agent/recording/runtime.py:build_replay_runtime` 组装 —— `edr-wd replay` 走的是同一个
+函数。**这里不允许出现第二份组装实现**：两份必然分叉，而分叉只在真机上暴露（per-call
+timeout 和逐步窗口聚焦都是后加的，第二份实现必然漏掉）。
 
 脚本文件可以由 `golden-trace.json` 重建。用户对业务步骤的维护应优先修改 `case.json` 或
 重新录制；生成器不得解析 pytest 源码来恢复 canonical model。
@@ -658,19 +726,21 @@ def test_policy_flow(edr_wd_target):
 
 1. 验证 schema、golden status、catalog digest 和目标 profile；
 2. 确认 capture/replay 不在同一目标上同时运行；
-3. connect、lock window、verify ownership；
-4. 获取新的 observation；
-5. 按 replay selector 找到唯一 target；
-6. 如果语义定位失败且策略允许，执行视觉匹配；
-7. 将 live target 转成新的 observation-local `TargetRef`；
-8. 通过现有 confirmation gate 检查风险和 side effect；
-9. 将 recorded step 物化成 `AtomicTestStep` 并交给 `AtomicExecutor`；
-10. 按 expectation timeout 轮询新的 observation，不使用固定 sleep；
-11. 保存 receipt 摘要、expectation result 和 fallback strategy；视觉模式的 runtime
+3. 若该步的 selector 指向另一个窗口，先 connect/lock/verify 切过去；连续同窗口的步骤
+   只切一次；
+4. connect、lock window、verify ownership；
+5. 获取新的 observation；
+6. 按 replay selector 找到唯一 target；
+7. 如果语义定位失败且策略允许，执行视觉匹配；
+8. 将 live target 转成新的 observation-local `TargetRef`；
+9. 通过现有 confirmation gate 检查风险和 side effect；
+10. 将 recorded step 物化成 `AtomicTestStep` 并交给 `AtomicExecutor`；
+11. 按 expectation timeout 轮询新的 observation，不使用固定 sleep；
+12. 保存 receipt 摘要、expectation result 和 fallback strategy；视觉模式的 runtime
     screenshot 必须标记为锁定窗口捕获；`replay_capture` 工具在 target 端复用与录制相同的
     source-redaction 边界，`--persist-screenshots` 才允许把 runtime frame 写进 execution
     trace 的 `screenshots/`，未脱敏或非窗口捕获一律拒绝落盘；
-12. 进入下一步，或按现有 on-error/recovery policy 终止或恢复。
+13. 进入下一步，或按现有 on-error/recovery policy 终止或恢复。
 
 回放不会把“点击 API 返回 ok”当作测试成功。required action、显式 verifiers、cleanup 和
 trace integrity 必须全部满足。
@@ -849,6 +919,12 @@ agent.cli replay
 | `replay_anchor_invalid` | anchor 相对坐标不在 [0, 1] |
 | `replay_capture_not_redacted` | runtime 截图未经 target 端脱敏，拒绝落盘 |
 | `replay_capture_not_window_scoped` | runtime 截图不是锁定窗口捕获，拒绝落盘 |
+| `recording_scope_seed_failed` | 无法枚举应用已有窗口，作用域播种失败 |
+| `recording_assertion_unbound` | 断言要求绑定上一条动作，但没有可绑定的动作 |
+| `replay_target_unavailable` | 回放无法 connect/lock/verify 入口窗口 |
+| `replay_scope_missing` | 黄金轨迹没有应用进程/窗口作用域 |
+| `replay_assets_missing` | 视觉回放缺少黄金轨迹所在目录 |
+| `dispatch_target_missing` | target server 未注册 backend resolver（回放一步都跑不了）|
 | `golden_trace_incomplete` | required step 尚未 ready |
 | `golden_catalog_mismatch` | catalog version/digest 不匹配 |
 | `replay_target_not_found` | 当前 observation 无目标 |
