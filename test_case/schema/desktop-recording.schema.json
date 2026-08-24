@@ -41,6 +41,11 @@
         "outOfScopeEvents": {
           "type": "integer",
           "minimum": 0
+        },
+        "recorderUiEvents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Input events that landed on the recorder's own always-on-top UI instead of the target window. These never reached the target application and are deliberately not recorded as steps."
         }
       }
     },

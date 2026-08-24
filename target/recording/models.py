@@ -420,6 +420,7 @@ class RawRecording:
         "droppedPackets": 0,
         "correlationErrorCount": 0,
         "outOfScopeEvents": 0,
+        "recorderUiEvents": 0,
     })
     schema: str = RAW_RECORDING_SCHEMA
 
@@ -433,11 +434,15 @@ class RawRecording:
         _text(self.name, "recording.name")
         diagnostics = _strict(
             self.capture_diagnostics,
-            {"droppedPackets", "correlationErrorCount", "outOfScopeEvents"},
+            {
+                "droppedPackets", "correlationErrorCount", "outOfScopeEvents",
+                "recorderUiEvents",
+            },
             "recording.captureDiagnostics",
         )
-        # outOfScopeEvents post-dates the first recordings; a document written
-        # without it is still valid and reads as zero.
+        # outOfScopeEvents and recorderUiEvents post-date the first
+        # recordings; a document written without them is still valid and
+        # reads as zero.
         missing_diagnostics = {
             "droppedPackets", "correlationErrorCount",
         } - set(diagnostics)

@@ -190,3 +190,35 @@ def test_stop_still_returns_the_capture_after_a_failed_stop():
     receipt, recording = session.stop()
     assert receipt.state is CaptureSessionState.FAILED
     assert [e.sequence for e in recording.events] == [1]
+
+
+def test_stop_closes_the_recorder_ui_before_draining_the_correlator():
+    """A slow drain must not leave the recorder window on screen.
+
+    Draining can take tens of seconds when a correlation call is stuck. With
+    the UI torn down last, the window sat there ignoring the user for the
+    whole wait, which reads as a stop that hung rather than one that is
+    working.
+    """
+    order = []
+
+    class _SlowSource(Source):
+        def stop(self):
+            order.append("source")
+            super().stop()
+
+    class _Indicator:
+        def start(self): pass
+        def pause(self): pass
+        def resume(self): pass
+        def update_count(self, count): pass
+        def open_assertion_editor(self, target=None): pass
+        def stop(self): order.append("indicator")
+
+    session = RecordingSession("REC", "flow", SCOPE, source=_SlowSource())
+    session.attach_indicator(_Indicator())
+    session.start()
+
+    session.stop()
+
+    assert order == ["indicator", "source"]

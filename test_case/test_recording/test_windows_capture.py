@@ -115,12 +115,12 @@ class _Resolver:
         return dict(self.element)
 
 
-def _packet(kind="pointer_up", monotonic_ms=100, button="left"):
+def _packet(kind="pointer_up", monotonic_ms=100, button="left", screen_point=(50, 40)):
     return HookPacket(
         kind=kind,
         monotonic_ms=monotonic_ms,
         wall_time="2026-08-17T00:00:00.000Z",
-        screen_point=(50, 40),
+        screen_point=screen_point,
         button=button,
     )
 
@@ -241,6 +241,7 @@ def test_queue_overflow_is_persisted_in_raw_capture_diagnostics():
         "droppedPackets": 1,
         "correlationErrorCount": 0,
         "outOfScopeEvents": 0,
+        "recorderUiEvents": 0,
     }
 
 
@@ -1156,3 +1157,134 @@ def test_seeding_admits_a_window_by_handle_even_if_its_title_later_changes():
 
     assert _record_click(correlator, resolver, "日志中心 (已更新)", 100) is not None
     assert correlator.out_of_scope_events == 0
+
+
+def test_a_click_swallowed_by_the_recorder_ui_is_not_recorded_as_target_input():
+    """The recorder's own window is topmost and can cover the target.
+
+    A live HiSec capture recorded two clicks at coordinates that were
+    physically inside the recorder UI as though they had happened in the
+    target window. The target never saw those clicks — the recorder UI ate
+    them — so replaying the trace would click somewhere the user never did.
+    """
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.set_recorder_ui_rect((5, 35, 328, 136))
+
+    inside = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(76, 152)), SCOPE, 1,
+    )
+
+    assert inside is None
+    assert correlator.recorder_ui_events == 1
+    # It is not "out of scope" — the user was aiming at the target; the
+    # recorder itself got in the way, and that distinction has to survive.
+    assert correlator.out_of_scope_events == 0
+
+
+def test_input_outside_the_recorder_ui_is_still_recorded_normally():
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.set_recorder_ui_rect((5, 35, 328, 136))
+
+    event = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(600, 400)), SCOPE, 1,
+    )
+
+    assert event is not None
+    assert correlator.recorder_ui_events == 0
+
+
+def test_without_a_known_recorder_rect_nothing_is_filtered():
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    event = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(76, 152)), SCOPE, 1,
+    )
+
+    assert event is not None
+    assert correlator.recorder_ui_events == 0
+
+
+class _AppResolver(_SeedResolver):
+    """Reports the application's windows and its sibling process names."""
+
+    def __init__(self, windows, process_names):
+        super().__init__(windows)
+        self._process_names = process_names
+
+    def application_process_names(self, process_name):
+        return self._process_names
+
+
+def test_a_second_process_of_the_same_application_stays_in_scope():
+    """An application is not one process.
+
+    HiSec's own flow crosses from its agent's main window into its client's
+    security-centre window, which is a different executable in the same
+    `.app`. Scoping to a single process name dropped every step after that
+    crossing — the product's primary workflow could not be recorded at all.
+    """
+    resolver = _AppResolver(
+        [
+            {"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1},
+            {"title": "日志中心", "pid": 77, "processName": "EDRHelper.exe", "handle": 2},
+        ],
+        ["EDRClient.exe", "EDRHelper.exe"],
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    resolver.process = "EDRHelper.exe"
+    resolver.window_title = "日志中心"
+    resolver.window_handle = 2
+
+    assert _record_click(correlator, resolver, "日志中心", 100) is not None
+    assert correlator.out_of_scope_events == 0
+
+
+def test_an_unrelated_application_is_still_refused():
+    resolver = _AppResolver(
+        [{"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1}],
+        ["EDRClient.exe", "EDRHelper.exe"],
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    resolver.process = "Notepad.exe"
+    resolver.window_title = "记事本"
+    resolver.window_handle = 99
+
+    assert _record_click(correlator, resolver, "记事本", 100) is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_without_application_resolution_scope_stays_single_process():
+    """A resolver that cannot resolve the bundle must not widen the scope."""
+    resolver = _SeedResolver(
+        [{"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1}],
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    assert correlator.scope_process_names == ()
+    resolver.process = "EDRHelper.exe"
+    resolver.window_title = "日志中心"
+    resolver.window_handle = 2
+    assert _record_click(correlator, resolver, "日志中心", 100) is None
+
+
+def test_a_failed_application_lookup_is_reported_not_silently_widened():
+    class _Failing(_SeedResolver):
+        def application_process_names(self, process_name):
+            raise RuntimeError("bundle lookup unavailable")
+
+    resolver = _Failing([
+        {"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1},
+    ])
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    assert correlator.scope_process_names == ()
+    assert "bundle lookup unavailable" in correlator.scope_seed_error

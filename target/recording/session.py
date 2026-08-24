@@ -135,8 +135,12 @@ class RecordingSession:
             self._state = CaptureSessionState.STOPPING
             self._reason = "recording_lease_expired"
         try:
-            self._source.stop()
+            # Tear the UI down first. Draining the correlator can take tens
+            # of seconds when a correlation call is stuck, and doing that with
+            # the recorder window still on screen makes a stop that is working
+            # look like one that has hung.
             self._indicator.stop()
+            self._source.stop()
         except Exception as exc:
             with self._lock:
                 self._state = CaptureSessionState.FAILED
@@ -156,6 +160,7 @@ class RecordingSession:
             try:
                 self._source.start()
                 self._indicator.start()
+                self._bind_recorder_ui_rect()
             except Exception as exc:
                 try:
                     self._source.stop()
@@ -163,6 +168,17 @@ class RecordingSession:
                     pass
                 self._state = CaptureSessionState.FAILED;self._reason = str(exc);self._settled.set();raise
             self._state = CaptureSessionState.RECORDING;self._last_heartbeat = self._monotonic();return self._receipt()
+
+    def _bind_recorder_ui_rect(self) -> None:
+        """Let the correlator know where the recorder's own UI is on screen.
+
+        The indicator is always-on-top, so anything clicked inside it never
+        reached the target application and must not enter the recording.
+        """
+        rect = getattr(self._indicator, "window_rect", None)
+        bind = getattr(getattr(self._source, "_correlator", None), "set_recorder_ui_rect", None)
+        if callable(bind):
+            bind(rect)
 
     def heartbeat(self) -> SessionReceipt:
         self._expire_before_operation()
@@ -417,8 +433,12 @@ class RecordingSession:
             with self._lock:
                 return self._receipt(), self.recording()
         try:
-            self._source.stop()
+            # Tear the UI down first. Draining the correlator can take tens
+            # of seconds when a correlation call is stuck, and doing that with
+            # the recorder window still on screen makes a stop that is working
+            # look like one that has hung.
             self._indicator.stop()
+            self._source.stop()
         except Exception as exc:
             with self._lock:
                 self._state = CaptureSessionState.FAILED
@@ -446,6 +466,12 @@ class RecordingSession:
                 "correlationErrorCount": len(
                     getattr(self._source, "correlation_errors", ())
                 ),
+                # Input the user aimed at the target but that the recorder's
+                # own always-on-top UI swallowed instead.
+                "recorderUiEvents": int(getattr(
+                    getattr(self._source, "_correlator", None),
+                    "recorder_ui_events", 0,
+                ) or 0),
             },
         )
 

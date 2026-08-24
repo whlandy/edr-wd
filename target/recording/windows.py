@@ -435,6 +435,18 @@ class WindowsUIACorrelator:
         self._derived_scope_titles: set[str] = set()
         self._derived_scope_handles: set[int] = set()
         self.out_of_scope_events = 0
+        # Screen rect of the recorder's own always-on-top UI, when it has
+        # one.  Input that lands here never reached the target application,
+        # so it must not be recorded as though it had.
+        self._recorder_ui_rect: tuple[int, int, int, int] | None = None
+        self.recorder_ui_events = 0
+        # Sibling process names admitted alongside `scope.process_name`,
+        # resolved at seed time from the application the scope names. An
+        # application is not one process — HiSec's own flow crosses from its
+        # agent to its client — so scoping to a single process name drops
+        # everything after that crossing.
+        self._scope_process_names: set[str] = set()
+        self.scope_process_names: tuple[str, ...] = ()
         if transition_window_ms < 0:
             raise ValueError("transition_window_ms must be non-negative")
         self._transition_window_ms = transition_window_ms
@@ -503,6 +515,19 @@ class WindowsUIACorrelator:
     def _process_matches(actual: object, expected: str) -> bool:
         return str(actual or "").lower().removesuffix(".exe") == expected.lower().removesuffix(".exe")
 
+    def _process_in_scope(self, actual: object, scope: CaptureScope) -> bool:
+        """Does this process belong to the application the scope names?
+
+        The scope's own process always qualifies. Sibling processes of the
+        same application qualify once seeding has resolved them; until then
+        (or when the bundle cannot be resolved) this is exactly the old
+        single-process behaviour.
+        """
+        if self._process_matches(actual, scope.process_name):
+            return True
+        normalized = str(actual or "").lower().removesuffix(".exe")
+        return bool(normalized) and normalized in self._scope_process_names
+
     @staticmethod
     def _observed(target_data: Mapping[str, object] | None) -> ObservedTarget | None:
         if not target_data:
@@ -535,7 +560,7 @@ class WindowsUIACorrelator:
     def current_target(self, scope: CaptureScope) -> ObservedTarget | None:
         """Hit-test the current pointer while preserving the recording scope."""
         foreground = self._resolver.foreground()
-        if not self._process_matches(foreground.get("processName"), scope.process_name):
+        if not self._process_in_scope(foreground.get("processName"), scope):
             return None
         try:
             if not re.search(scope.window_title, str(foreground.get("windowTitle") or "")):
@@ -665,7 +690,7 @@ class WindowsUIACorrelator:
     ) -> RawCaptureEvent | tuple[RawCaptureEvent, ...] | None:
         """Commit the final focused value when recording stops."""
         foreground = self._resolver.foreground()
-        if not self._process_matches(foreground.get("processName"), scope.process_name):
+        if not self._process_in_scope(foreground.get("processName"), scope):
             return None
         try:
             if not re.search(scope.window_title, str(foreground.get("windowTitle") or "")):
@@ -701,6 +726,10 @@ class WindowsUIACorrelator:
         live capture lost 102 of 103 events exactly that way.
         """
         self.scope_seed_error: str | None = None
+        # Resolve the application's other processes first, so the window
+        # filtering below admits every window of the application rather than
+        # only those of the single process the scope happens to name.
+        self._seed_application_processes(scope)
         enumerate_windows = getattr(self._resolver, "windows", None)
         if not callable(enumerate_windows):
             self.scope_seed_error = "resolver cannot enumerate windows"
@@ -716,7 +745,7 @@ class WindowsUIACorrelator:
         for window in windows or ():
             if not isinstance(window, Mapping):
                 continue
-            if not self._process_matches(window.get("processName"), scope.process_name):
+            if not self._process_in_scope(window.get("processName"), scope):
                 continue
             title = window.get("title")
             if isinstance(title, str) and title:
@@ -731,6 +760,38 @@ class WindowsUIACorrelator:
                 self._derived_scope_titles.add(title)
         return tuple(seeded)
 
+    def set_recorder_ui_rect(self, rect: tuple[int, int, int, int] | None) -> None:
+        """Tell the correlator where its own always-on-top UI sits on screen."""
+        self._recorder_ui_rect = tuple(int(v) for v in rect) if rect else None
+
+    def _lands_on_recorder_ui(self, packet: HookPacket) -> bool:
+        rect = self._recorder_ui_rect
+        point = packet.screen_point
+        if rect is None or point is None:
+            return False
+        x, y, width, height = rect
+        px, py = point
+        return x <= px < x + width and y <= py < y + height
+
+    def _seed_application_processes(self, scope: CaptureScope) -> None:
+        """Admit the sibling processes of the scope's application, if known."""
+        resolve = getattr(self._resolver, "application_process_names", None)
+        if not callable(resolve):
+            return
+        try:
+            names = resolve(scope.process_name) or ()
+        except Exception as exc:
+            # Never widen the scope on a failed lookup; single-process
+            # behaviour is the safe fallback, but it must be visible.
+            self.scope_seed_error = f"{type(exc).__name__}: {exc}"
+            return
+        admitted = {
+            str(name).lower().removesuffix(".exe")
+            for name in names if str(name or "")
+        }
+        self._scope_process_names = admitted
+        self.scope_process_names = tuple(sorted(admitted))
+
     def _in_scope(self, foreground: Mapping[str, object], scope: CaptureScope) -> bool:
         """Is this foreground window part of the recording's scope?
 
@@ -739,7 +800,7 @@ class WindowsUIACorrelator:
         a click that opens a dialog is recorded but everything the user then
         does inside the dialog is silently dropped.
         """
-        if not self._process_matches(foreground.get("processName"), scope.process_name):
+        if not self._process_in_scope(foreground.get("processName"), scope):
             return False
         # The entry window is always checked against the user's own regex
         # first. That match must not depend on seeding having succeeded, so
@@ -826,7 +887,7 @@ class WindowsUIACorrelator:
         if kind not in {"opened", "closed"}:
             return None
         process_name = packet.native.get("processName")
-        if not self._process_matches(process_name, scope.process_name):
+        if not self._process_in_scope(process_name, scope):
             return None
         # The scope follows the window either way. A window that opened on its
         # own is not a recorded step — nothing the user did explains it — but
@@ -902,6 +963,13 @@ class WindowsUIACorrelator:
     ) -> RawCaptureEvent | tuple[RawCaptureEvent, ...] | None:
         if packet.kind == "window_transition":
             return self._window_transition(packet, scope, sequence)
+        if self._lands_on_recorder_ui(packet):
+            # The recorder UI is topmost, so this click was consumed by it and
+            # the target application never saw it.  Recording it against the
+            # target would put a step in the trace that never happened there —
+            # a live HiSec capture did exactly that before this check existed.
+            self.recorder_ui_events += 1
+            return None
         foreground = self._resolver.foreground()
         result = self._correlate(packet, scope, sequence)
         produced = (

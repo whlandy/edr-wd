@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -341,6 +342,54 @@ class MacOSAXResolver:
             if number is not None:
                 return int(number)
         return None
+
+    def application_process_names(self, process_name: str) -> list[str]:
+        """Process names that belong to the same application as `process_name`.
+
+        A macOS application is not one process. HiSec ships its agent and its
+        client as separate executables inside a single `.app`, and its primary
+        flow crosses from one to the other — the main window opens the security
+        centre, which is a different process. Scoping a recording to a single
+        process name therefore drops everything the user does after that
+        crossing, while still being the privacy boundary that keeps unrelated
+        applications out. The bundle is the honest boundary: same application,
+        any of its processes.
+
+        Returns an empty list when the bundle cannot be resolved, which leaves
+        the caller with single-process behaviour rather than a silently wider
+        scope.
+        """
+        try:
+            import psutil
+        except Exception:
+            return []
+        expected = str(process_name or "").lower()
+        if not expected:
+            return []
+        bundle = None
+        for proc in psutil.process_iter(["name", "exe"]):
+            try:
+                if str(proc.info.get("name") or "").lower() != expected:
+                    continue
+                match = re.match(r"(?i)(.*?\.app)/", str(proc.info.get("exe") or ""))
+                if match:
+                    bundle = match.group(1)
+                    break
+            except Exception:
+                continue
+        if not bundle:
+            return []
+        prefix = bundle.lower() + "/"
+        names: set[str] = set()
+        for proc in psutil.process_iter(["name", "exe"]):
+            try:
+                if str(proc.info.get("exe") or "").lower().startswith(prefix):
+                    name = proc.info.get("name")
+                    if name:
+                        names.add(str(name))
+            except Exception:
+                continue
+        return sorted(names)
 
     def windows(self) -> list[Mapping[str, object]]:
         """Top-level windows with their owning process, for scope seeding.
