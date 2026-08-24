@@ -598,12 +598,21 @@ class MacOSAccessibilityBackend:
             if existing is None:
                 windows.append(w)
                 by_identity[key] = w
-            elif existing.get("rectangle") is None and w.get("rectangle") is not None:
-                # System Events gives reliable titles but no bounds.  Preserve
-                # its identity and enrich it with the matching CG rectangle so
-                # recorder_ui and protected-window masks can be enforced.
-                existing["rectangle"] = dict(w["rectangle"])
-                existing["source"] = "system_events+cgwindowlist"
+            else:
+                # System Events gives reliable titles but neither bounds nor a
+                # window number.  Preserve its identity and enrich it from the
+                # matching CG entry so recorder_ui and protected-window masks
+                # can be enforced, and so callers get a window identity that
+                # survives the title changes a title-keyed scope cannot follow.
+                enriched = False
+                if existing.get("rectangle") is None and w.get("rectangle") is not None:
+                    existing["rectangle"] = dict(w["rectangle"])
+                    enriched = True
+                if existing.get("handle") is None and w.get("handle") is not None:
+                    existing["handle"] = w["handle"]
+                    enriched = True
+                if enriched:
+                    existing["source"] = "system_events+cgwindowlist"
 
         return {"ok": True, "windows": windows, "count": len(windows)}
 
@@ -631,11 +640,13 @@ let windows = info.compactMap { item -> [String: Any]? in
     let title = item[kCGWindowName as String] as? String ?? ""
     let pid = item[kCGWindowOwnerPID as String] as? Int ?? 0
     let bounds = item[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let number = item[kCGWindowNumber as String] as? Int ?? 0
     return [
         "owner": owner,
         "title": title,
         "pid": pid,
         "bounds": bounds,
+        "number": number,
     ]
 }
 
@@ -677,6 +688,7 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                         "w": int(bounds.get("Width", 0)),
                         "h": int(bounds.get("Height", 0)),
                     }
+                number = item.get("number")
                 windows.append({
                     "app_name": owner,
                     "bundle_id": None,
@@ -685,6 +697,10 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                     "title": title,
                     "class_name": owner,
                     "process_id": int(pid) if pid is not None else None,
+                    # CGWindowNumber, under the same key the Windows backend
+                    # uses for its HWND: a window's identity survives the
+                    # title changes that a title-keyed scope cannot follow.
+                    "handle": int(number) if number else None,
                     "rectangle": rectangle,
                     "visible": True,
                     "enabled": True,

@@ -10,7 +10,7 @@ from PIL import Image
 
 from target.recording.macos import MacOSAXCorrelator, MacOSAXResolver
 from target.automation.macos_accessibility import MacOSAccessibilityBackend
-from target.recording.models import CaptureScope
+from target.recording.models import CaptureScope, RecordingModelError
 from target.recording.source import HookPacket
 
 pytestmark = pytest.mark.unit
@@ -303,3 +303,45 @@ def test_macos_falls_back_to_the_tree_walk_when_native_ax_is_missing():
     resolved = resolver.element_at(50, 50)
 
     assert resolved["identifier"] == "btnApply"
+
+
+class _WindowListBackend(_AXBackend):
+    def __init__(self, windows=None):
+        super().__init__()
+        self._windows = windows
+
+    def list_windows(self):
+        if self._windows is None:
+            return {"ok": False, "error": "enumeration refused"}
+        return {"ok": True, "windows": self._windows, "count": len(self._windows)}
+
+
+def test_macos_resolver_enumerates_windows_for_scope_seeding():
+    """Seeding was skipped entirely on macOS for want of this method.
+
+    Without it seed_scope() reports `resolver cannot enumerate windows` and
+    returns nothing, so an application window that was already open when
+    recording began is never admitted and every click inside it is dropped.
+    """
+    backend = _WindowListBackend([
+        {
+            "app_name": "TextEdit", "title": "notes.txt", "window_title": "notes.txt",
+            "pid": 42, "process_id": 42, "handle": 1731,
+        },
+        {"app_name": "", "title": "orphan", "pid": 7},
+    ])
+
+    windows = MacOSAXResolver(backend, native_ax=None).windows()
+
+    assert windows == [{
+        "title": "notes.txt", "pid": 42, "processName": "TextEdit", "handle": 1731,
+    }]
+
+
+def test_macos_scope_seeding_surfaces_a_failed_enumeration():
+    backend = _WindowListBackend(None)
+
+    with pytest.raises(RecordingModelError) as excinfo:
+        MacOSAXResolver(backend, native_ax=None).windows()
+
+    assert excinfo.value.code == "recording_scope_seed_failed"

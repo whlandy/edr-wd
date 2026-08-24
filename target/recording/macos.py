@@ -260,6 +260,53 @@ class MacOSAXResolver:
             "pid": lock.get("pid") or snapshot.get("pid"),
         }
 
+    def windows(self) -> list[Mapping[str, object]]:
+        """Top-level windows with their owning process, for scope seeding.
+
+        Without this the macOS seed was skipped entirely
+        (``scope_seed_error="resolver cannot enumerate windows"``), so an
+        application window that was already open when recording began was
+        never admitted — every click inside it is dropped as out of scope.
+
+        Like the Windows resolver, this reuses the backend's own enumeration
+        rather than querying the desktop a second way.
+        """
+        listing = self._backend.list_windows() if self._backend is not None else None
+        if not isinstance(listing, Mapping) or not listing.get("ok"):
+            raise RecordingModelError(
+                "recording_scope_seed_failed",
+                f"window enumeration failed: {listing}",
+                path="scope.seed",
+            )
+        items = listing.get("windows")
+        if not isinstance(items, list):
+            raise RecordingModelError(
+                "recording_scope_seed_failed",
+                "window enumeration returned no windows array",
+                path="scope.seed",
+            )
+        found: list[Mapping[str, object]] = []
+        for window in items:
+            if not isinstance(window, Mapping):
+                continue
+            # macOS scopes are expressed with the application name; there is
+            # no separate executable name to resolve as there is on Windows.
+            process_name = str(
+                window.get("process_name") or window.get("app_name") or ""
+            )
+            if not process_name:
+                continue
+            pid = window.get("process_id") or window.get("pid")
+            found.append({
+                "title": str(
+                    window.get("title") or window.get("window_title") or ""
+                ),
+                "pid": int(pid) if pid is not None else None,
+                "processName": process_name,
+                "handle": window.get("handle"),
+            })
+        return found
+
     @staticmethod
     def _rectangle(control: Mapping[str, Any]) -> tuple[int, int, int, int] | None:
         rect = control.get("rectangle") or control.get("rect")
