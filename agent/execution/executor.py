@@ -31,9 +31,8 @@ Case outcome:
 Backend unavailability at executor start (FR-P1.2-04): every step
 becomes `blocked`, never `failed`.
 
-FR-P1.2-07: declaring `visual_evidence_captured` produces a
-blocked step with `error.code == "expectation_not_available"`.  It is
-never silently passed or skipped.
+FR-P1.4-08: declaring `visual_evidence_captured` verifies that a
+role-matching screenshot exists and still matches its recorded digest.
 
 FR-P1.2-08: a step whose `target_ref.snapshot_id` is older than the
 latest known snapshot becomes `blocked` with
@@ -67,6 +66,7 @@ from .confirmation import (
 )
 
 from .expectations import (
+    _EvidenceView,
     EVALUATORS_NOT_AVAILABLE,
     EXPECTATION_REGISTRY,
     ExpectationNotAvailable,
@@ -143,6 +143,22 @@ def _ms(elapsed_seconds: float) -> int:
     return int(round(elapsed_seconds * 1000.0))
 
 
+def _observation_only_action(
+    *, action_id: str, action_code: str, request_id: str, **_: Any,
+) -> ActionReceipt:
+    return ActionReceipt.from_ok(
+        action_id=action_id,
+        action_code=action_code,
+        request_id=request_id,
+        result={"observation_only": True},
+    )
+
+
+DEFAULT_LOCAL_ACTION_HANDLERS: Mapping[str, Callable[..., ActionReceipt]] = {
+    "observe.assert": _observation_only_action,
+}
+
+
 # ---------------------------------------------------------------------------
 # AtomicExecutor
 # ---------------------------------------------------------------------------
@@ -168,18 +184,14 @@ class AtomicExecutor:
         confirmation_gate: ConfirmationGate | None = None,
         risk_lookup: Callable[[str], tuple[str, str]] | None = None,
         step_materializer: Callable[[AtomicTestStep, Any], AtomicTestStep] | None = None,
+        local_action_handlers: Mapping[str, Callable[..., ActionReceipt]] | None = None,
     ) -> None:
         self._dispatch = dispatch
         self._observations = observation_provider
-        self._expectations = expectations or EXPECTATION_REGISTRY
+        self._expectations = (
+            EXPECTATION_REGISTRY if expectations is None else expectations
+        )
         self._config = config or ExecutorConfig()
-        # Visual evidence is only available if the executor config
-        # opts in (P1.4 will flip the default).
-        if "visual_evidence_captured" in self._expectations:
-            self._expectations = {
-                k: v for k, v in self._expectations.items()
-                if k != "visual_evidence_captured"
-            }
         # P3.1.E.B — confirmation boundary at the executor.
         # The gate is OPTIONAL: when not wired, the executor
         # behaves as before (no confirmation check). When wired,
@@ -195,6 +207,10 @@ class AtomicExecutor:
             or (lambda _action_id: ("low", "none"))
         )
         self._step_materializer = step_materializer
+        self._local_action_handlers = (
+            DEFAULT_LOCAL_ACTION_HANDLERS
+            if local_action_handlers is None else local_action_handlers
+        )
 
     # -----------------------------------------------------------------
     # Public API
@@ -229,6 +245,7 @@ class AtomicExecutor:
         backend_unavailable = self._probe_backend()
 
         steps = list(case.steps)
+        required_flags = tuple(step.required for step in steps)
         step_results: list[StepResult] = []
         aborted = False
         abort_reason = ""
@@ -246,7 +263,9 @@ class AtomicExecutor:
             ended = _utcnow_iso()
             return CaseRunResult(
                 case_id=case.case_id,
-                outcome=CaseOutcome.BLOCKED,
+                outcome=self._derive_case_outcome(
+                    step_results, required_flags,
+                ),
                 started_at=started,
                 ended_at=ended,
                 duration_ms=_ms(time.perf_counter() - start_perf),
@@ -256,7 +275,7 @@ class AtomicExecutor:
             )
 
         materializer = step_materializer or self._step_materializer
-        for step in steps:
+        for step_index, step in enumerate(steps):
             sr = self.run_step(case, step, snapshot=None, step_materializer=materializer)
             step_results.append(sr)
             self._persist(step_results_path, case, step_results)
@@ -264,7 +283,7 @@ class AtomicExecutor:
             if sr.status == StepStatus.BLOCKED and step.required:
                 aborted = True
                 abort_reason = "required_step_blocked"
-                for remaining in steps[steps.index(step) + 1:]:
+                for remaining in steps[step_index + 1:]:
                     step_results.append(self._skipped(remaining))
                     self._persist(step_results_path, case, step_results)
                 break
@@ -281,8 +300,8 @@ class AtomicExecutor:
                         # Retry exhausted; decide whether to skip
                         # remaining steps based on policy.
                         aborted = True
-                        abort_reason = f"retry_exhausted"
-                        for remaining in steps[steps.index(step) + 1:]:
+                        abort_reason = "retry_exhausted"
+                        for remaining in steps[step_index + 1:]:
                             step_results.append(self._skipped(remaining))
                             self._persist(step_results_path, case, step_results)
                         break
@@ -290,7 +309,7 @@ class AtomicExecutor:
                 elif policy is OnErrorPolicy.CAPTURE_AND_ABORT:
                     aborted = True
                     abort_reason = "capture_and_abort"
-                    for remaining in steps[steps.index(step) + 1:]:
+                    for remaining in steps[step_index + 1:]:
                         step_results.append(self._skipped(remaining))
                         self._persist(step_results_path, case, step_results)
                     break
@@ -298,13 +317,13 @@ class AtomicExecutor:
                     # Default + reobserve_replan stub -> abort.
                     aborted = True
                     abort_reason = "on_error_abort"
-                    for remaining in steps[steps.index(step) + 1:]:
+                    for remaining in steps[step_index + 1:]:
                         step_results.append(self._skipped(remaining))
                         self._persist(step_results_path, case, step_results)
                     break
 
         ended = _utcnow_iso()
-        outcome = self._derive_case_outcome(step_results)
+        outcome = self._derive_case_outcome(step_results, required_flags)
         return CaseRunResult(
             case_id=case.case_id,
             outcome=outcome,
@@ -456,12 +475,17 @@ class AtomicExecutor:
         # 5. EXECUTING -> OBSERVING_AFTER.
         try:
             request_id = f"R-{uuid.uuid4().hex[:12]}"
-            if step.action_id == "observe.assert":
-                receipt = ActionReceipt.from_ok(
-                    action_id="observe.assert",
+            local_handler = self._local_action_handlers.get(step.action_id)
+            if local_handler is not None:
+                receipt = local_handler(
+                    action_id=step.action_id,
                     action_code=step.action_code,
                     request_id=request_id,
-                    result={"observation_only": True},
+                    args=dict(step.args),
+                    target_ref=(
+                        _target_ref_to_dict(step.target_ref)
+                        if step.target_ref is not None else None
+                    ),
                 )
             else:
                 receipt = self._dispatch(
@@ -517,49 +541,55 @@ class AtomicExecutor:
         else:
             state = next_state(state, StepState.ASSERTING)
 
-        # 7. ASSERTING: evaluate every expectation.
-        for exp in step.expectations:
-            evaluator = self._expectations.get(exp.type)
-            if evaluator is None:
-                if exp.type in EVALUATORS_NOT_AVAILABLE:
-                    # already gated above, but defensive.
-                    error_payload = {
-                        "code": "expectation_not_available",
-                        "expectation": exp.type,
-                    }
-                    break
-                # Unknown -> failed with diagnostic.
-                expectation_results.append(ExpectationResult(
-                    expectation_type=exp.type,
-                    status=StepStatus.FAILED,
-                    diagnostic="unknown expectation type",
-                ))
-                continue
-            t0 = time.perf_counter()
-            try:
-                result = evaluator(step, exp, observation, receipt)
-            except Exception as exc:
-                result = ExpectationResult(
-                    expectation_type=exp.type,
-                    status=StepStatus.FAILED,
-                    diagnostic=f"{type(exc).__name__}: {exc}",
-                    duration_ms=_ms(time.perf_counter() - t0),
-                )
-            else:
-                # Stamp duration if not set.
-                if result.duration_ms == 0:
+        # 7. ASSERTING: expose only this materializer's evidence while
+        # evaluating the current step, then restore the previous context.
+        evidence_index = getattr(materializer, "evidence_index", {})
+        evidence_root = getattr(materializer, "evidence_root", None)
+        evidence_token = _EvidenceView.set_evidence_index(
+            evidence_index, evidence_root,
+        )
+        try:
+            for exp in step.expectations:
+                evaluator = self._expectations.get(exp.type)
+                if evaluator is None:
+                    if exp.type in EVALUATORS_NOT_AVAILABLE:
+                        error_payload = {
+                            "code": "expectation_not_available",
+                            "expectation": exp.type,
+                        }
+                        break
+                    expectation_results.append(ExpectationResult(
+                        expectation_type=exp.type,
+                        status=StepStatus.FAILED,
+                        diagnostic="unknown expectation type",
+                    ))
+                    continue
+                t0 = time.perf_counter()
+                try:
+                    result = evaluator(step, exp, observation, receipt)
+                except Exception as exc:
                     result = ExpectationResult(
-                        expectation_type=result.expectation_type,
-                        status=result.status,
-                        expected=result.expected,
-                        actual=result.actual,
-                        observation_id=result.observation_id,
+                        expectation_type=exp.type,
+                        status=StepStatus.FAILED,
+                        diagnostic=f"{type(exc).__name__}: {exc}",
                         duration_ms=_ms(time.perf_counter() - t0),
-                        diagnostic=result.diagnostic,
                     )
-            expectation_results.append(result)
-            if error_payload is not None:
-                break
+                else:
+                    if result.duration_ms == 0:
+                        result = ExpectationResult(
+                            expectation_type=result.expectation_type,
+                            status=result.status,
+                            expected=result.expected,
+                            actual=result.actual,
+                            observation_id=result.observation_id,
+                            duration_ms=_ms(time.perf_counter() - t0),
+                            diagnostic=result.diagnostic,
+                        )
+                expectation_results.append(result)
+                if error_payload is not None:
+                    break
+        finally:
+            _EvidenceView.reset(evidence_token)
 
         # 8. ASSERTING -> RECORDING.
         # Step outcome follows architecture §9.4 + Blocker 3 review
@@ -691,7 +721,9 @@ class AtomicExecutor:
         )
 
     def _derive_case_outcome(
-        self, step_results: list[StepResult]
+        self,
+        step_results: list[StepResult],
+        required_flags: tuple[bool, ...] | None = None,
     ) -> CaseOutcome:
         # Architecture §9.4 case outcome precedence:
         #   1. any required failed  -> FAILED
@@ -699,7 +731,10 @@ class AtomicExecutor:
         #   3. all required skipped -> SKIPPED
         #   4. otherwise            -> PASSED
         required_results = [
-            sr for sr in step_results if self._step_required(sr)
+            result for index, result in enumerate(step_results)
+            if required_flags is None
+            or index >= len(required_flags)
+            or required_flags[index]
         ]
         # Empty required set (e.g. all optional steps skipped) -> PASSED.
         if not required_results:
@@ -712,16 +747,6 @@ class AtomicExecutor:
         if all(s is StepStatus.SKIPPED for s in statuses):
             return CaseOutcome.SKIPPED
         return CaseOutcome.PASSED
-
-    @staticmethod
-    def _step_required(sr: StepResult) -> bool:
-        # StepResult does not carry the `required` flag; the executor
-        # records the case's per-step required-ness implicitly. The
-        # only authoritative source is the original AtomicTestStep
-        # passed to run_case; the helper returns True here as the
-        # default for backwards-compat with the spec where all
-        # steps are required unless marked optional.
-        return True
 
     def _persist(
         self,

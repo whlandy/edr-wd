@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from execution import (  # noqa: E402
     ExpectationNotAvailable,
     StepStatus,
 )
+from execution.expectations import _EvidenceView  # noqa: E402
+from trace import EvidenceRecord  # noqa: E402
 
 
 def _exp(type_: str, value=None, timeout_seconds: float = 1.0):
@@ -80,6 +83,68 @@ def test_visual_evidence_is_now_available():
     """P1.4: visual_evidence_captured ships as a real evaluator."""
     assert "visual_evidence_captured" not in EVALUATORS_NOT_AVAILABLE
     assert EXPECTATION_REGISTRY.get("visual_evidence_captured") is not None
+
+
+def _evidence_record(tmp_path, *, role="after", content=b"evidence"):
+    relative_path = "screenshots/S001.png"
+    path = tmp_path / relative_path
+    path.parent.mkdir()
+    path.write_bytes(content)
+    return EvidenceRecord(
+        evidence_id="IMG-1", kind="screenshot", role=role,
+        relative_path=relative_path, media_type="image/png",
+        sha256="sha256:" + hashlib.sha256(content).hexdigest(),
+        bytes_size=len(content), width=1, height=1,
+        captured_at="2026-01-01T00:00:00Z", snapshot_id="OBS-1",
+        event_id="EVT-1", step_id="S001", process_name="app",
+        pid=1, window_title="window", redaction_applied=True,
+    )
+
+
+def _evaluate_visual(step, expectation, record, root):
+    token = _EvidenceView.set_evidence_index({record.evidence_id: record}, root)
+    try:
+        return EXPECTATION_REGISTRY["visual_evidence_captured"](
+            step, expectation, None, None,
+        )
+    finally:
+        _EvidenceView.reset(token)
+
+
+def test_visual_evidence_requires_matching_role_and_digest(tmp_path):
+    from protocol_models import AtomicTestStep
+
+    step = AtomicTestStep(step_id="S001", step_no=1, action_id="gui.click")
+    record = _evidence_record(tmp_path)
+    result = _evaluate_visual(
+        step, _exp("visual_evidence_captured", "after"), record, tmp_path,
+    )
+    assert result.status is StepStatus.PASSED
+
+    mismatched = _evaluate_visual(
+        step, _exp("visual_evidence_captured", "before"), record, tmp_path,
+    )
+    assert mismatched.status is StepStatus.FAILED
+    assert "expected role" in mismatched.diagnostic
+
+    (tmp_path / record.relative_path).write_bytes(b"tampered")
+    corrupt = _evaluate_visual(
+        step, _exp("visual_evidence_captured", "after"), record, tmp_path,
+    )
+    assert corrupt.status is StepStatus.FAILED
+    assert "invalid digest" in corrupt.diagnostic
+
+
+def test_evidence_view_restores_previous_context(tmp_path):
+    record = _evidence_record(tmp_path)
+    outer = _EvidenceView.set_evidence_index({"outer": record}, tmp_path)
+    inner = _EvidenceView.set_evidence_index({}, None)
+    _EvidenceView.reset(inner)
+    try:
+        assert _EvidenceView.current_evidence_index() == {"outer": record}
+        assert _EvidenceView.current_trace_dir() == tmp_path
+    finally:
+        _EvidenceView.reset(outer)
 
 
 # -------- action_ok --------

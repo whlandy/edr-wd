@@ -227,6 +227,38 @@ def test_recorded_cleanup_runs_through_same_executor_and_gates_success():
     assert result.evaluation.task_success is True
 
 
+def test_cleanup_resolution_metrics_do_not_pollute_main_case():
+    main = RecordedStep("step-0001", "gui.click", {}, _selector())
+    cleanup_selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"automationId": "missing"},
+        visual={
+            "template": "assets/cleanup.png", "redacted": True,
+            "elementSha256": VISUAL_DIGEST,
+        },
+    )
+    cleanup = RecordedStep(
+        "cleanup-0001", "gui.click", {}, cleanup_selector,
+    )
+    runtime, _, calls = _runtime([{
+        "process_name": "EDRClient.exe", "window_title": "EDRClient",
+        "automation_id": "btnApply", "control_type": "Button", "text": "应用",
+    }])
+    object.__setattr__(runtime, "replay_mode", "semantic_first")
+    object.__setattr__(runtime, "visual_resolver", SafeVisualResolver(
+        lambda _template, _observation: [
+            VisualCandidate((100, 120, 200, 160), 0.98),
+        ]
+    ))
+
+    result = replay_golden_trace(runtime, _golden(main, cleanup=(cleanup,)))
+
+    assert len(calls) == 2
+    assert calls[1]["action_id"] == "pointer.click_window"
+    assert result.evaluation.semantic_resolution_rate == 1.0
+    assert result.evaluation.visual_fallback_count == 0
+
+
 def test_replay_trace_attributes_cleanup_steps_to_the_cleanup_case(tmp_path):
     main = RecordedStep("step-0001", "gui.click", {}, _selector())
     cleanup = RecordedStep("cleanup-0001", "gui.click", {}, _selector())

@@ -336,6 +336,24 @@ def test_coordinate_check_does_not_fire_for_semantic_action(catalog):
     )
 
 
+def test_coordinate_fallback_is_scoped_to_the_current_step(catalog):
+    payload = _plan(expected_actions=[
+        {"step_id": "S1", "action_id": "pointer.click_screen"},
+        {"step_id": "S2", "action_id": "pointer.click_screen"},
+    ])
+    result = parse_plan(
+        payload, catalog=catalog, snapshot_id="OBS-1",
+        semantic_target_action_ids={"S2": {"gui.click"}},
+    )
+
+    coordinate_errors = [
+        error for error in result.errors
+        if error.code == COORDINATE_FALLBACK_NOT_ALLOWED
+    ]
+    assert len(coordinate_errors) == 1
+    assert coordinate_errors[0].pointer == "/expected_actions/1/action_id"
+
+
 # ---------------------------------------------------------------------------
 # Short-circuit behaviour
 # ---------------------------------------------------------------------------
