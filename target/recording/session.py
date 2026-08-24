@@ -85,6 +85,9 @@ class RecordingSession:
         self._monotonic = monotonic;self._state = CaptureSessionState.IDLE
         self._events: list[RawCaptureEvent] = [];self._last_heartbeat = monotonic()
         self._lock = threading.RLock();self._reason = ""
+        # Set once the session reaches a terminal state, so a second stop()
+        # can wait for an in-flight one instead of losing the recording.
+        self._settled = threading.Event()
         self._last_action_causal_id: str | None = None
 
     @property
@@ -137,10 +140,12 @@ class RecordingSession:
         except Exception as exc:
             with self._lock:
                 self._state = CaptureSessionState.FAILED
+                self._settled.set()
                 self._reason = f"recording_lease_expired: {exc}"
             return True
         with self._lock:
             self._state = CaptureSessionState.STOPPED
+            self._settled.set()
         return True
 
     def start(self) -> SessionReceipt:
@@ -156,7 +161,7 @@ class RecordingSession:
                     self._source.stop()
                 except Exception:
                     pass
-                self._state = CaptureSessionState.FAILED;self._reason = str(exc);raise
+                self._state = CaptureSessionState.FAILED;self._reason = str(exc);self._settled.set();raise
             self._state = CaptureSessionState.RECORDING;self._last_heartbeat = self._monotonic();return self._receipt()
 
     def heartbeat(self) -> SessionReceipt:
@@ -382,25 +387,47 @@ class RecordingSession:
             )
         return self._receipt()
 
-    def stop(self, reason: str = "user") -> tuple[SessionReceipt, RawRecording]:
+    def stop(
+        self, reason: str = "user", *, settle_timeout: float = 60.0,
+    ) -> tuple[SessionReceipt, RawRecording]:
         self._expire_before_operation()
         with self._lock:
-            if self._state not in {CaptureSessionState.RECORDING, CaptureSessionState.PAUSED}:
-                if self._state is CaptureSessionState.STOPPED:
+            state = self._state
+            if state not in {CaptureSessionState.RECORDING, CaptureSessionState.PAUSED}:
+                # A session that already ended still holds everything it
+                # captured.  Refusing to hand that back is how a stop race
+                # with the indicator's own Stop button costs the recording.
+                if state in {CaptureSessionState.STOPPED, CaptureSessionState.FAILED}:
                     return self._receipt(), self.recording()
-                raise RecordingModelError("recording_state_invalid", "stop requires an active session", path="session.state")
-            self._state = CaptureSessionState.STOPPING
-            self._reason = reason
+                if state is not CaptureSessionState.STOPPING:
+                    raise RecordingModelError("recording_state_invalid", "stop requires an active session", path="session.state")
+            else:
+                self._state = CaptureSessionState.STOPPING
+                self._reason = reason
+                state = CaptureSessionState.RECORDING
+        if state is CaptureSessionState.STOPPING:
+            # Another caller is already draining this session; wait for it
+            # and return the same document rather than raising.
+            if not self._settled.wait(timeout=settle_timeout):
+                raise RecordingModelError(
+                    "recording_state_invalid",
+                    f"a concurrent stop did not settle within {settle_timeout:g}s",
+                    path="session.state",
+                )
+            with self._lock:
+                return self._receipt(), self.recording()
         try:
             self._source.stop()
             self._indicator.stop()
         except Exception as exc:
             with self._lock:
                 self._state = CaptureSessionState.FAILED
+                self._settled.set()
                 self._reason = str(exc)
             raise
         with self._lock:
             self._state = CaptureSessionState.STOPPED
+            self._settled.set()
             return self._receipt(), self.recording()
 
     def status(self) -> SessionReceipt:

@@ -358,8 +358,14 @@ def _indicator_child_main() -> None:  # pragma: no cover - child process entry
     scope = CaptureScope.from_dict(config["scope"])
 
     def emit(kind: str, payload: Any = None) -> None:
-        sys.stdout.write(json.dumps({"callback": kind, "payload": payload}) + "\n")
-        sys.stdout.flush()
+        # The parent can exit first — a session that ends for any other reason
+        # tears down this pipe while the Tk loop is still alive.  A button
+        # press afterwards must not raise out of the Tk callback thread.
+        try:
+            sys.stdout.write(json.dumps({"callback": kind, "payload": payload}) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, ValueError):
+            pass
 
     indicator = TkRecordingIndicator(
         config["name"],
@@ -375,10 +381,13 @@ def _indicator_child_main() -> None:  # pragma: no cover - child process entry
     def announce() -> None:
         indicator._ready.wait()
         error = indicator._startup_error
-        sys.stdout.write(json.dumps({
-            "ready": True, "error": None if error is None else str(error),
-        }) + "\n")
-        sys.stdout.flush()
+        try:
+            sys.stdout.write(json.dumps({
+                "ready": True, "error": None if error is None else str(error),
+            }) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, ValueError):
+            pass
 
     def pump() -> None:
         for line in sys.stdin:

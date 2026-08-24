@@ -133,3 +133,60 @@ def test_bind_previous_must_be_boolean():
     with pytest.raises(RecordingModelError) as exc:
         session.add_assertion(_assertion(bindPrevious="yes"))
     assert exc.value.code == "recording_assertion_invalid"
+
+
+def test_stop_waits_for_a_concurrent_stop_instead_of_losing_the_recording():
+    """A live capture was lost exactly this way.
+
+    The indicator's Stop button stops the session on its own thread; draining
+    the correlator can take tens of seconds.  A stop() arriving during that
+    window used to raise `recording_state_invalid`, so the caller got an
+    exception instead of the events that had already been captured.
+    """
+    import threading
+
+    release = threading.Event()
+
+    class _SlowSource(Source):
+        def stop(self):
+            release.wait(timeout=5)
+            super().stop()
+
+    session = RecordingSession("REC", "flow", SCOPE, source=_SlowSource())
+    session.start()
+    session.ingest(event(1))
+
+    first: list = []
+    worker = threading.Thread(
+        target=lambda: first.append(session.stop("indicator")), daemon=True,
+    )
+    worker.start()
+    # Let the indicator-initiated stop reach STOPPING and block in the drain.
+    while session._state is not CaptureSessionState.STOPPING:
+        pass
+    release.set()
+
+    receipt, recording = session.stop("user")
+
+    worker.join(timeout=5)
+    assert receipt.state is CaptureSessionState.STOPPED
+    assert [e.sequence for e in recording.events] == [1]
+
+
+def test_stop_still_returns_the_capture_after_a_failed_stop():
+    class _ExplodingSource(Source):
+        def stop(self):
+            raise RuntimeError("drain blew up")
+
+    session = RecordingSession("REC", "flow", SCOPE, source=_ExplodingSource())
+    session.start()
+    session.ingest(event(1))
+
+    with pytest.raises(RuntimeError):
+        session.stop()
+
+    # The failure is still visible in the receipt, but the events the capture
+    # already holds must not be unreachable.
+    receipt, recording = session.stop()
+    assert receipt.state is CaptureSessionState.FAILED
+    assert [e.sequence for e in recording.events] == [1]
