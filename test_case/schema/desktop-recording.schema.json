@@ -248,6 +248,22 @@
               "minLength": 1
             }
           }
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "processName": {
+              "type": "string"
+            },
+            "handle": {
+              "type": "integer",
+              "description": "Native window handle (HWND / CGWindowNumber). Identifies the window only within the live capture session that produced it — a fresh run of the application at replay time gets a different handle, so this is diagnostic evidence, never a replay selector field."
+            }
+          }
         }
       }
     },

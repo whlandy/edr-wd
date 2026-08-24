@@ -50,7 +50,7 @@ def _packet():
 
 
 def test_macos_ax_resolver_chooses_smallest_containing_control():
-    resolved = MacOSAXResolver(_AXBackend(), native_ax=None).element_at(50, 50)
+    resolved = MacOSAXResolver(_AXBackend(), native_ax=None, native_windows=None).element_at(50, 50)
     assert resolved["identifier"] == "btnApply"
     assert resolved["controlType"] == "AXButton"
     assert resolved["rect"] == [20, 30, 120, 70]
@@ -60,7 +60,7 @@ def test_macos_correlator_uses_same_scope_and_semantic_event_contract_as_windows
     backend = _AXBackend()
     scope = CaptureScope("mac-dev", "macos_accessibility", "EDRClient", "^EDRClient$")
     event = MacOSAXCorrelator(
-        MacOSAXResolver(backend, native_ax=None), double_click_ms=700,
+        MacOSAXResolver(backend, native_ax=None, native_windows=None), double_click_ms=700,
     ).correlate(_packet(), scope, 1)
     assert event.type == "pointer_click"
     assert event.scope == scope
@@ -74,7 +74,7 @@ def test_macos_correlator_uses_same_scope_and_semantic_event_contract_as_windows
 def test_macos_correlator_drops_other_frontmost_application_before_ax_hit_test():
     backend = _AXBackend(process="OtherApp")
     scope = CaptureScope("mac-dev", "macos_accessibility", "EDRClient", "^EDRClient$")
-    event = MacOSAXCorrelator(MacOSAXResolver(backend, native_ax=None)).correlate(_packet(), scope, 1)
+    event = MacOSAXCorrelator(MacOSAXResolver(backend, native_ax=None, native_windows=None)).correlate(_packet(), scope, 1)
     assert event is None
 
 
@@ -117,7 +117,7 @@ def test_macos_pointer_toggle_uses_normalized_ax_control_type():
     }]
     scope = CaptureScope("mac-dev", "macos_accessibility", "EDRClient", "^EDRClient$")
 
-    event = MacOSAXCorrelator(MacOSAXResolver(backend, native_ax=None)).correlate(_packet(), scope, 1)
+    event = MacOSAXCorrelator(MacOSAXResolver(backend, native_ax=None, native_windows=None)).correlate(_packet(), scope, 1)
 
     assert event.type == "toggle_change"
     assert event.input == {"value": True}
@@ -131,7 +131,7 @@ def test_macos_focused_ax_text_control_drives_source_redacted_text_activity():
         "rectangle": {"x": 20, "y": 100, "w": 200, "h": 40},
     })
     scope = CaptureScope("mac-dev", "macos_accessibility", "EDRClient", "^EDRClient$")
-    correlator = MacOSAXCorrelator(MacOSAXResolver(backend, native_ax=None))
+    correlator = MacOSAXCorrelator(MacOSAXResolver(backend, native_ax=None, native_windows=None))
 
     assert correlator.correlate(HookPacket(
         "text_activity", 100, "2026-08-17T00:00:00.000Z",
@@ -298,7 +298,7 @@ def test_macos_native_hit_test_never_reads_a_secure_field_value():
 
 
 def test_macos_falls_back_to_the_tree_walk_when_native_ax_is_missing():
-    resolver = MacOSAXResolver(_AXBackend(), native_ax=None)
+    resolver = MacOSAXResolver(_AXBackend(), native_ax=None, native_windows=None)
 
     resolved = resolver.element_at(50, 50)
 
@@ -331,7 +331,7 @@ def test_macos_resolver_enumerates_windows_for_scope_seeding():
         {"app_name": "", "title": "orphan", "pid": 7},
     ])
 
-    windows = MacOSAXResolver(backend, native_ax=None).windows()
+    windows = MacOSAXResolver(backend, native_ax=None, native_windows=None).windows()
 
     assert windows == [{
         "title": "notes.txt", "pid": 42, "processName": "TextEdit", "handle": 1731,
@@ -342,6 +342,67 @@ def test_macos_scope_seeding_surfaces_a_failed_enumeration():
     backend = _WindowListBackend(None)
 
     with pytest.raises(RecordingModelError) as excinfo:
-        MacOSAXResolver(backend, native_ax=None).windows()
+        MacOSAXResolver(backend, native_ax=None, native_windows=None).windows()
 
     assert excinfo.value.code == "recording_scope_seed_failed"
+
+
+def _cg_window(owner_pid, name, number):
+    return {"kCGWindowOwnerPID": owner_pid, "kCGWindowName": name, "kCGWindowNumber": number}
+
+
+def test_foreground_reports_the_handle_matching_pid_and_title():
+    backend = _AXBackend()  # pid=7, title="EDRClient"
+    resolver = MacOSAXResolver(
+        backend, native_ax=None,
+        native_windows=[
+            _cg_window(99, "unrelated", 1),
+            _cg_window(7, "EDRClient", 2735),
+        ],
+    )
+
+    foreground = resolver.foreground()
+
+    assert foreground["handle"] == 2735
+
+
+def test_foreground_omits_handle_rather_than_guessing_when_pid_has_no_match():
+    """A stale pid must not silently borrow an unrelated window's handle.
+
+    Before this was fixed, a pid/title that matched nothing fell back to the
+    unfiltered CGWindowList snapshot and returned whatever window happened to
+    come first — a real window on the machine running the test, in a
+    recording session that had nothing to do with it.
+    """
+    backend = _AXBackend()  # pid=7
+    resolver = MacOSAXResolver(
+        backend, native_ax=None,
+        native_windows=[_cg_window(99, "unrelated", 1), _cg_window(100, "also unrelated", 2)],
+    )
+
+    foreground = resolver.foreground()
+
+    assert "handle" not in foreground
+
+
+def test_foreground_omits_handle_when_cgwindowlist_is_unavailable():
+    resolver = MacOSAXResolver(_AXBackend(), native_ax=None, native_windows=None)
+
+    foreground = resolver.foreground()
+
+    assert "handle" not in foreground
+
+
+def test_foreground_disambiguates_same_pid_multiple_windows_by_title():
+    backend = _AXBackend()  # pid=7, title="EDRClient"
+    resolver = MacOSAXResolver(
+        backend, native_ax=None,
+        native_windows=[
+            _cg_window(7, "some other window", 1),
+            _cg_window(7, "EDRClient", 2735),
+        ],
+    )
+
+    foreground = resolver.foreground()
+
+    assert foreground["handle"] == 2735

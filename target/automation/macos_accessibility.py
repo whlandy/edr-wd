@@ -588,12 +588,18 @@ class MacOSAccessibilityBackend:
                 "enabled": True,
             })
 
+        # Keyed on (pid, window_title) only: System Events and CGWindowList
+        # can disagree on app_name for the same process — CGWindowList's
+        # kCGWindowOwnerName is localized ("文本编辑") while System Events
+        # reports the English process name ("TextEdit") — and including
+        # app_name in the key silently defeated the CG enrichment below for
+        # every such app.
         by_identity = {
-            (window.get("pid"), window.get("window_title"), window.get("app_name")): window
+            (window.get("pid"), window.get("window_title")): window
             for window in windows
         }
         for w in self._list_windows_cg():
-            key = (w.get("pid"), w.get("window_title"), w.get("app_name"))
+            key = (w.get("pid"), w.get("window_title"))
             existing = by_identity.get(key)
             if existing is None:
                 windows.append(w)

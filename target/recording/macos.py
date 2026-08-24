@@ -239,8 +239,13 @@ class MacOSAXResolver:
     _AX_UNAVAILABLE = object()
 
     _AUTO_AX = object()
+    _AUTO_WINDOWS = object()
 
-    def __init__(self, backend: Any, *, native_ax: Any = _AUTO_AX) -> None:
+    def __init__(
+        self, backend: Any, *,
+        native_ax: Any = _AUTO_AX,
+        native_windows: Any = _AUTO_WINDOWS,
+    ) -> None:
         self._backend = backend
         # `native_ax` is the AX seam.  Left at the default it is auto-detected
         # from ApplicationServices; pass None to force the tree-walk fallback
@@ -248,17 +253,94 @@ class MacOSAXResolver:
         # or a stand-in module to exercise the native path deterministically.
         if native_ax is not self._AUTO_AX:
             self._ax_module = native_ax if native_ax is not None else self._AX_UNAVAILABLE
+        # `native_windows` is the CGWindowList seam used by the foreground
+        # handle lookup.  Left at the default it queries the real desktop;
+        # pass None to force "no handle available" (matching a host without
+        # Quartz), or an iterable/callable of CGWindowList-shaped dicts to
+        # exercise the lookup deterministically without touching whatever
+        # windows happen to be open on the machine running the tests.
+        if native_windows is not self._AUTO_WINDOWS:
+            self._cg_window_source = native_windows
 
     def foreground(self) -> Mapping[str, object]:
         lock_result = self._backend.get_window_lock()
         lock = lock_result.get("lock") if isinstance(lock_result, Mapping) else None
         lock = lock if isinstance(lock, Mapping) else {}
         snapshot = lock.get("snapshot") if isinstance(lock.get("snapshot"), Mapping) else {}
-        return {
+        pid = lock.get("pid") or snapshot.get("pid")
+        title = snapshot.get("title") or ""
+        result: dict[str, object] = {
             "processName": lock.get("process_name") or snapshot.get("process_name") or "",
-            "windowTitle": snapshot.get("title") or "",
-            "pid": lock.get("pid") or snapshot.get("pid"),
+            "windowTitle": title,
+            "pid": pid,
         }
+        handle = self._foreground_handle(pid, title)
+        if handle is not None:
+            result["handle"] = handle
+        return result
+
+    def _cg_windows(self) -> list[Mapping[str, object]] | None:
+        """The current CGWindowList snapshot, or None when unavailable."""
+        cached = getattr(self, "_cg_window_source", self._AUTO_WINDOWS)
+        if cached is None:
+            return None
+        if cached is not self._AUTO_WINDOWS:
+            source = cached() if callable(cached) else cached
+            return list(source or [])
+        try:
+            import Quartz
+        except Exception:
+            return None
+        try:
+            listing = Quartz.CGWindowListCopyWindowInfo(
+                Quartz.kCGWindowListOptionOnScreenOnly
+                | Quartz.kCGWindowListExcludeDesktopElements,
+                Quartz.kCGNullWindowID,
+            )
+        except Exception:
+            return None
+        return list(listing or [])
+
+    def _foreground_handle(self, pid: object, title: str) -> int | None:
+        """CGWindowNumber of the connected window, resolved in-process.
+
+        This is called once per captured input event (foreground() is the
+        correlator's hot path), so it queries CGWindowList directly rather
+        than going through the backend's list_windows() — that path is
+        AppleScript-based and costs 10-20 s per call on a live desktop, the
+        exact cost that made per-event AX correlation drop nearly every
+        event before it was replaced with single-point AX access. A direct
+        Quartz call answers this in low single-digit milliseconds.
+
+        Returns None rather than an unrelated window's number when pid/title
+        do not narrow the listing to a match — a wrong-but-valid-looking
+        handle is worse than admitting the lookup failed, since a stale
+        connection could otherwise silently borrow whatever window happens
+        to come first in the snapshot.
+        """
+        windows = self._cg_windows()
+        if not windows:
+            return None
+        candidates = windows
+        if pid is not None:
+            candidates = [
+                item for item in candidates
+                if item.get("kCGWindowOwnerPID") == pid
+            ]
+        if title:
+            candidates = [
+                item for item in candidates
+                if str(item.get("kCGWindowName") or "") == title
+            ]
+        elif pid is None:
+            # Neither pid nor title narrows the search: nothing identifies
+            # which window this is supposed to be.
+            return None
+        for item in candidates:
+            number = item.get("kCGWindowNumber")
+            if number is not None:
+                return int(number)
+        return None
 
     def windows(self) -> list[Mapping[str, object]]:
         """Top-level windows with their owning process, for scope seeding.
@@ -634,13 +716,13 @@ class MacOSWindowEventDriver:
                 continue
             for number, (title, pid) in current.items():
                 if number not in known:
-                    self._packet("opened", title, pid)
+                    self._packet("opened", title, pid, number)
             for number, (title, pid) in known.items():
                 if number not in current:
-                    self._packet("closed", title, pid)
+                    self._packet("closed", title, pid, number)
             known = current
 
-    def _packet(self, kind: str, title: str, pid: int) -> None:  # pragma: no cover - live macOS only
+    def _packet(self, kind: str, title: str, pid: int, number: int) -> None:  # pragma: no cover - live macOS only
         self._emit(HookPacket(
             kind="window_transition",
             monotonic_ms=int(time.monotonic() * 1000),
@@ -650,6 +732,7 @@ class MacOSWindowEventDriver:
                 "processName": self.process_name,
                 "title": title,
                 "pid": pid or None,
+                "handle": number,
             },
         ))
 

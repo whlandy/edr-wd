@@ -101,12 +101,25 @@ def _validate_evidence(value: Mapping[str, Any]) -> None:
         # Which window the event happened in. A recorded flow moves between an
         # application's windows, and replay has to know which one each step
         # belongs to rather than assuming the entry window.
-        fields = _strict(window, {"title", "processName"}, "event.evidence.window")
+        #
+        # `handle` (HWND / CGWindowNumber) only identifies the window within
+        # this one live capture session — a fresh run of the application at
+        # replay time gets a different handle — so it is diagnostic evidence
+        # of which physical window produced the step, never a replay
+        # selector field.
+        fields = _strict(window, {"title", "processName", "handle"}, "event.evidence.window")
         for key in ("title", "processName"):
             if key in fields and not isinstance(fields[key], str):
                 raise RecordingModelError(
                     "type_error", f"evidence.window.{key} must be a string",
                     path=f"event.evidence.window.{key}",
+                )
+        if "handle" in fields:
+            handle = fields["handle"]
+            if not isinstance(handle, int) or isinstance(handle, bool):
+                raise RecordingModelError(
+                    "type_error", "evidence.window.handle must be an integer",
+                    path="event.evidence.window.handle",
                 )
     pid = data.get("foregroundPid")
     if pid is not None and (not isinstance(pid, int) or isinstance(pid, bool) or pid < 1):

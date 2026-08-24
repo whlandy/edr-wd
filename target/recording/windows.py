@@ -268,6 +268,7 @@ class WindowsUIAResolver:
             "processName": psutil.Process(pid.value).name(),
             "windowTitle": title.value,
             "pid": int(pid.value),
+            "handle": int(hwnd),
         }
 
     def _describe(self, wrapper) -> Mapping[str, object]:  # pragma: no cover - Windows only
@@ -422,7 +423,17 @@ class WindowsUIACorrelator:
         # Windows this recording caused to open.  Input inside them belongs to
         # the flow being recorded even though their titles cannot match the
         # scope regex the user supplied for the entry window.
+        #
+        # Title is the fallback identity, kept for windows a source cannot
+        # report a native handle for.  It is unreliable on its own: a title
+        # can change after admission (an edited document gains "*", a tab
+        # switches) and drop the window right back out of scope, and two
+        # windows can legitimately share a title and get confused for each
+        # other.  A native window handle (HWND / CGWindowNumber) does not
+        # have either problem, so it is checked first wherever a source can
+        # supply one.
         self._derived_scope_titles: set[str] = set()
+        self._derived_scope_handles: set[int] = set()
         self.out_of_scope_events = 0
         if transition_window_ms < 0:
             raise ValueError("transition_window_ms must be non-negative")
@@ -709,8 +720,15 @@ class WindowsUIACorrelator:
                 continue
             title = window.get("title")
             if isinstance(title, str) and title:
-                self._derived_scope_titles.add(title)
                 seeded.append(title)
+            handle = window.get("handle")
+            if isinstance(handle, int):
+                # A handle is exact; tracking the title too would let a later
+                # unrelated window that happens to share it ride in on the
+                # title-derived fallback, defeating the point of the handle.
+                self._derived_scope_handles.add(handle)
+            elif isinstance(title, str) and title:
+                self._derived_scope_titles.add(title)
         return tuple(seeded)
 
     def _in_scope(self, foreground: Mapping[str, object], scope: CaptureScope) -> bool:
@@ -723,6 +741,9 @@ class WindowsUIACorrelator:
         """
         if not self._process_matches(foreground.get("processName"), scope.process_name):
             return False
+        # The entry window is always checked against the user's own regex
+        # first. That match must not depend on seeding having succeeded, so
+        # it runs even when a handle is present.
         title = str(foreground.get("windowTitle") or "")
         try:
             if re.search(scope.window_title, title):
@@ -731,6 +752,13 @@ class WindowsUIACorrelator:
             raise RecordingModelError(
                 "recording_scope_not_unique", str(exc), path="scope.windowTitle"
             )
+        # A native handle is exact and immune to a title changing after the
+        # window was admitted — a document gaining "*", a tab switching — so
+        # it decides scope for every window beyond the entry one wherever the
+        # source supplied one, ahead of the title fallback.
+        handle = foreground.get("handle")
+        if isinstance(handle, int) and handle in self._derived_scope_handles:
+            return True
         return title in self._derived_scope_titles
 
     def _scroll_continues(self, packet: HookPacket) -> bool:
@@ -805,7 +833,17 @@ class WindowsUIACorrelator:
         # they may well click inside it next, and dropping that input silently
         # is how a recording ends up empty.
         title = packet.native.get("title")
-        if isinstance(title, str) and title:
+        handle = packet.native.get("handle")
+        if isinstance(handle, int):
+            # A handle is exact; also title-tracking this window would let a
+            # later unrelated window that happens to share the title ride in
+            # on the title-derived fallback, defeating the point of the
+            # handle.
+            if kind == "opened":
+                self._derived_scope_handles.add(handle)
+            else:
+                self._derived_scope_handles.discard(handle)
+        elif isinstance(title, str) and title:
             if kind == "opened":
                 self._derived_scope_titles.add(title)
             else:
@@ -842,10 +880,18 @@ class WindowsUIACorrelator:
         if not isinstance(title, str) or not title:
             return event
         evidence = dict(event.evidence)
-        evidence["window"] = {
+        stamp: dict[str, object] = {
             "title": title,
             "processName": str(window.get("processName") or ""),
         }
+        # The handle only ever identifies a window within this one live
+        # session — the same title/process is what replay must re-resolve
+        # against a freshly launched window later, so this is diagnostic
+        # evidence, not a replay selector field.
+        handle = window.get("handle")
+        if isinstance(handle, int):
+            stamp["handle"] = handle
+        evidence["window"] = stamp
         return dataclasses.replace(event, evidence=evidence)
 
     def correlate(
@@ -1193,6 +1239,7 @@ class WindowsWinEventDriver:
                         "processName": name,
                         "title": title,
                         "pid": resolved_pid,
+                        "handle": handle,
                     },
                 ))
 

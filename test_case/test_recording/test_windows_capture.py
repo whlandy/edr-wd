@@ -576,12 +576,15 @@ def test_a_drag_onto_an_unresolvable_release_point_keeps_an_explicit_null_end_ta
     assert event.input["endTarget"] is None
 
 
-def _transition(kind, monotonic_ms, *, process="EDRClient.exe", title="策略详情", pid=42):
+def _transition(kind, monotonic_ms, *, process="EDRClient.exe", title="策略详情", pid=42, handle=None):
+    native = {"kind": kind, "processName": process, "title": title, "pid": pid}
+    if handle is not None:
+        native["handle"] = handle
     return HookPacket(
         kind="window_transition",
         monotonic_ms=monotonic_ms,
         wall_time="2026-08-17T00:00:00.000Z",
-        native={"kind": kind, "processName": process, "title": title, "pid": pid},
+        native=native,
     )
 
 
@@ -697,13 +700,17 @@ def _log_center_resolver():
         def __init__(self):
             super().__init__()
             self.window_title = "EDRClient"
+            self.window_handle = None
 
         def foreground(self):
-            return {
+            result = {
                 "processName": self.process,
                 "windowTitle": self.window_title,
                 "pid": 42,
             }
+            if self.window_handle is not None:
+                result["handle"] = self.window_handle
+            return result
 
     return _Switching()
 
@@ -891,9 +898,13 @@ class _SeedResolver(_Resolver):
         super().__init__()
         self._windows = windows
         self.window_title = "EDRClient"
+        self.window_handle = None
 
     def foreground(self):
-        return {"processName": self.process, "windowTitle": self.window_title, "pid": 42}
+        result = {"processName": self.process, "windowTitle": self.window_title, "pid": 42}
+        if self.window_handle is not None:
+            result["handle"] = self.window_handle
+        return result
 
     def windows(self):
         return self._windows
@@ -1049,3 +1060,99 @@ def test_stop_reports_no_correlation_error_when_the_worker_finishes_in_time():
 
     assert source.correlation_errors == []
     assert [event.sequence for event in captured] == [1]
+
+
+def test_a_title_change_after_admission_no_longer_evicts_a_handle_tracked_window():
+    """A live capture can gain a native handle for a window it opened.
+
+    Title-only admission is fragile: an edited document gaining "*", a tab
+    switching, or any post-admission title change drops the window right
+    back out of scope and silently discards every subsequent step inside
+    it. A window transition that carries a handle is tracked by that handle
+    instead, which does not change when the title does.
+    """
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    _record_click(correlator, resolver, "EDRClient", 100)
+    correlator.correlate(
+        _transition("opened", 300, title="日志中心", handle=777), SCOPE, 2,
+    )
+
+    # The title changes after admission (e.g. the document picked up "*"),
+    # but the handle the window opened with has not.
+    resolver.window_title = "日志中心 *"
+    resolver.window_handle = 777
+
+    assert _record_click(correlator, resolver, "日志中心 *", 500) is not None
+    assert correlator.out_of_scope_events == 0
+
+
+def test_two_windows_sharing_a_title_are_told_apart_by_handle():
+    """Title alone cannot distinguish two windows with the same name."""
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    _record_click(correlator, resolver, "EDRClient", 100)
+    correlator.correlate(
+        _transition("opened", 300, title="属性", handle=111), SCOPE, 2,
+    )
+
+    # A second, unrelated window happens to share that same title but was
+    # never admitted — it must not ride in on the first one's title alone.
+    resolver.window_title = "属性"
+    resolver.window_handle = 222
+
+    assert _record_click(correlator, resolver, "属性", 500) is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_closing_a_handle_tracked_window_evicts_it_by_handle():
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    _record_click(correlator, resolver, "EDRClient", 100)
+    correlator.correlate(
+        _transition("opened", 300, title="日志中心", handle=777), SCOPE, 2,
+    )
+    resolver.window_title = "日志中心"
+    resolver.window_handle = 777
+    assert _record_click(correlator, resolver, "日志中心", 500) is not None
+
+    correlator.correlate(
+        _transition("closed", 700, title="日志中心", handle=777), SCOPE, 4,
+    )
+
+    assert _record_click(correlator, resolver, "日志中心", 1100) is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_the_entry_window_is_admitted_by_regex_even_if_seeding_never_ran():
+    """A handle on the entry window must never gate its own admission.
+
+    If seed_scope() failed or was never called, _derived_scope_handles is
+    empty. The entry window still has to be admitted by the caller's own
+    title regex, or a resolver that starts reporting a handle would lock
+    every recording out of its own entry window.
+    """
+    resolver = _log_center_resolver()
+    resolver.window_handle = 999  # never seeded anywhere
+    correlator = WindowsUIACorrelator(resolver)
+
+    assert _record_click(correlator, resolver, "EDRClient", 100) is not None
+    assert correlator.out_of_scope_events == 0
+
+
+def test_seeding_admits_a_window_by_handle_even_if_its_title_later_changes():
+    resolver = _SeedResolver([
+        {"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1},
+        {"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777},
+    ])
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    resolver.window_title = "日志中心 (已更新)"
+    resolver.window_handle = 777
+
+    assert _record_click(correlator, resolver, "日志中心 (已更新)", 100) is not None
+    assert correlator.out_of_scope_events == 0
