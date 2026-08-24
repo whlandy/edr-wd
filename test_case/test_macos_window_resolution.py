@@ -226,3 +226,98 @@ def test_list_windows_enriches_system_events_window_with_cg_rectangle(monkeypatc
         "x": 400, "y": 100, "w": 300, "h": 120,
     }
     assert result["windows"][0]["source"] == "system_events+cgwindowlist"
+
+
+def _lock(pid=1981, process="HiSecEndpointAgent", title="华为智能终端安全系统"):
+    return {
+        "backend": "macos_accessibility",
+        "process_name": process,
+        "pid": pid,
+        "title_re": title,
+        "snapshot": {"process_name": process, "pid": pid, "title": title},
+    }
+
+
+def _zorder_window(pid, title, rect):
+    return {"pid": pid, "title": title, "number": pid, "rect": rect}
+
+
+def test_a_background_only_window_lock_verifies_by_z_order(monkeypatch):
+    """A tray-style agent never becomes System Events' frontmost process.
+
+    HiSec's agent and client are both background-only, so the frontmost-process
+    check can never succeed for them no matter how visible the window is.
+    Without a fallback, a lock on the real product's own window was
+    unverifiable and every recording of it refused to start.
+    """
+    backend = MacOSAccessibilityBackend()
+    backend._window_lock = _lock()
+    monkeypatch.setattr(backend, "_is_background_only", lambda name: True)
+    monkeypatch.setattr(backend, "_desktop_chrome_pids", lambda: set())
+    monkeypatch.setattr(backend, "_cg_window_zorder", lambda: [
+        _zorder_window(1981, "华为智能终端安全系统", (0.0, 99.0, 920.0, 610.0)),
+        _zorder_window(4242, "Some Editor", (0.0, 800.0, 500.0, 200.0)),
+    ])
+
+    state = backend._locked_window_visible_state(backend._window_lock)
+
+    assert state is not None
+    assert state["process_name"] == "HiSecEndpointAgent"
+    assert state["matched_by"] == "cg_zorder_unoccluded"
+
+
+def test_a_genuinely_covered_background_window_is_not_treated_as_locked(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    backend._window_lock = _lock()
+    monkeypatch.setattr(backend, "_is_background_only", lambda name: True)
+    monkeypatch.setattr(backend, "_desktop_chrome_pids", lambda: set())
+    monkeypatch.setattr(backend, "_cg_window_zorder", lambda: [
+        _zorder_window(4242, "Another App", (0.0, 0.0, 1920.0, 1080.0)),
+        _zorder_window(1981, "华为智能终端安全系统", (0.0, 99.0, 920.0, 610.0)),
+    ])
+
+    assert backend._locked_window_visible_state(backend._window_lock) is None
+
+
+def test_the_docks_desktop_spanning_entry_does_not_count_as_occlusion(monkeypatch):
+    """Dock registers a full-screen CGWindowList entry it does not paint.
+
+    Discovered live: it made a fully visible HiSec window read as covered,
+    so the z-order fallback rejected a lock that was in fact perfectly valid.
+    """
+    backend = MacOSAccessibilityBackend()
+    backend._window_lock = _lock()
+    monkeypatch.setattr(backend, "_is_background_only", lambda name: True)
+    monkeypatch.setattr(backend, "_desktop_chrome_pids", lambda: {1631})
+    monkeypatch.setattr(backend, "_cg_window_zorder", lambda: [
+        _zorder_window(1631, "Dock", (0.0, 0.0, 1920.0, 1080.0)),
+        _zorder_window(1981, "华为智能终端安全系统", (0.0, 99.0, 920.0, 610.0)),
+    ])
+
+    state = backend._locked_window_visible_state(backend._window_lock)
+
+    assert state is not None
+    assert state["matched_by"] == "cg_zorder_unoccluded"
+
+
+def test_a_regular_application_does_not_use_the_z_order_fallback(monkeypatch):
+    """The fallback exists for processes that cannot be frontmost at all.
+
+    A normal app that simply is not in front right now must still fail the
+    lock check, or the lock would stop meaning anything.
+    """
+    backend = MacOSAccessibilityBackend()
+    backend._window_lock = _lock(pid=36245, process="TextEdit", title="notes.txt")
+    monkeypatch.setattr(backend, "_is_background_only", lambda name: False)
+
+    assert backend._locked_window_visible_state(backend._window_lock) is None
+
+
+def test_a_background_window_that_is_not_on_screen_is_never_matched(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    backend._window_lock = _lock()
+    monkeypatch.setattr(backend, "_is_background_only", lambda name: True)
+    monkeypatch.setattr(backend, "_desktop_chrome_pids", lambda: set())
+    monkeypatch.setattr(backend, "_cg_window_zorder", lambda: [])
+
+    assert backend._locked_window_visible_state(backend._window_lock) is None

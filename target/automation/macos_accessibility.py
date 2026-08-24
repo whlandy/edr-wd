@@ -223,11 +223,138 @@ class MacOSAccessibilityBackend:
                 pid = int(parts[1])
             except ValueError:
                 pass
-        return {
+        state = {
             "ok": True,
             "process_name": parts[0] if parts else "",
             "pid": pid,
             "title": parts[2] if len(parts) > 2 else "",
+        }
+        lock = getattr(self, "_window_lock", None)
+        if isinstance(lock, dict) and not self._state_matches_lock(state, lock):
+            # System Events' "frontmost process" tracks which app owns the
+            # menu bar/Dock focus. A tray-style agent (LSUIElement /
+            # background-only) never owns that, no matter how visible its
+            # window is or how it was raised — so a lock on one of these
+            # windows can never be verified this way. Fall back to asking
+            # whether the locked window is unoccluded in the actual
+            # on-screen stacking order instead of demanding an app-level
+            # transition that this class of process cannot make.
+            fallback = self._locked_window_visible_state(lock)
+            if fallback is not None:
+                return fallback
+        return state
+
+    def _is_background_only(self, process_name: str) -> bool:
+        """True if System Events reports this process as background-only.
+
+        A background-only (tray/agent-style) process has no Dock icon and
+        never becomes "frontmost" in System Events' sense, regardless of
+        window visibility.
+        """
+        script = (
+            'tell application "System Events" to get background only '
+            f'of process "{process_name}"'
+        )
+        rc, out = _run_osascript(script, timeout=3)
+        return rc == 0 and out.strip().lower() == "true"
+
+    def _cg_window_zorder(self) -> list[dict]:
+        """On-screen windows via CGWindowList, front-to-back as CG reports them."""
+        try:
+            import Quartz
+        except Exception:
+            return []
+        try:
+            listing = Quartz.CGWindowListCopyWindowInfo(
+                Quartz.kCGWindowListOptionOnScreenOnly
+                | Quartz.kCGWindowListExcludeDesktopElements,
+                Quartz.kCGNullWindowID,
+            )
+        except Exception:
+            return []
+        windows = []
+        for item in listing or []:
+            bounds = item.get("kCGWindowBounds") or {}
+            windows.append({
+                "pid": item.get("kCGWindowOwnerPID"),
+                "title": str(item.get("kCGWindowName") or ""),
+                "number": item.get("kCGWindowNumber"),
+                "rect": (
+                    float(bounds.get("X", 0)), float(bounds.get("Y", 0)),
+                    float(bounds.get("Width", 0)), float(bounds.get("Height", 0)),
+                ),
+            })
+        return windows
+
+    def _desktop_chrome_pids(self) -> set[int]:
+        """PIDs of desktop-chrome processes with a non-occluding full-screen
+        CGWindowList entry (see `_locked_window_visible_state`)."""
+        try:
+            from AppKit import NSRunningApplication
+        except Exception:
+            return set()
+        pids: set[int] = set()
+        for bundle_id in ("com.apple.dock", "com.apple.loginwindow"):
+            try:
+                apps = NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)
+            except Exception:
+                continue
+            for app in apps or []:
+                try:
+                    pids.add(int(app.processIdentifier()))
+                except Exception:
+                    continue
+        return pids
+
+    def _locked_window_visible_state(self, lock: dict) -> Optional[dict]:
+        """Verify a background-only process's lock by on-screen z-order.
+
+        Returns a state dict matching `_frontmost_window_state()`'s shape
+        when the locked window is on screen and nothing from a *different*
+        process is drawn in front of it; None when the process is not
+        background-only (the caller should not use this fallback) or the
+        window cannot be confirmed unoccluded.
+        """
+        process_name = lock.get("process_name")
+        if not process_name or not self._is_background_only(str(process_name)):
+            return None
+        zorder = self._cg_window_zorder()
+        lock_pid = lock.get("pid")
+        snapshot = lock.get("snapshot") if isinstance(lock.get("snapshot"), dict) else {}
+        title = str(snapshot.get("title") or "")
+        target = None
+        target_index = None
+        for index, window in enumerate(zorder):
+            if lock_pid is not None and window["pid"] != lock_pid:
+                continue
+            if title and window["title"] and window["title"] != title:
+                continue
+            target = window
+            target_index = index
+            break
+        if target is None:
+            # Not currently on screen at all; never fabricate a match.
+            return None
+        chrome_pids = self._desktop_chrome_pids()
+        tx, ty, tw, th = target["rect"]
+        for window in zorder[:target_index]:
+            if window["pid"] == target["pid"]:
+                continue  # another window of the same app stacked in front
+            if window["pid"] in chrome_pids:
+                # Dock registers a desktop-spanning CGWindowList entry for
+                # its own Spaces/Exposé hit-testing that is not actually
+                # painted over app content — discovered live: it made a
+                # fully visible HiSec window read as occluded end to end.
+                continue
+            ox, oy, ow, oh = window["rect"]
+            if ox < tx + tw and ox + ow > tx and oy < ty + th and oy + oh > ty:
+                return None  # covered by a different, genuinely frontmost window
+        return {
+            "ok": True,
+            "process_name": str(process_name),
+            "pid": target["pid"],
+            "title": target["title"],
+            "matched_by": "cg_zorder_unoccluded",
         }
 
     def _connected_window_state(self) -> dict:
