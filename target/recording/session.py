@@ -45,9 +45,14 @@ class SessionReceipt:
     sequence: int
     monotonic_ms: int
     reason: str = ""
+    # Actions the user performed. `sequence` counts every observed event,
+    # including the window transitions the compiler folds into the preceding
+    # step's verifier, so it reads ahead of the steps a recording will
+    # actually contain and cannot be shown as a step count.
+    action_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        return {"sessionId": self.session_id, "state": self.state.value, "sequence": self.sequence, "monotonicMs": self.monotonic_ms, "reason": self.reason}
+        return {"sessionId": self.session_id, "state": self.state.value, "sequence": self.sequence, "monotonicMs": self.monotonic_ms, "reason": self.reason, "actionCount": self.action_count}
 
 
 class CaptureSource(Protocol):
@@ -84,7 +89,13 @@ class RecordingSession:
         self._indicator: RecordingIndicator = NullRecordingIndicator()
         self._monotonic = monotonic;self._state = CaptureSessionState.IDLE
         self._events: list[RawCaptureEvent] = [];self._last_heartbeat = monotonic()
+        # Actions the user performed, which is what the indicator reports.
+        # Distinct from len(self._events), which also holds result evidence.
+        self._action_count = 0
         self._lock = threading.RLock();self._reason = ""
+        # Set once the session reaches a terminal state, so a second stop()
+        # can wait for an in-flight one instead of losing the recording.
+        self._settled = threading.Event()
         self._last_action_causal_id: str | None = None
 
     @property
@@ -118,7 +129,10 @@ class RecordingSession:
         return int(self._monotonic() * 1000)
 
     def _receipt(self) -> SessionReceipt:
-        return SessionReceipt(self.session_id, self._state, len(self._events), self._now_ms(), self._reason)
+        return SessionReceipt(
+            self.session_id, self._state, len(self._events), self._now_ms(),
+            self._reason, self._action_count,
+        )
 
     def _expire_before_operation(self) -> bool:
         """Stop an expired session without holding the ingest lock while draining."""
@@ -132,15 +146,21 @@ class RecordingSession:
             self._state = CaptureSessionState.STOPPING
             self._reason = "recording_lease_expired"
         try:
-            self._source.stop()
+            # Tear the UI down first. Draining the correlator can take tens
+            # of seconds when a correlation call is stuck, and doing that with
+            # the recorder window still on screen makes a stop that is working
+            # look like one that has hung.
             self._indicator.stop()
+            self._source.stop()
         except Exception as exc:
             with self._lock:
                 self._state = CaptureSessionState.FAILED
+                self._settled.set()
                 self._reason = f"recording_lease_expired: {exc}"
             return True
         with self._lock:
             self._state = CaptureSessionState.STOPPED
+            self._settled.set()
         return True
 
     def start(self) -> SessionReceipt:
@@ -151,13 +171,36 @@ class RecordingSession:
             try:
                 self._source.start()
                 self._indicator.start()
+                self._bind_recorder_ui_rect()
             except Exception as exc:
                 try:
                     self._source.stop()
                 except Exception:
                     pass
-                self._state = CaptureSessionState.FAILED;self._reason = str(exc);raise
+                self._state = CaptureSessionState.FAILED;self._reason = str(exc);self._settled.set();raise
             self._state = CaptureSessionState.RECORDING;self._last_heartbeat = self._monotonic();return self._receipt()
+
+    def _bind_recorder_ui_rect(self) -> None:
+        """Let the correlator know where the recorder's own UI is on screen.
+
+        The indicator is always-on-top, so anything clicked inside it never
+        reached the target application and must not enter the recording.
+        """
+        correlator = getattr(self._source, "_correlator", None)
+        bind = getattr(correlator, "set_recorder_ui_rect", None)
+        if not callable(bind):
+            return
+        # Prefer the window server's own bounds: the toolkit reports client
+        # geometry that excludes the title bar, and a drag on that title bar
+        # would then read as input inside the target window.
+        rect = None
+        resolve = getattr(getattr(correlator, "_resolver", None), "recorder_ui_rect", None)
+        if callable(resolve):
+            try:
+                rect = resolve()
+            except Exception:
+                rect = None
+        bind(rect or getattr(self._indicator, "window_rect", None))
 
     def heartbeat(self) -> SessionReceipt:
         self._expire_before_operation()
@@ -206,7 +249,20 @@ class RecordingSession:
             self._events.append(event);self._last_heartbeat = self._monotonic()
             if event.type in ACTION_EVENT_TYPES:
                 self._last_action_causal_id = event.causal_id
-            self._indicator.update_count(len(self._events));return True
+            # Count what the user did, not everything observed. A window
+            # opening or closing is evidence that the preceding click worked —
+            # the compiler folds it into that step's verifier — so counting it
+            # made the indicator read ahead of the steps the recording will
+            # actually contain (18 observed against 15 compiled in one live
+            # capture), for something the user never performed. An explicit
+            # assertion does count: the user authored it, and an unbound one
+            # becomes a step of its own.
+            if event.type in ACTION_EVENT_TYPES or event.assertion is not None:
+                self._action_count += 1
+                # Only notify on a change; the indicator lives in another
+                # process and every update is a pipe write.
+                self._indicator.update_count(self._action_count)
+            return True
 
     def request_assertion_editor(self) -> SessionReceipt:
         self._expire_before_operation()
@@ -382,25 +438,51 @@ class RecordingSession:
             )
         return self._receipt()
 
-    def stop(self, reason: str = "user") -> tuple[SessionReceipt, RawRecording]:
+    def stop(
+        self, reason: str = "user", *, settle_timeout: float = 60.0,
+    ) -> tuple[SessionReceipt, RawRecording]:
         self._expire_before_operation()
         with self._lock:
-            if self._state not in {CaptureSessionState.RECORDING, CaptureSessionState.PAUSED}:
-                if self._state is CaptureSessionState.STOPPED:
+            state = self._state
+            if state not in {CaptureSessionState.RECORDING, CaptureSessionState.PAUSED}:
+                # A session that already ended still holds everything it
+                # captured.  Refusing to hand that back is how a stop race
+                # with the indicator's own Stop button costs the recording.
+                if state in {CaptureSessionState.STOPPED, CaptureSessionState.FAILED}:
                     return self._receipt(), self.recording()
-                raise RecordingModelError("recording_state_invalid", "stop requires an active session", path="session.state")
-            self._state = CaptureSessionState.STOPPING
-            self._reason = reason
+                if state is not CaptureSessionState.STOPPING:
+                    raise RecordingModelError("recording_state_invalid", "stop requires an active session", path="session.state")
+            else:
+                self._state = CaptureSessionState.STOPPING
+                self._reason = reason
+                state = CaptureSessionState.RECORDING
+        if state is CaptureSessionState.STOPPING:
+            # Another caller is already draining this session; wait for it
+            # and return the same document rather than raising.
+            if not self._settled.wait(timeout=settle_timeout):
+                raise RecordingModelError(
+                    "recording_state_invalid",
+                    f"a concurrent stop did not settle within {settle_timeout:g}s",
+                    path="session.state",
+                )
+            with self._lock:
+                return self._receipt(), self.recording()
         try:
-            self._source.stop()
+            # Tear the UI down first. Draining the correlator can take tens
+            # of seconds when a correlation call is stuck, and doing that with
+            # the recorder window still on screen makes a stop that is working
+            # look like one that has hung.
             self._indicator.stop()
+            self._source.stop()
         except Exception as exc:
             with self._lock:
                 self._state = CaptureSessionState.FAILED
+                self._settled.set()
                 self._reason = str(exc)
             raise
         with self._lock:
             self._state = CaptureSessionState.STOPPED
+            self._settled.set()
             return self._receipt(), self.recording()
 
     def status(self) -> SessionReceipt:
@@ -409,6 +491,10 @@ class RecordingSession:
             return self._receipt()
 
     def recording(self) -> RawRecording:
+        correlator = getattr(self._source, "_correlator", None)
+        windows = tuple(
+            dict(entry) for entry in getattr(correlator, "window_registry", ()) or ()
+        )
         return RawRecording(
             self.session_id,
             self.name,
@@ -419,7 +505,21 @@ class RecordingSession:
                 "correlationErrorCount": len(
                     getattr(self._source, "correlation_errors", ())
                 ),
+                # Input the user aimed at the target but that the recorder's
+                # own always-on-top UI swallowed instead.
+                "recorderUiEvents": int(getattr(
+                    getattr(self._source, "_correlator", None),
+                    "recorder_ui_events", 0,
+                ) or 0),
+                # Clicks that landed on nothing the application can name.
+                # Not steps — replaying one would click a coordinate and hit
+                # whatever happened to be there — but never silently dropped.
+                "unidentifiedTargetEvents": int(getattr(
+                    getattr(self._source, "_correlator", None),
+                    "unidentified_target_events", 0,
+                ) or 0),
             },
+            windows=windows,
         )
 
 

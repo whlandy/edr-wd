@@ -8,7 +8,6 @@ that state, so it must resolve the HWND and the window rectangle through Win32
 rather than through the wrapper that has just stopped answering.
 """
 
-import pathlib
 import sys as _sys
 import types as _types
 
@@ -100,7 +99,7 @@ def test_capture_geometry_without_any_handle_is_an_explicit_failure():
         gui._capture_geometry()
 
 
-def test_screenshot_falls_back_to_the_background_path_and_reports_both_errors(monkeypatch, tmp_path):
+def test_screenshot_falls_back_to_the_background_path_and_reports_both_errors(monkeypatch):
     gui = _gui(hwnd=1639286, main_window=_DeadWrapper())
     monkeypatch.setattr(
         WindowsGUI, "window_rect_win32",
@@ -110,17 +109,15 @@ def test_screenshot_falls_back_to_the_background_path_and_reports_both_errors(mo
     class _Image:
         width, height = 922, 602
 
-        def save(self, target, format=None):
-            if hasattr(target, "write"):
-                target.write(b"\x89PNG\r\n\x1a\n")
-            else:
-                pathlib.Path(target).write_bytes(b"\x89PNG\r\n\x1a\n")
+        def save(self, buffer, format=None):
+            buffer.write(b"\x89PNG\r\n\x1a\n")
 
     monkeypatch.setattr(WindowsGUI, "_capture_window_with_gdi", lambda self, win=None: _Image())
 
-    result = gui.screenshot(str(tmp_path / "shot.png"))
+    result = gui.screenshot()
 
     assert result["ok"] is True
+    assert result["capture_scope"] == "window"
     assert result["origin"] == [105, 107]
 
 
@@ -140,7 +137,7 @@ def test_screenshot_names_every_failed_path_when_all_of_them_fail(monkeypatch):
     assert "gdi=PrintWindow and BitBlt both failed" in result["error"]
 
 
-def test_capture_is_possible_from_a_cached_handle_with_no_wrapper_at_all(monkeypatch, tmp_path):
+def test_capture_is_possible_from_a_cached_handle_with_no_wrapper_at_all(monkeypatch):
     """The wrapper may be gone entirely; a cached HWND is enough to capture."""
     gui = _gui(hwnd=1639286, main_window=None)
     monkeypatch.setattr(
@@ -151,15 +148,12 @@ def test_capture_is_possible_from_a_cached_handle_with_no_wrapper_at_all(monkeyp
     class _Image:
         width, height = 100, 50
 
-        def save(self, target, format=None):
-            if hasattr(target, "write"):
-                target.write(b"\x89PNG\r\n\x1a\n")
-            else:
-                pathlib.Path(target).write_bytes(b"\x89PNG\r\n\x1a\n")
+        def save(self, buffer, format=None):
+            buffer.write(b"\x89PNG\r\n\x1a\n")
 
     monkeypatch.setattr(WindowsGUI, "_capture_window_with_gdi", lambda self, win=None: _Image())
 
-    result = gui.screenshot(str(tmp_path / "shot.png"))
+    result = gui.screenshot()
 
     assert result["ok"] is True
     assert result["origin"] == [0, 0]

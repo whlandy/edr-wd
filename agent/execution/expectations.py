@@ -22,9 +22,8 @@ ships 9 evaluators:
     control_text_contains
     window_text_contains
 
-`visual_evidence_captured` is intentionally absent. P1.2 reports
-`expectation_not_available` (FR-P1.2-07) — the executor maps that to a
-blocked step; it is never silently passed or skipped.
+`visual_evidence_captured` validates role-matching evidence and its
+on-disk digest (FR-P1.4-08).
 
 Evaluator contract:
 
@@ -42,8 +41,10 @@ Evaluator contract:
 
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
+from pathlib import Path
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from target.action_dispatcher import ActionReceipt
 
@@ -341,17 +342,20 @@ class _ReplayClock:
     should.
     """
 
-    _now: Callable[[], "datetime"] | None = None
+    _now: ContextVar[Callable[[], "datetime"] | None] = ContextVar(
+        "replay_clock", default=None,
+    )
 
     @classmethod
     def set(cls, now: Callable[[], "datetime"] | None) -> None:
-        cls._now = now
+        cls._now.set(now)
 
     @classmethod
     def now(cls) -> "datetime":
         from datetime import datetime
 
-        return cls._now() if cls._now is not None else datetime.now()
+        now = cls._now.get()
+        return now() if now is not None else datetime.now()
 
 
 def render_time_pattern(pattern: str, now: "datetime | None" = None) -> str:
@@ -491,8 +495,8 @@ def evaluate_window_text_contains_time(
 # verifies the on-disk file's SHA-256 matches the record, and
 # returns PASSED/FAILED accordingly. The evaluator signature is
 # the same as the others; the executor passes the evidence_index
-# via a thread-local "current evidence view" that the test
-# suite or the capture-policy code populates around each step.
+# via a task-local "current evidence view" that the executor
+# populates around each step.
 
 
 class _EvidenceView:
@@ -502,15 +506,27 @@ class _EvidenceView:
     before evaluating expectations for a step. The evaluator
     reads the active index via `current_evidence_index()`.
     """
-    _state: dict[str, "EvidenceRecord"] = {}
+    _state: ContextVar[tuple[Mapping[str, "EvidenceRecord"], Path | None]] = (
+        ContextVar("execution_evidence_view", default=({}, None))
+    )
 
     @classmethod
-    def set_evidence_index(cls, idx):
-        cls._state = idx
+    def set_evidence_index(
+        cls, idx: Mapping[str, "EvidenceRecord"], trace_dir: Path | None = None,
+    ) -> Token:
+        return cls._state.set((idx, trace_dir))
+
+    @classmethod
+    def reset(cls, token: Token) -> None:
+        cls._state.reset(token)
 
     @classmethod
     def current_evidence_index(cls):
-        return cls._state
+        return cls._state.get()[0]
+
+    @classmethod
+    def current_trace_dir(cls) -> Path | None:
+        return cls._state.get()[1]
 
 
 def evaluate_visual_evidence_captured(
@@ -524,8 +540,10 @@ def evaluate_visual_evidence_captured(
     `_EvidenceView`. If the index is empty (no evidence has been
     recorded for this step), returns FAILED with diagnostic.
     """
-    from action_dispatcher import ActionReceipt  # noqa: F401
+    from trace.evidence import verify_evidence_on_disk
+
     idx = _EvidenceView.current_evidence_index()
+    trace_dir = _EvidenceView.current_trace_dir()
     step_id = getattr(step, "step_id", "") if step is not None else ""
     matching = [ev for ev in idx.values() if ev.step_id == step_id] if idx else []
     if not matching:
@@ -537,13 +555,31 @@ def evaluate_visual_evidence_captured(
             duration_ms=0,
             diagnostic=f"no evidence record for step {step_id!r}",
         )
-    # The expected evidence is any record for this step with role
-    # in {"after", "baseline", "failure", "before"}.
-    for ev in matching:
-        # Match by role="after" by default (most common). If the
-        # expectation's value specifies a role, honor that.
-        expected_role = expectation.value if isinstance(expectation.value, str) else "after"
-        if ev.role == expected_role:
+    expected_role = (
+        expectation.value if isinstance(expectation.value, str) else "after"
+    )
+    role_matches = [ev for ev in matching if ev.role == expected_role]
+    if not role_matches:
+        first = matching[0]
+        return _failed(
+            "visual_evidence_captured",
+            expected=expected_role,
+            actual=first.role,
+            observation_id=first.evidence_id,
+            duration_ms=0,
+            diagnostic=f"expected role {expected_role!r}, got {first.role!r}",
+        )
+    if trace_dir is None:
+        return _failed(
+            "visual_evidence_captured",
+            expected=expected_role,
+            actual=expected_role,
+            observation_id=role_matches[0].evidence_id,
+            duration_ms=0,
+            diagnostic="evidence trace directory is unavailable",
+        )
+    for ev in role_matches:
+        if verify_evidence_on_disk(ev, trace_dir):
             return _passed(
                 "visual_evidence_captured",
                 expected=expected_role,
@@ -552,18 +588,14 @@ def evaluate_visual_evidence_captured(
                 duration_ms=0,
                 diagnostic="",
             )
-    # Step has evidence but not the requested role; still report
-    # as passed if any evidence exists (better UX than failing on
-    # a role mismatch). The record itself proves the step was
-    # observed.
-    first = matching[0]
-    return _passed(
+    first = role_matches[0]
+    return _failed(
         "visual_evidence_captured",
-        expected="present",
+        expected=expected_role,
         actual=first.role,
         observation_id=first.evidence_id,
         duration_ms=0,
-        diagnostic=f"expected role {expected_role!r}, got {first.role!r}",
+        diagnostic="evidence file is missing or has an invalid digest",
     )
 
 
@@ -595,11 +627,7 @@ EXPECTATION_REGISTRY: dict[str, Callable[..., ExpectationResult]] = {
 
 
 class ExpectationNotAvailable(Exception):
-    """FR-P1.2-07: a declared expectation is not yet wired up.
-
-    P1.2 uses this only for `visual_evidence_captured`; the executor
-    catches it and converts to a blocked step with
-    `error.code == "expectation_not_available"`."""
+    """A declared expectation is not wired into this runtime."""
 
     def __init__(self, expectation_type: str) -> None:
         super().__init__(

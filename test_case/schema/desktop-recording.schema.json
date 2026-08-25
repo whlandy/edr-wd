@@ -41,6 +41,16 @@
         "outOfScopeEvents": {
           "type": "integer",
           "minimum": 0
+        },
+        "recorderUiEvents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Input events that landed on the recorder's own always-on-top UI instead of the target window. These never reached the target application and are deliberately not recorded as steps."
+        },
+        "unidentifiedTargetEvents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Clicks that landed on no control the application can name. They are not recorded as steps — replaying one would click a coordinate and hit whatever happened to be there — but they are counted so a recording never looks shorter than it was without saying why."
         }
       }
     },
@@ -48,6 +58,54 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/event"
+      }
+    },
+    "windows": {
+      "type": "array",
+      "description": "The application's windows as this capture saw them, in first-appearance order. `openedBy` carries the causal id of the action that opened the window, so the list reconstructs a tree of how the flow moved between pages.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "title",
+          "processName",
+          "origin"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "processName": {
+            "type": "string"
+          },
+          "handle": {
+            "type": "integer"
+          },
+          "pid": {
+            "type": "integer"
+          },
+          "origin": {
+            "enum": [
+              "already_open",
+              "opened"
+            ]
+          },
+          "closed": {
+            "type": "boolean"
+          },
+          "openedBy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reopenedBy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       }
     }
   },
@@ -246,6 +304,22 @@
             "message": {
               "type": "string",
               "minLength": 1
+            }
+          }
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "processName": {
+              "type": "string"
+            },
+            "handle": {
+              "type": "integer",
+              "description": "Native window handle (HWND / CGWindowNumber). Identifies the window only within the live capture session that produced it — a fresh run of the application at replay time gets a different handle, so this is diagnostic evidence, never a replay selector field."
             }
           }
         }

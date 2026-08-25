@@ -101,12 +101,25 @@ def _validate_evidence(value: Mapping[str, Any]) -> None:
         # Which window the event happened in. A recorded flow moves between an
         # application's windows, and replay has to know which one each step
         # belongs to rather than assuming the entry window.
-        fields = _strict(window, {"title", "processName"}, "event.evidence.window")
+        #
+        # `handle` (HWND / CGWindowNumber) only identifies the window within
+        # this one live capture session — a fresh run of the application at
+        # replay time gets a different handle — so it is diagnostic evidence
+        # of which physical window produced the step, never a replay
+        # selector field.
+        fields = _strict(window, {"title", "processName", "handle"}, "event.evidence.window")
         for key in ("title", "processName"):
             if key in fields and not isinstance(fields[key], str):
                 raise RecordingModelError(
                     "type_error", f"evidence.window.{key} must be a string",
                     path=f"event.evidence.window.{key}",
+                )
+        if "handle" in fields:
+            handle = fields["handle"]
+            if not isinstance(handle, int) or isinstance(handle, bool):
+                raise RecordingModelError(
+                    "type_error", "evidence.window.handle must be an integer",
+                    path="event.evidence.window.handle",
                 )
     pid = data.get("foregroundPid")
     if pid is not None and (not isinstance(pid, int) or isinstance(pid, bool) or pid < 1):
@@ -407,7 +420,16 @@ class RawRecording:
         "droppedPackets": 0,
         "correlationErrorCount": 0,
         "outOfScopeEvents": 0,
+        "recorderUiEvents": 0,
+        "unidentifiedTargetEvents": 0,
     })
+    # The application's windows as this capture saw them, in first-appearance
+    # order, each carrying the action that opened it. `openedBy` is the causal
+    # id of that action, so the flat list reconstructs a tree of how the flow
+    # moved between pages. This matters most where control identity is
+    # unavailable: an application that does not expose its accessibility tree
+    # yields anonymous controls, but the page structure is still recorded.
+    windows: tuple[Mapping[str, Any], ...] = ()
     schema: str = RAW_RECORDING_SCHEMA
 
     def __post_init__(self) -> None:
@@ -420,11 +442,15 @@ class RawRecording:
         _text(self.name, "recording.name")
         diagnostics = _strict(
             self.capture_diagnostics,
-            {"droppedPackets", "correlationErrorCount", "outOfScopeEvents"},
+            {
+                "droppedPackets", "correlationErrorCount", "outOfScopeEvents",
+                "recorderUiEvents", "unidentifiedTargetEvents",
+            },
             "recording.captureDiagnostics",
         )
-        # outOfScopeEvents post-dates the first recordings; a document written
-        # without it is still valid and reads as zero.
+        # outOfScopeEvents and recorderUiEvents post-date the first
+        # recordings; a document written without them is still valid and
+        # reads as zero.
         missing_diagnostics = {
             "droppedPackets", "correlationErrorCount",
         } - set(diagnostics)
@@ -440,6 +466,22 @@ class RawRecording:
                     "type_error", f"captureDiagnostics.{key} must be non-negative",
                     path=f"recording.captureDiagnostics.{key}",
                 )
+        for index, window in enumerate(self.windows):
+            path = f"recording.windows[{index}]"
+            fields = _strict(
+                window,
+                {
+                    "title", "processName", "handle", "pid", "origin",
+                    "closed", "openedBy", "reopenedBy",
+                },
+                path,
+            )
+            for key in ("title", "processName", "origin"):
+                if key in fields and not isinstance(fields[key], str):
+                    raise RecordingModelError(
+                        "type_error", f"{path}.{key} must be a string",
+                        path=f"{path}.{key}",
+                    )
         if not isinstance(self.events, (list, tuple)) or not all(
             isinstance(event, RawCaptureEvent) for event in self.events
         ):
@@ -460,7 +502,7 @@ class RawRecording:
     def from_dict(cls, data: Mapping[str, Any]) -> "RawRecording":
         d = _strict(
             data,
-            {"schema", "sessionId", "name", "events", "captureDiagnostics"},
+            {"schema", "sessionId", "name", "events", "captureDiagnostics", "windows"},
             "recording",
         )
         if d.get("schema") != RAW_RECORDING_SCHEMA:
@@ -480,12 +522,21 @@ class RawRecording:
             raise RecordingModelError("sequence_invalid", "events must have contiguous sequence numbers starting at 1", path="recording.events")
         if any(b.monotonic_ms < a.monotonic_ms for a, b in zip(events, events[1:])):
             raise RecordingModelError("monotonic_invalid", "monotonicMs must not decrease", path="recording.events")
+        raw_windows = d.get("windows") or ()
+        if not isinstance(raw_windows, (list, tuple)):
+            raise RecordingModelError(
+                "type_error", "windows must be an array", path="recording.windows",
+            )
+        # `schema` is keyword-passed: it is no longer the field right after
+        # captureDiagnostics, and passing it positionally silently landed it
+        # in `windows`.
         return cls(
             _text(d.get("sessionId"), "recording.sessionId"),
             _text(d.get("name"), "recording.name"),
             events,
             dict(diagnostics),
-            d["schema"],
+            windows=tuple(dict(w) for w in raw_windows),
+            schema=d["schema"],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -494,5 +545,6 @@ class RawRecording:
             "sessionId": self.session_id,
             "name": self.name,
             "captureDiagnostics": dict(self.capture_diagnostics),
+            "windows": [dict(w) for w in self.windows],
             "events": [x.to_dict() for x in self.events],
         }

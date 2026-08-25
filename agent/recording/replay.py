@@ -179,6 +179,14 @@ class ReplayEvidenceRecorder:
         self._role = role
         self.persisted: list[EvidenceRecord] = []
 
+    @property
+    def root(self) -> Path:
+        return self._trace_store.root
+
+    @property
+    def evidence_index(self) -> dict[str, EvidenceRecord]:
+        return {record.evidence_id: record for record in self.persisted}
+
     def record(self, step: AtomicTestStep, observation: Any) -> EvidenceRecord | None:
         png_bytes = _get(observation, "screenshot_bytes")
         if not png_bytes:
@@ -429,6 +437,18 @@ class GoldenStepMaterializer:
         self._focused_window = wanted
         return refreshed if refreshed is not None else observation
 
+    @property
+    def evidence_index(self) -> Mapping[str, EvidenceRecord]:
+        if self._evidence_recorder is None:
+            return {}
+        return self._evidence_recorder.evidence_index
+
+    @property
+    def evidence_root(self) -> Path | None:
+        if self._evidence_recorder is None:
+            return None
+        return self._evidence_recorder.root
+
     def __call__(self, step: AtomicTestStep, observation: Any) -> AtomicTestStep:
         if self._trace_store is not None:
             self._trace_store.append_dict(
@@ -647,19 +667,22 @@ def replay_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRun
             path="replay.trace_store",
         )
     main_case = golden_to_test_case(golden)
-    materializer = GoldenStepMaterializer(
-        golden,
-        replay_mode=target.replay_mode,
-        visual_resolver=target.visual_resolver,
-        trace_store=target.trace_store,
-        trace_case_id=main_case.case_id,
-        evidence_recorder=(
-            ReplayEvidenceRecorder(target.trace_store)
-            if target.persist_replay_screenshots and target.trace_store is not None
-            else None
-        ),
-        window_focus=target.window_focus,
-    )
+    def make_materializer(case_id: str) -> GoldenStepMaterializer:
+        return GoldenStepMaterializer(
+            golden,
+            replay_mode=target.replay_mode,
+            visual_resolver=target.visual_resolver,
+            trace_store=target.trace_store,
+            trace_case_id=case_id,
+            evidence_recorder=(
+                ReplayEvidenceRecorder(target.trace_store)
+                if target.persist_replay_screenshots and target.trace_store is not None
+                else None
+            ),
+            window_focus=target.window_focus,
+        )
+
+    materializer = make_materializer(main_case.case_id)
     case_result = target.executor.run_case(
         main_case,
         step_materializer=materializer,
@@ -701,10 +724,10 @@ def replay_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRun
                 payload={"case_id": cleanup_case.case_id},
                 case_id=cleanup_case.case_id,
             )
-        materializer.trace_case_id = cleanup_case.case_id
+        cleanup_materializer = make_materializer(cleanup_case.case_id)
         cleanup_result = target.executor.run_case(
             cleanup_case,
-            step_materializer=materializer,
+            step_materializer=cleanup_materializer,
             execution_context=target.execution_context,
         )
         append_step_results(cleanup_result)

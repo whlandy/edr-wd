@@ -223,11 +223,138 @@ class MacOSAccessibilityBackend:
                 pid = int(parts[1])
             except ValueError:
                 pass
-        return {
+        state = {
             "ok": True,
             "process_name": parts[0] if parts else "",
             "pid": pid,
             "title": parts[2] if len(parts) > 2 else "",
+        }
+        lock = getattr(self, "_window_lock", None)
+        if isinstance(lock, dict) and not self._state_matches_lock(state, lock):
+            # System Events' "frontmost process" tracks which app owns the
+            # menu bar/Dock focus. A tray-style agent (LSUIElement /
+            # background-only) never owns that, no matter how visible its
+            # window is or how it was raised — so a lock on one of these
+            # windows can never be verified this way. Fall back to asking
+            # whether the locked window is unoccluded in the actual
+            # on-screen stacking order instead of demanding an app-level
+            # transition that this class of process cannot make.
+            fallback = self._locked_window_visible_state(lock)
+            if fallback is not None:
+                return fallback
+        return state
+
+    def _is_background_only(self, process_name: str) -> bool:
+        """True if System Events reports this process as background-only.
+
+        A background-only (tray/agent-style) process has no Dock icon and
+        never becomes "frontmost" in System Events' sense, regardless of
+        window visibility.
+        """
+        script = (
+            'tell application "System Events" to get background only '
+            f'of process "{process_name}"'
+        )
+        rc, out = _run_osascript(script, timeout=3)
+        return rc == 0 and out.strip().lower() == "true"
+
+    def _cg_window_zorder(self) -> list[dict]:
+        """On-screen windows via CGWindowList, front-to-back as CG reports them."""
+        try:
+            import Quartz
+        except Exception:
+            return []
+        try:
+            listing = Quartz.CGWindowListCopyWindowInfo(
+                Quartz.kCGWindowListOptionOnScreenOnly
+                | Quartz.kCGWindowListExcludeDesktopElements,
+                Quartz.kCGNullWindowID,
+            )
+        except Exception:
+            return []
+        windows = []
+        for item in listing or []:
+            bounds = item.get("kCGWindowBounds") or {}
+            windows.append({
+                "pid": item.get("kCGWindowOwnerPID"),
+                "title": str(item.get("kCGWindowName") or ""),
+                "number": item.get("kCGWindowNumber"),
+                "rect": (
+                    float(bounds.get("X", 0)), float(bounds.get("Y", 0)),
+                    float(bounds.get("Width", 0)), float(bounds.get("Height", 0)),
+                ),
+            })
+        return windows
+
+    def _desktop_chrome_pids(self) -> set[int]:
+        """PIDs of desktop-chrome processes with a non-occluding full-screen
+        CGWindowList entry (see `_locked_window_visible_state`)."""
+        try:
+            from AppKit import NSRunningApplication
+        except Exception:
+            return set()
+        pids: set[int] = set()
+        for bundle_id in ("com.apple.dock", "com.apple.loginwindow"):
+            try:
+                apps = NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)
+            except Exception:
+                continue
+            for app in apps or []:
+                try:
+                    pids.add(int(app.processIdentifier()))
+                except Exception:
+                    continue
+        return pids
+
+    def _locked_window_visible_state(self, lock: dict) -> Optional[dict]:
+        """Verify a background-only process's lock by on-screen z-order.
+
+        Returns a state dict matching `_frontmost_window_state()`'s shape
+        when the locked window is on screen and nothing from a *different*
+        process is drawn in front of it; None when the process is not
+        background-only (the caller should not use this fallback) or the
+        window cannot be confirmed unoccluded.
+        """
+        process_name = lock.get("process_name")
+        if not process_name or not self._is_background_only(str(process_name)):
+            return None
+        zorder = self._cg_window_zorder()
+        lock_pid = lock.get("pid")
+        snapshot = lock.get("snapshot") if isinstance(lock.get("snapshot"), dict) else {}
+        title = str(snapshot.get("title") or "")
+        target = None
+        target_index = None
+        for index, window in enumerate(zorder):
+            if lock_pid is not None and window["pid"] != lock_pid:
+                continue
+            if title and window["title"] and window["title"] != title:
+                continue
+            target = window
+            target_index = index
+            break
+        if target is None:
+            # Not currently on screen at all; never fabricate a match.
+            return None
+        chrome_pids = self._desktop_chrome_pids()
+        tx, ty, tw, th = target["rect"]
+        for window in zorder[:target_index]:
+            if window["pid"] == target["pid"]:
+                continue  # another window of the same app stacked in front
+            if window["pid"] in chrome_pids:
+                # Dock registers a desktop-spanning CGWindowList entry for
+                # its own Spaces/Exposé hit-testing that is not actually
+                # painted over app content — discovered live: it made a
+                # fully visible HiSec window read as occluded end to end.
+                continue
+            ox, oy, ow, oh = window["rect"]
+            if ox < tx + tw and ox + ow > tx and oy < ty + th and oy + oh > ty:
+                return None  # covered by a different, genuinely frontmost window
+        return {
+            "ok": True,
+            "process_name": str(process_name),
+            "pid": target["pid"],
+            "title": target["title"],
+            "matched_by": "cg_zorder_unoccluded",
         }
 
     def _connected_window_state(self) -> dict:
@@ -588,22 +715,37 @@ class MacOSAccessibilityBackend:
                 "enabled": True,
             })
 
+        # Keyed on (pid, window_title) only: System Events and CGWindowList
+        # can disagree on app_name for the same process — CGWindowList's
+        # kCGWindowOwnerName is localized ("文本编辑") while System Events
+        # reports the English process name ("TextEdit") — and including
+        # app_name in the key silently defeated the CG enrichment below for
+        # every such app.
         by_identity = {
-            (window.get("pid"), window.get("window_title"), window.get("app_name")): window
+            (window.get("pid"), window.get("window_title")): window
             for window in windows
         }
         for w in self._list_windows_cg():
-            key = (w.get("pid"), w.get("window_title"), w.get("app_name"))
+            key = (w.get("pid"), w.get("window_title"))
             existing = by_identity.get(key)
             if existing is None:
                 windows.append(w)
                 by_identity[key] = w
-            elif existing.get("rectangle") is None and w.get("rectangle") is not None:
-                # System Events gives reliable titles but no bounds.  Preserve
-                # its identity and enrich it with the matching CG rectangle so
-                # recorder_ui and protected-window masks can be enforced.
-                existing["rectangle"] = dict(w["rectangle"])
-                existing["source"] = "system_events+cgwindowlist"
+            else:
+                # System Events gives reliable titles but neither bounds nor a
+                # window number.  Preserve its identity and enrich it from the
+                # matching CG entry so recorder_ui and protected-window masks
+                # can be enforced, and so callers get a window identity that
+                # survives the title changes a title-keyed scope cannot follow.
+                enriched = False
+                if existing.get("rectangle") is None and w.get("rectangle") is not None:
+                    existing["rectangle"] = dict(w["rectangle"])
+                    enriched = True
+                if existing.get("handle") is None and w.get("handle") is not None:
+                    existing["handle"] = w["handle"]
+                    enriched = True
+                if enriched:
+                    existing["source"] = "system_events+cgwindowlist"
 
         return {"ok": True, "windows": windows, "count": len(windows)}
 
@@ -631,11 +773,13 @@ let windows = info.compactMap { item -> [String: Any]? in
     let title = item[kCGWindowName as String] as? String ?? ""
     let pid = item[kCGWindowOwnerPID as String] as? Int ?? 0
     let bounds = item[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let number = item[kCGWindowNumber as String] as? Int ?? 0
     return [
         "owner": owner,
         "title": title,
         "pid": pid,
         "bounds": bounds,
+        "number": number,
     ]
 }
 
@@ -677,6 +821,7 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                         "w": int(bounds.get("Width", 0)),
                         "h": int(bounds.get("Height", 0)),
                     }
+                number = item.get("number")
                 windows.append({
                     "app_name": owner,
                     "bundle_id": None,
@@ -685,6 +830,10 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                     "title": title,
                     "class_name": owner,
                     "process_id": int(pid) if pid is not None else None,
+                    # CGWindowNumber, under the same key the Windows backend
+                    # uses for its HWND: a window's identity survives the
+                    # title changes that a title-keyed scope cannot follow.
+                    "handle": int(number) if number else None,
                     "rectangle": rectangle,
                     "visible": True,
                     "enabled": True,
@@ -779,7 +928,7 @@ print(String(data: data, encoding: .utf8) ?? "[]")
 
         matches = []
         for w in listed["windows"]:
-            if proc_lc and proc_lc not in w["app_name"].lower():
+            if proc_lc and not self._window_owned_by_process(w, proc_lc):
                 continue
             if pat and not pat.search(w.get("window_title") or ""):
                 continue
@@ -2009,7 +2158,12 @@ set depthLimit to {max_depth}
 
 tell application "System Events"
     tell process "{process_name}"
-        set frontmost to true
+        -- Deliberately does NOT set `frontmost`. Enumerating the
+        -- accessibility tree is a read; raising the window is a side effect
+        -- on the user's desktop. Recording captures evidence after every
+        -- step, and each capture enumerates protected controls, so this
+        -- line yanked the target window to the front on every recorded
+        -- action while the user was working in another window.
         set windowIndex to 1
         repeat with win in windows
             set winName to ""
@@ -2211,6 +2365,136 @@ return outText
             }, None
         scored.sort(key=lambda item: item[0], reverse=True)
         return None, scored[0][1]
+
+    def recorder_ui_rectangles(self) -> Optional[list]:
+        """Screen rects of the recorder's own always-on-top windows.
+
+        Evidence capture masks these out of every stored frame. Answering it
+        from `list_windows()` costs 5.3 s per call — measured — because that
+        enumerates every window on the system through AppleScript, and this
+        runs after every recorded step. The window server answers the same
+        question in milliseconds.
+
+        Returns None when CoreGraphics is unavailable so the caller falls
+        back rather than silently skipping the mask.
+        """
+        try:
+            import Quartz
+        except Exception:
+            return None
+        try:
+            listing = Quartz.CGWindowListCopyWindowInfo(
+                Quartz.kCGWindowListOptionOnScreenOnly
+                | Quartz.kCGWindowListExcludeDesktopElements,
+                Quartz.kCGNullWindowID,
+            ) or []
+        except Exception:
+            return None
+        found = []
+        for item in listing:
+            if "[recorder_ui=true]" not in str(item.get("kCGWindowName") or ""):
+                continue
+            bounds = item.get("kCGWindowBounds") or {}
+            try:
+                found.append({"rectangle": {
+                    "x": int(bounds["X"]), "y": int(bounds["Y"]),
+                    "w": int(bounds["Width"]), "h": int(bounds["Height"]),
+                }})
+            except Exception:
+                continue
+        return found
+
+    def protected_rectangles(self) -> Optional[list]:
+        """Screen rects of secure input fields, found through native AX.
+
+        Evidence capture runs after every recorded step and needs these to
+        redact passwords before a frame is stored. Enumerating the whole tree
+        through AppleScript to find them costs 18-24 s per call on a live
+        target — measured — so each recorded step took about ten seconds to
+        appear and the recorder looked broken. The same question answered
+        through the AX APIs directly takes milliseconds.
+
+        Returns None when native AX is unavailable, so the caller can fall
+        back rather than silently skipping redaction.
+        """
+        pid = getattr(self, "_connected_pid", None)
+        if pid is None:
+            return None
+        try:
+            from ApplicationServices import (  # type: ignore[import-not-found]
+                AXUIElementCreateApplication,
+                AXUIElementCopyAttributeValue,
+                AXValueGetValue,
+                kAXValueCGPointType,
+                kAXValueCGSizeType,
+            )
+        except Exception:
+            return None
+
+        def attribute(element, name):
+            try:
+                error, value = AXUIElementCopyAttributeValue(element, name, None)
+            except Exception:
+                return None
+            return value if error == 0 else None
+
+        def rect_of(element):
+            position = attribute(element, "AXPosition")
+            size = attribute(element, "AXSize")
+            if position is None or size is None:
+                return None
+            try:
+                ok_point, point = AXValueGetValue(position, kAXValueCGPointType, None)
+                ok_size, extent = AXValueGetValue(size, kAXValueCGSizeType, None)
+            except Exception:
+                return None
+            if not (ok_point and ok_size):
+                return None
+            return {
+                "x": int(point.x), "y": int(point.y),
+                "w": int(extent.width), "h": int(extent.height),
+            }
+
+        try:
+            root = AXUIElementCreateApplication(int(pid))
+        except Exception:
+            return None
+        # A walk that cannot read the application at all must not look like a
+        # window with nothing to redact: the caller would store an unredacted
+        # frame believing it was checked. Returning None makes it fall back.
+        if attribute(root, "AXRole") is None:
+            return None
+        found: list = []
+        # Bounded so a pathological tree can never stall capture the way the
+        # AppleScript walk did.
+        budget = 4000
+        stack = [(root, 0)]
+        while stack:
+            if budget <= 0:
+                # Ran out before finishing: the answer is incomplete, and an
+                # incomplete redaction list is not a safe one.
+                return None
+            element, depth = stack.pop()
+            budget -= 1
+            if depth > 25:
+                # Same reasoning as the budget: a subtree left unexamined
+                # could hold the secure field this exists to find.
+                return None
+            role = str(attribute(element, "AXRole") or "")
+            subrole = str(attribute(element, "AXSubrole") or "")
+            marker = f"{role} {subrole}".lower()
+            if "securetextfield" in marker or "password" in marker:
+                rectangle = rect_of(element)
+                if rectangle is None:
+                    # Found a secure field but cannot say where it is; the
+                    # caller must not proceed as though it were absent.
+                    return None
+                found.append({"rectangle": rectangle, "protected": True})
+                continue  # never descend into a secure field
+            children = attribute(element, "AXChildren") or ()
+            for child in children:
+                stack.append((child, depth + 1))
+        return found
 
     def dump_tree(self, window_title_re: Optional[str] = None, max_depth: int = 10) -> dict:
         err, controls = self._load_ax_controls(window_title_re=window_title_re, max_depth=max_depth)
@@ -2444,6 +2728,28 @@ return outText
             return int(out) if out else None
         except ValueError:
             return None
+
+    @staticmethod
+    def _window_owned_by_process(window: dict, process_lc: str) -> bool:
+        """Does this window belong to the named process?
+
+        `app_name` is the *application's* name, which is not always the
+        executable that owns the window: HiSec's client windows report
+        "HiSecEndpoint" while the process is "EDRClient". Matching on it alone
+        made a lookup for EDRClient find nothing, so connect fell through to
+        the activation path and attached to a root daemon with no UI — every
+        accessibility query then failed against the wrong process.
+        """
+        pid = window.get("process_id") or window.get("pid")
+        if pid is not None:
+            try:
+                import psutil
+
+                if psutil.Process(int(pid)).name().lower() == process_lc:
+                    return True
+            except Exception:
+                pass
+        return process_lc in str(window.get("app_name") or "").lower()
 
     def _pid_for_app(self, app_name: str) -> Optional[int]:
         """Best-effort pid lookup by application name via osascript."""

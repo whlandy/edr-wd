@@ -12,6 +12,10 @@ from typing import Any, Callable, Mapping, Protocol
 
 from .models import CaptureScope, RecordingModelError
 
+# Marker carried in the recorder window's title so every layer — screenshot
+# redaction, foreground resolution — can recognise the recorder's own UI.
+RECORDER_UI_MARKER = "[recorder_ui=true]"
+
 
 @dataclass(frozen=True)
 class IndicatorCallbacks:
@@ -42,7 +46,7 @@ class NullRecordingIndicator:
 class TkRecordingIndicator:
     """Small always-on-top recorder UI running on its own Tk event loop."""
 
-    WINDOW_TITLE = "EDR-WD Recorder [recorder_ui=true]"
+    WINDOW_TITLE = f"EDR-WD Recorder {RECORDER_UI_MARKER}"
 
     def __init__(
         self,
@@ -78,7 +82,16 @@ class TkRecordingIndicator:
             root.title(self.WINDOW_TITLE)
             root.attributes("-topmost", True)
             root.resizable(False, False)
-            root.protocol("WM_DELETE_WINDOW", lambda: None)
+            self._place_clear_of_default_windows(root)
+            # The close button used to be a no-op so the recorder UI could not
+            # be dismissed while a capture was running. That left it with no
+            # way to be dismissed at all: when a stop is slow, or the parent
+            # has gone, the window just sits there ignoring the user. Route it
+            # to the same action as the Stop button instead — ending the
+            # recording is what closing the recorder should mean.
+            root.protocol(
+                "WM_DELETE_WINDOW", lambda: self._async(self.callbacks.stop),
+            )
             frame = ttk.Frame(root, padding=8)
             frame.grid()
             ttk.Label(frame, text=f"● REC  {self.name}", foreground="#c62828").grid(
@@ -125,6 +138,33 @@ class TkRecordingIndicator:
         except Exception as exc:
             self._startup_error = exc
             self._ready.set()
+
+    @staticmethod
+    def _place_clear_of_default_windows(root) -> None:  # pragma: no cover - live UI
+        """Park the always-on-top indicator where target windows are not.
+
+        Tk's default placement is the top-left corner, which is exactly where
+        an application window's navigation usually sits.  Because this window
+        is `-topmost`, it then swallows clicks meant for the target: a live
+        HiSec capture recorded two clicks that physically landed on this
+        indicator as if they had happened inside the target window, and one
+        of them hit a control here and ended the session.
+
+        The bottom-right corner is chosen because a window placed there would
+        have to extend past the screen edge to reach it.
+        """
+        try:
+            root.update_idletasks()
+            width = root.winfo_reqwidth()
+            height = root.winfo_reqheight()
+            margin = 24
+            x = max(0, root.winfo_screenwidth() - width - margin)
+            y = max(0, root.winfo_screenheight() - height - margin)
+            root.geometry(f"+{x}+{y}")
+        except Exception:
+            # Placement is a convenience; never let it stop the recorder UI
+            # from coming up.
+            pass
 
     def _toggle_pause(self) -> None:  # pragma: no cover - live UI
         self._paused = not self._paused
@@ -239,6 +279,9 @@ class SubprocessTkIndicator:
         self._reader: threading.Thread | None = None
         self._ready = threading.Event()
         self._startup_error: str | None = None
+        # (x, y, w, h) of the recorder UI once it is on screen; consumed by
+        # the correlator to reject input that landed here, not on the target.
+        self.window_rect: tuple[int, int, int, int] | None = None
 
     def _send(self, command: str, value: Any = None) -> None:
         process = self._process
@@ -263,6 +306,9 @@ class SubprocessTkIndicator:
                 continue
             if message.get("ready") is not None:
                 self._startup_error = message.get("error")
+                rect = message.get("rect")
+                if isinstance(rect, list) and len(rect) == 4:
+                    self.window_rect = tuple(int(v) for v in rect)
                 self._ready.set()
                 continue
             callback = message.get("callback")
@@ -358,8 +404,14 @@ def _indicator_child_main() -> None:  # pragma: no cover - child process entry
     scope = CaptureScope.from_dict(config["scope"])
 
     def emit(kind: str, payload: Any = None) -> None:
-        sys.stdout.write(json.dumps({"callback": kind, "payload": payload}) + "\n")
-        sys.stdout.flush()
+        # The parent can exit first — a session that ends for any other reason
+        # tears down this pipe while the Tk loop is still alive.  A button
+        # press afterwards must not raise out of the Tk callback thread.
+        try:
+            sys.stdout.write(json.dumps({"callback": kind, "payload": payload}) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, ValueError):
+            pass
 
     indicator = TkRecordingIndicator(
         config["name"],
@@ -375,10 +427,28 @@ def _indicator_child_main() -> None:  # pragma: no cover - child process entry
     def announce() -> None:
         indicator._ready.wait()
         error = indicator._startup_error
-        sys.stdout.write(json.dumps({
-            "ready": True, "error": None if error is None else str(error),
-        }) + "\n")
-        sys.stdout.flush()
+        # The parent needs this window's rect so the correlator can refuse to
+        # record input that physically landed on the recorder UI instead of
+        # the target window.
+        rect = None
+        root = indicator._root
+        if root is not None:
+            try:
+                root.update_idletasks()
+                rect = [
+                    int(root.winfo_rootx()), int(root.winfo_rooty()),
+                    int(root.winfo_width()), int(root.winfo_height()),
+                ]
+            except Exception:
+                rect = None
+        try:
+            sys.stdout.write(json.dumps({
+                "ready": True, "error": None if error is None else str(error),
+                "rect": rect,
+            }) + "\n")
+            sys.stdout.flush()
+        except (BrokenPipeError, ValueError):
+            pass
 
     def pump() -> None:
         for line in sys.stdin:

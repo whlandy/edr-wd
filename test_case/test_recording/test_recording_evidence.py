@@ -323,3 +323,182 @@ def test_replay_capture_refuses_when_protected_controls_cannot_be_enumerated():
 
     with pytest.raises(ValueError, match="protected-control enumeration failed"):
         capture_redacted_window_frame(_Broken())
+
+
+def test_protected_scan_prefers_a_backend_that_answers_directly():
+    """Deriving this from a full tree dump costs 18-24 s per call on macOS.
+
+    It runs after every recorded step, so that cost showed up as each step
+    taking about ten seconds to appear in the recording.
+    """
+    from target.recording.evidence import protected_rectangles
+
+    class _Backend:
+        def __init__(self):
+            self.dump_tree_calls = 0
+
+        def protected_rectangles(self):
+            return [{"rectangle": {"x": 10, "y": 20, "w": 100, "h": 30}}]
+
+        def dump_tree(self, max_depth=15):
+            self.dump_tree_calls += 1
+            return {"ok": True, "controls": []}
+
+        def list_windows(self):
+            return {"ok": True, "windows": []}
+
+    backend = _Backend()
+    rects = protected_rectangles(backend)
+
+    assert rects == [(10, 20, 110, 50)]
+    assert backend.dump_tree_calls == 0
+
+
+def test_protected_scan_falls_back_when_the_backend_cannot_answer():
+    from target.recording.evidence import protected_rectangles
+
+    class _Backend:
+        def protected_rectangles(self):
+            return None  # native path unavailable on this host
+
+        def dump_tree(self, max_depth=15):
+            return {"ok": True, "controls": [
+                {"role": "AXSecureTextField", "protected": True,
+                 "rectangle": {"x": 1, "y": 2, "w": 10, "h": 20}},
+            ]}
+
+        def list_windows(self):
+            return {"ok": True, "windows": []}
+
+    assert protected_rectangles(_Backend()) == [(1, 2, 11, 22)]
+
+
+def test_a_failing_native_scan_is_not_treated_as_nothing_to_redact():
+    """Silently skipping redaction would let a password into a stored frame."""
+    from target.recording.evidence import protected_rectangles
+
+    class _Backend:
+        def protected_rectangles(self):
+            raise RuntimeError("accessibility unavailable")
+
+    with pytest.raises(ValueError):
+        protected_rectangles(_Backend())
+
+
+def test_the_native_path_still_masks_the_recorders_own_window():
+    """The fast path must not skip the recorder mask.
+
+    Returning early after the native scan would leave the recorder's own
+    always-on-top window visible in every stored evidence frame.
+    """
+    from target.recording.evidence import protected_rectangles
+
+    class _Backend:
+        def protected_rectangles(self):
+            return []
+
+        def list_windows(self):
+            return {"ok": True, "windows": [
+                {"title": "EDR-WD Recorder [recorder_ui=true]",
+                 "rectangle": {"x": 1696, "y": 856, "w": 328, "h": 136}},
+            ]}
+
+    assert protected_rectangles(_Backend()) == [(1696, 856, 2024, 992)]
+
+
+def test_recorder_window_lookup_prefers_the_direct_backend_answer():
+    """Deriving it from a full window enumeration costs 5.3 s per call.
+
+    That runs after every recorded step, which together with the tree dump
+    is why each step took about ten seconds to reach the recording.
+    """
+    from target.recording.evidence import protected_rectangles
+
+    class _Backend:
+        def __init__(self):
+            self.list_windows_calls = 0
+
+        def protected_rectangles(self):
+            return []
+
+        def recorder_ui_rectangles(self):
+            return [{"rectangle": {"x": 1696, "y": 856, "w": 328, "h": 136}}]
+
+        def list_windows(self):
+            self.list_windows_calls += 1
+            return {"ok": True, "windows": []}
+
+    backend = _Backend()
+    rects = protected_rectangles(backend)
+
+    assert rects == [(1696, 856, 2024, 992)]
+    assert backend.list_windows_calls == 0
+
+
+def test_a_refused_enumeration_is_not_retried_for_every_step():
+    """Some applications only reveal the refusal by timing out after 20 s.
+
+    Retrying per step charged every recorded step that timeout, which is what
+    made the recording advance about one step every ten seconds.
+    """
+    from target.recording.evidence import _cached_protected_controls
+
+    class _Backend:
+        def __init__(self):
+            self.calls = 0
+            self._connected_pid = 42
+
+        def dump_tree(self, max_depth=15):
+            self.calls += 1
+            return {"ok": False, "error": "timeout after 20s"}
+
+    backend = _Backend()
+    for _ in range(3):
+        with pytest.raises(ValueError):
+            _cached_protected_controls(backend)
+
+    assert backend.calls == 1
+
+
+def test_a_successful_enumeration_is_reused_for_the_same_window():
+    from target.recording.evidence import _cached_protected_controls
+
+    class _Backend:
+        def __init__(self):
+            self.calls = 0
+            self._connected_pid = 42
+
+        def dump_tree(self, max_depth=15):
+            self.calls += 1
+            return {"ok": True, "controls": [
+                {"role": "AXSecureTextField", "protected": True,
+                 "rectangle": {"x": 1, "y": 2, "w": 10, "h": 20}},
+            ]}
+
+    backend = _Backend()
+    first = _cached_protected_controls(backend)
+    second = _cached_protected_controls(backend)
+
+    assert first == second
+    assert backend.calls == 1
+
+
+def test_a_different_window_is_enumerated_again():
+    """Freshness is traded within one page, never across a change of page."""
+    from target.recording.evidence import _cached_protected_controls
+
+    class _Backend:
+        def __init__(self):
+            self.calls = 0
+            self._connected_window_snapshot = {"pid": 42, "title": "日志中心"}
+
+        def dump_tree(self, max_depth=15):
+            self.calls += 1
+            return {"ok": True, "controls": []}
+
+    backend = _Backend()
+    _cached_protected_controls(backend)
+    backend._connected_window_snapshot = {"pid": 42, "title": "升级日志"}
+    _cached_protected_controls(backend)
+
+    assert backend.calls == 2

@@ -450,6 +450,37 @@ def test_all_required_passed_case_is_passed(executor, backend, obs_provider):
     assert result.aborted is False
 
 
+def test_optional_failure_does_not_fail_or_abort_case(executor, backend):
+    backend.receipt_overrides["gui.click"] = {
+        "ok": False, "result": {"error": "optional failure"},
+    }
+    case = _case(
+        _step("S001", required=False),
+        _step("S002", action_id="gui.type_text", required=True),
+    )
+
+    result = executor.run_case(case)
+
+    assert [item.status for item in result.step_results] == [
+        StepStatus.FAILED, StepStatus.PASSED,
+    ]
+    assert result.outcome is CaseOutcome.PASSED
+    assert result.aborted is False
+
+
+def test_abort_uses_current_index_for_equal_steps(executor, backend):
+    backend.queue_success("gui.click")
+    backend.queue_failure("gui.click")
+    repeated = _step("S001")
+
+    result = executor.run_case(_case(repeated, repeated))
+
+    assert [item.status for item in result.step_results] == [
+        StepStatus.PASSED, StepStatus.FAILED,
+    ]
+    assert result.aborted is True
+
+
 def test_all_required_skipped_case_is_skipped(executor, backend, obs_provider):
     """All required steps SKIPPED -> case outcome SKIPPED.
 

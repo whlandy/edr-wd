@@ -115,12 +115,12 @@ class _Resolver:
         return dict(self.element)
 
 
-def _packet(kind="pointer_up", monotonic_ms=100, button="left"):
+def _packet(kind="pointer_up", monotonic_ms=100, button="left", screen_point=(50, 40)):
     return HookPacket(
         kind=kind,
         monotonic_ms=monotonic_ms,
         wall_time="2026-08-17T00:00:00.000Z",
-        screen_point=(50, 40),
+        screen_point=screen_point,
         button=button,
     )
 
@@ -241,6 +241,8 @@ def test_queue_overflow_is_persisted_in_raw_capture_diagnostics():
         "droppedPackets": 1,
         "correlationErrorCount": 0,
         "outOfScopeEvents": 0,
+        "recorderUiEvents": 0,
+        "unidentifiedTargetEvents": 0,
     }
 
 
@@ -576,12 +578,15 @@ def test_a_drag_onto_an_unresolvable_release_point_keeps_an_explicit_null_end_ta
     assert event.input["endTarget"] is None
 
 
-def _transition(kind, monotonic_ms, *, process="EDRClient.exe", title="策略详情", pid=42):
+def _transition(kind, monotonic_ms, *, process="EDRClient.exe", title="策略详情", pid=42, handle=None):
+    native = {"kind": kind, "processName": process, "title": title, "pid": pid}
+    if handle is not None:
+        native["handle"] = handle
     return HookPacket(
         kind="window_transition",
         monotonic_ms=monotonic_ms,
         wall_time="2026-08-17T00:00:00.000Z",
-        native={"kind": kind, "processName": process, "title": title, "pid": pid},
+        native=native,
     )
 
 
@@ -697,13 +702,17 @@ def _log_center_resolver():
         def __init__(self):
             super().__init__()
             self.window_title = "EDRClient"
+            self.window_handle = None
 
         def foreground(self):
-            return {
+            result = {
                 "processName": self.process,
                 "windowTitle": self.window_title,
                 "pid": 42,
             }
+            if self.window_handle is not None:
+                result["handle"] = self.window_handle
+            return result
 
     return _Switching()
 
@@ -891,9 +900,13 @@ class _SeedResolver(_Resolver):
         super().__init__()
         self._windows = windows
         self.window_title = "EDRClient"
+        self.window_handle = None
 
     def foreground(self):
-        return {"processName": self.process, "windowTitle": self.window_title, "pid": 42}
+        result = {"processName": self.process, "windowTitle": self.window_title, "pid": 42}
+        if self.window_handle is not None:
+            result["handle"] = self.window_handle
+        return result
 
     def windows(self):
         return self._windows
@@ -1049,3 +1062,577 @@ def test_stop_reports_no_correlation_error_when_the_worker_finishes_in_time():
 
     assert source.correlation_errors == []
     assert [event.sequence for event in captured] == [1]
+
+
+def test_a_title_change_after_admission_no_longer_evicts_a_handle_tracked_window():
+    """A live capture can gain a native handle for a window it opened.
+
+    Title-only admission is fragile: an edited document gaining "*", a tab
+    switching, or any post-admission title change drops the window right
+    back out of scope and silently discards every subsequent step inside
+    it. A window transition that carries a handle is tracked by that handle
+    instead, which does not change when the title does.
+    """
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    _record_click(correlator, resolver, "EDRClient", 100)
+    correlator.correlate(
+        _transition("opened", 300, title="日志中心", handle=777), SCOPE, 2,
+    )
+
+    # The title changes after admission (e.g. the document picked up "*"),
+    # but the handle the window opened with has not.
+    resolver.window_title = "日志中心 *"
+    resolver.window_handle = 777
+
+    assert _record_click(correlator, resolver, "日志中心 *", 500) is not None
+    assert correlator.out_of_scope_events == 0
+
+
+def test_two_windows_sharing_a_title_are_told_apart_by_handle():
+    """Title alone cannot distinguish two windows with the same name."""
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    _record_click(correlator, resolver, "EDRClient", 100)
+    correlator.correlate(
+        _transition("opened", 300, title="属性", handle=111), SCOPE, 2,
+    )
+
+    # A second, unrelated window happens to share that same title but was
+    # never admitted — it must not ride in on the first one's title alone.
+    resolver.window_title = "属性"
+    resolver.window_handle = 222
+
+    assert _record_click(correlator, resolver, "属性", 500) is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_closing_a_handle_tracked_window_evicts_it_by_handle():
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    _record_click(correlator, resolver, "EDRClient", 100)
+    correlator.correlate(
+        _transition("opened", 300, title="日志中心", handle=777), SCOPE, 2,
+    )
+    resolver.window_title = "日志中心"
+    resolver.window_handle = 777
+    assert _record_click(correlator, resolver, "日志中心", 500) is not None
+
+    correlator.correlate(
+        _transition("closed", 700, title="日志中心", handle=777), SCOPE, 4,
+    )
+
+    assert _record_click(correlator, resolver, "日志中心", 1100) is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_the_entry_window_is_admitted_by_regex_even_if_seeding_never_ran():
+    """A handle on the entry window must never gate its own admission.
+
+    If seed_scope() failed or was never called, _derived_scope_handles is
+    empty. The entry window still has to be admitted by the caller's own
+    title regex, or a resolver that starts reporting a handle would lock
+    every recording out of its own entry window.
+    """
+    resolver = _log_center_resolver()
+    resolver.window_handle = 999  # never seeded anywhere
+    correlator = WindowsUIACorrelator(resolver)
+
+    assert _record_click(correlator, resolver, "EDRClient", 100) is not None
+    assert correlator.out_of_scope_events == 0
+
+
+def test_seeding_admits_a_window_by_handle_even_if_its_title_later_changes():
+    resolver = _SeedResolver([
+        {"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1},
+        {"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777},
+    ])
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    resolver.window_title = "日志中心 (已更新)"
+    resolver.window_handle = 777
+
+    assert _record_click(correlator, resolver, "日志中心 (已更新)", 100) is not None
+    assert correlator.out_of_scope_events == 0
+
+
+def test_a_click_swallowed_by_the_recorder_ui_is_not_recorded_as_target_input():
+    """The recorder's own window is topmost and can cover the target.
+
+    A live HiSec capture recorded two clicks at coordinates that were
+    physically inside the recorder UI as though they had happened in the
+    target window. The target never saw those clicks — the recorder UI ate
+    them — so replaying the trace would click somewhere the user never did.
+    """
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.set_recorder_ui_rect((5, 35, 328, 136))
+
+    inside = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(76, 152)), SCOPE, 1,
+    )
+
+    assert inside is None
+    assert correlator.recorder_ui_events == 1
+    # It is not "out of scope" — the user was aiming at the target; the
+    # recorder itself got in the way, and that distinction has to survive.
+    assert correlator.out_of_scope_events == 0
+
+
+def test_input_outside_the_recorder_ui_is_still_recorded_normally():
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.set_recorder_ui_rect((5, 35, 328, 136))
+
+    event = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(600, 400)), SCOPE, 1,
+    )
+
+    assert event is not None
+    assert correlator.recorder_ui_events == 0
+
+
+def test_without_a_known_recorder_rect_nothing_is_filtered():
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+
+    event = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(76, 152)), SCOPE, 1,
+    )
+
+    assert event is not None
+    assert correlator.recorder_ui_events == 0
+
+
+class _AppResolver(_SeedResolver):
+    """Reports the application's windows and its sibling process names."""
+
+    def __init__(self, windows, process_names):
+        super().__init__(windows)
+        self._process_names = process_names
+
+    def application_process_names(self, process_name):
+        return self._process_names
+
+
+def test_a_second_process_of_the_same_application_stays_in_scope():
+    """An application is not one process.
+
+    HiSec's own flow crosses from its agent's main window into its client's
+    security-centre window, which is a different executable in the same
+    `.app`. Scoping to a single process name dropped every step after that
+    crossing — the product's primary workflow could not be recorded at all.
+    """
+    resolver = _AppResolver(
+        [
+            {"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1},
+            {"title": "日志中心", "pid": 77, "processName": "EDRHelper.exe", "handle": 2},
+        ],
+        ["EDRClient.exe", "EDRHelper.exe"],
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    resolver.process = "EDRHelper.exe"
+    resolver.window_title = "日志中心"
+    resolver.window_handle = 2
+
+    assert _record_click(correlator, resolver, "日志中心", 100) is not None
+    assert correlator.out_of_scope_events == 0
+
+
+def test_an_unrelated_application_is_still_refused():
+    resolver = _AppResolver(
+        [{"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1}],
+        ["EDRClient.exe", "EDRHelper.exe"],
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    resolver.process = "Notepad.exe"
+    resolver.window_title = "记事本"
+    resolver.window_handle = 99
+
+    assert _record_click(correlator, resolver, "记事本", 100) is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_without_application_resolution_scope_stays_single_process():
+    """A resolver that cannot resolve the bundle must not widen the scope."""
+    resolver = _SeedResolver(
+        [{"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1}],
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    assert correlator.scope_process_names == ()
+    resolver.process = "EDRHelper.exe"
+    resolver.window_title = "日志中心"
+    resolver.window_handle = 2
+    assert _record_click(correlator, resolver, "日志中心", 100) is None
+
+
+def test_a_failed_application_lookup_is_reported_not_silently_widened():
+    class _Failing(_SeedResolver):
+        def application_process_names(self, process_name):
+            raise RuntimeError("bundle lookup unavailable")
+
+    resolver = _Failing([
+        {"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1},
+    ])
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    assert correlator.scope_process_names == ()
+    assert "bundle lookup unavailable" in correlator.scope_seed_error
+
+
+def test_the_recording_registers_every_window_and_what_opened_it():
+    """Control identity is not always available; page structure still is.
+
+    An application that does not expose its accessibility tree yields
+    anonymous controls — a live HiSec client capture resolved every click to
+    a bare "AXGroup" — so which pages existed and how each was reached is the
+    part of the flow that can still be described.
+    """
+    resolver = _AppResolver(
+        [{"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1}],
+        ["EDRClient.exe"],
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    opening_click = _record_click(correlator, resolver, "EDRClient", 100)
+    correlator.correlate(
+        _transition("opened", 300, title="日志中心", handle=777), SCOPE, 2,
+    )
+
+    registry = correlator.window_registry
+    assert [w["title"] for w in registry] == ["EDRClient", "日志中心"]
+    assert registry[0]["origin"] == "already_open"
+    assert registry[1]["origin"] == "opened"
+    # The edge that makes the flat list a tree.
+    assert registry[1]["openedBy"] == opening_click.causal_id
+
+
+def test_a_closed_window_is_marked_rather_than_dropped_from_the_registry():
+    resolver = _AppResolver(
+        [{"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1}],
+        ["EDRClient.exe"],
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+    _record_click(correlator, resolver, "EDRClient", 100)
+    correlator.correlate(_transition("opened", 300, title="日志中心", handle=777), SCOPE, 2)
+
+    correlator.correlate(_transition("closed", 700, title="日志中心", handle=777), SCOPE, 3)
+
+    entry = next(w for w in correlator.window_registry if w["title"] == "日志中心")
+    assert entry["closed"] is True
+    # It still describes the flow even though the page is gone.
+    assert entry["openedBy"] is not None
+
+
+def test_the_window_registry_survives_a_recording_round_trip():
+    from target.recording.models import RawRecording
+
+    recording = RawRecording(
+        "REC-1", "flow", (),
+        {"droppedPackets": 0, "correlationErrorCount": 0},
+        windows=({"title": "日志中心", "processName": "EDRClient", "origin": "opened",
+                  "openedBy": "CAUSE-1", "handle": 777, "closed": False},),
+    )
+
+    restored = RawRecording.from_dict(recording.to_dict())
+
+    assert restored.windows == recording.windows
+    assert restored.schema == recording.schema
+
+
+class _PointResolver(_SeedResolver):
+    """Foreground and window-under-pointer disagree, as they do in real use."""
+
+    def __init__(self, windows, front, at_point):
+        super().__init__(windows)
+        self._front = front
+        self._at_point = at_point
+
+    def foreground(self):
+        return self._front
+
+    def window_at(self, x, y):
+        return self._at_point
+
+    def application_process_names(self, process_name):
+        return ["EDRClient.exe"]
+
+
+def test_a_click_is_attributed_to_the_window_under_the_pointer():
+    """Not to whatever happened to be frontmost.
+
+    The user clicks inside the target while another application sits in
+    front. The pointer says which window was clicked; the foreground does
+    not, and trusting it dropped the click.
+    """
+    resolver = _PointResolver(
+        [{"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777}],
+        front={"processName": "Claude", "windowTitle": "Claude", "pid": 9, "handle": 1},
+        at_point={"processName": "EDRClient.exe", "windowTitle": "日志中心",
+                  "pid": 42, "handle": 777},
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    event = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(600, 400)), SCOPE, 1,
+    )
+
+    assert event is not None
+    assert event.evidence["window"]["title"] == "日志中心"
+    assert correlator.out_of_scope_events == 0
+
+
+def test_a_click_on_a_covering_window_is_still_out_of_scope():
+    """The pointer is authoritative in both directions."""
+    resolver = _PointResolver(
+        [{"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777}],
+        front={"processName": "EDRClient.exe", "windowTitle": "日志中心",
+               "pid": 42, "handle": 777},
+        at_point={"processName": "Claude", "windowTitle": "Claude", "pid": 9, "handle": 1},
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    event = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(600, 400)), SCOPE, 1,
+    )
+
+    assert event is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_keyboard_input_still_resolves_through_the_focused_window():
+    """Keystrokes carry no coordinate, so focus is the only honest answer."""
+    resolver = _PointResolver(
+        [{"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777}],
+        front={"processName": "EDRClient.exe", "windowTitle": "日志中心",
+               "pid": 42, "handle": 777},
+        at_point=None,
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    packet = HookPacket(
+        kind="key_command", monotonic_ms=100, wall_time="2026-08-17T00:00:00.000Z",
+        native={"key": "ENTER", "modifiers": []},
+    )
+    event = correlator.correlate(packet, SCOPE, 1)
+
+    assert event is not None
+    assert event.evidence["window"]["title"] == "日志中心"
+
+
+class _CrossAppResolver(_SeedResolver):
+    """Admits by window but the hit test lands in another application."""
+
+    def __init__(self, windows, element):
+        super().__init__(windows)
+        self._element = element
+        self.window_handle = 777
+        self.window_title = "日志中心"
+
+    def foreground(self):
+        return {"processName": "EDRClient.exe", "windowTitle": "日志中心",
+                "pid": 42, "handle": 777}
+
+    def window_at(self, x, y):
+        return self.foreground()
+
+    def element_at(self, x, y):
+        return dict(self._element)
+
+    def application_process_names(self, process_name):
+        return ["EDRClient.exe"]
+
+
+def test_an_element_owned_by_another_application_never_enters_the_recording():
+    """Scope admission judges the window; the hit test judges coordinates.
+
+    When those disagree the recorder reads content it was never scoped to. A
+    live capture recorded a browser's web area — the user's chat window —
+    because the click was admitted by window while the pointer sat over a
+    different application.
+    """
+    resolver = _CrossAppResolver(
+        [{"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777}],
+        {"controlType": "AXWebArea", "text": "Claude", "automationId": "",
+         "rect": [0, 0, 100, 100], "protected": False, "ownerPid": 9999},
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    event = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(600, 400)), SCOPE, 1,
+    )
+
+    assert event is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_an_element_of_the_scoped_application_is_still_recorded():
+    resolver = _CrossAppResolver(
+        [{"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777}],
+        {"controlType": "AXRadioButton", "text": "查杀日志", "automationId": "",
+         "rect": [0, 0, 100, 100], "protected": False, "ownerPid": 42},
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    event = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(600, 400)), SCOPE, 1,
+    )
+
+    assert event is not None
+    assert event.observed_target.text == "查杀日志"
+
+
+def test_a_resolver_without_owner_information_is_not_penalised():
+    """Windows resolvers report no pid; they must behave exactly as before."""
+    resolver = _CrossAppResolver(
+        [{"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777}],
+        {"controlType": "Button", "text": "应用", "automationId": "btnApply",
+         "rect": [0, 0, 100, 100], "protected": False},
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    event = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(600, 400)), SCOPE, 1,
+    )
+
+    assert event is not None
+
+
+def test_an_entry_created_before_any_action_still_learns_what_opened_it():
+    """A window can be reported open before the causing action is correlated.
+
+    The poller and the input tap feed the same queue from different threads,
+    so an "opened" can land first. The registry then held that page forever
+    as "opened by None" even though the very next transition knew the cause.
+    """
+    resolver = _AppResolver(
+        [{"title": "EDRClient", "pid": 42, "processName": "EDRClient.exe", "handle": 1}],
+        ["EDRClient.exe"],
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    # Transition observed before any action has been correlated.
+    correlator.correlate(_transition("opened", 100, title="日志中心", handle=777), SCOPE, 1)
+    entry = next(w for w in correlator.window_registry if w["title"] == "日志中心")
+    assert entry.get("openedBy") is None
+
+    click = _record_click(correlator, resolver, "EDRClient", 200)
+    correlator.correlate(_transition("opened", 400, title="日志中心", handle=777), SCOPE, 2)
+
+    assert entry["openedBy"] == click.causal_id
+
+
+def test_a_click_on_nothing_nameable_is_not_recorded_as_a_step():
+    """The pointer landed where the application can name no control.
+
+    Replaying such a step would click a coordinate and hit whatever happens
+    to be there. It also leaves selector synthesis ambiguous, which marks the
+    whole recording incomplete — one live capture failed to compile for a
+    single click on empty space between two real ones.
+    """
+    resolver = _log_center_resolver()
+    resolver.element = {
+        "controlType": "AXGroup", "automationId": "", "identifier": "",
+        "text": "", "rect": [0, 0, 900, 600], "protected": False,
+    }
+    correlator = WindowsUIACorrelator(resolver)
+
+    event = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(348, 360)), SCOPE, 1,
+    )
+
+    assert event is None
+    assert correlator.unidentified_target_events == 1
+    # Counted, never silently dropped.
+    assert any(
+        r["reason"] == "target_not_identifiable" for r in correlator.rejections
+    )
+
+
+def test_a_click_named_only_by_its_text_is_still_a_step():
+    """Text alone distinguishes a control; many apps expose nothing else."""
+    resolver = _log_center_resolver()
+    resolver.element = {
+        "controlType": "AXStaticText", "automationId": "", "identifier": "",
+        "text": "前往安全防护中心", "rect": [500, 340, 600, 380], "protected": False,
+    }
+    correlator = WindowsUIACorrelator(resolver)
+
+    event = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(538, 352)), SCOPE, 1,
+    )
+
+    assert event is not None
+    assert event.observed_target.text == "前往安全防护中心"
+    assert correlator.unidentified_target_events == 0
+
+
+def test_a_window_opening_before_the_click_completes_still_records_its_cause():
+    """The window opens on mouse-down; the click is produced on mouse-up.
+
+    The poller can therefore observe and enqueue the transition before the
+    click that caused it exists, so looking backwards for a cause finds
+    nothing and the page is recorded as opened by nothing.
+    """
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+
+    # Mouse-down, window appears, mouse-up — in that order.
+    correlator.correlate(
+        _packet("pointer_down", monotonic_ms=100, screen_point=(50, 40)), SCOPE, 1,
+    )
+    correlator.correlate(
+        _transition("opened", 150, title="日志中心", handle=777), SCOPE, 1,
+    )
+    click = correlator.correlate(
+        _packet("pointer_up", monotonic_ms=200, screen_point=(50, 40)), SCOPE, 1,
+    )
+
+    entry = next(w for w in correlator.window_registry if w["title"] == "日志中心")
+    assert entry["openedBy"] == click.causal_id
+
+
+def test_a_window_that_opened_long_before_is_not_blamed_on_a_later_action():
+    """Claiming forwards must not become claiming anything.
+
+    A window that appeared on its own, well before the user did the next
+    thing, has no causal relationship to it. Recording one would put a false
+    edge in the page tree.
+    """
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(
+        resolver, transition_window_ms=3000,
+    )
+    correlator.seed_scope(SCOPE)
+
+    correlator.correlate(
+        _transition("opened", 100, title="弹窗", handle=555), SCOPE, 1,
+    )
+    # The user acts far outside the causal window.
+    correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100_000, screen_point=(50, 40)), SCOPE, 1,
+    )
+
+    entry = next(w for w in correlator.window_registry if w["title"] == "弹窗")
+    assert entry["openedBy"] is None

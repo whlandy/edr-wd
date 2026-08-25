@@ -136,7 +136,7 @@ def parse_plan(
     *,
     catalog: Sequence[Any],
     snapshot_id: str,
-    semantic_target_action_ids: Iterable[str] = (),
+    semantic_target_action_ids: Iterable[str] | Mapping[str, Iterable[str]] = (),
 ) -> ParseResult:
     """Validate the LLM output payload against the 5-stage plan
     contract.
@@ -149,12 +149,10 @@ def parse_plan(
         Typically the result of `enabled_actions_for(...)`.
       * `snapshot_id` — the live snapshot id; rejected if any
         step's `target_ref.snapshot_id` differs.
-      * `semantic_target_action_ids` — the set of action_ids
-        for which a unique semantic target exists in the live
-        snapshot. Used for D9: if a coordinate action appears
-        in the plan AND any of these targets exists for the
-        same step, the plan is rejected with
-        `coordinate_fallback_not_allowed`.
+      * `semantic_target_action_ids` — preferably a mapping from
+        step_id to the semantic action_ids available for that step.
+        A flat iterable remains supported as a conservative legacy
+        fallback and applies to every step.
 
     All 5 stages MUST pass. The implementation MAY execute the
     stages in any order. Errors are collected and returned; the
@@ -180,7 +178,15 @@ def parse_plan(
     catalog_by_id: dict[str, Any] = {
         spec.action_id: spec for spec in catalog
     }
-    semantic_ids = set(semantic_target_action_ids)
+    if isinstance(semantic_target_action_ids, Mapping):
+        semantic_ids_by_step = {
+            str(step_id): set(action_ids)
+            for step_id, action_ids in semantic_target_action_ids.items()
+        }
+        legacy_semantic_ids: set[str] = set()
+    else:
+        semantic_ids_by_step = {}
+        legacy_semantic_ids = set(semantic_target_action_ids)
 
     step_ids: set[str] = set()
     steps_seen: list[str] = []
@@ -244,13 +250,13 @@ def parse_plan(
                 ))
 
         # ---- D9: coordinate fallback ----
+        semantic_ids = semantic_ids_by_step.get(step_id, legacy_semantic_ids)
         if action_id.startswith("pointer.") and semantic_ids:
             # A coordinate action was chosen while a unique
             # semantic target exists for the same step. The
-            # parser only checks the rule (semantic_target is
-            # non-empty + coordinate action present); the
-            # caller decides which semantic action should
-            # have been chosen.
+            # Mapping input keeps the decision scoped to this step;
+            # flat legacy input deliberately retains the old,
+            # conservative all-steps behaviour.
             errors.append(ValidationError(
                 code=COORDINATE_FALLBACK_NOT_ALLOWED,
                 pointer=f"{pointer_step}/action_id",
