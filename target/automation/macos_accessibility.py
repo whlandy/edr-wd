@@ -928,7 +928,7 @@ print(String(data: data, encoding: .utf8) ?? "[]")
 
         matches = []
         for w in listed["windows"]:
-            if proc_lc and proc_lc not in w["app_name"].lower():
+            if proc_lc and not self._window_owned_by_process(w, proc_lc):
                 continue
             if pat and not pat.search(w.get("window_title") or ""):
                 continue
@@ -2728,6 +2728,28 @@ return outText
             return int(out) if out else None
         except ValueError:
             return None
+
+    @staticmethod
+    def _window_owned_by_process(window: dict, process_lc: str) -> bool:
+        """Does this window belong to the named process?
+
+        `app_name` is the *application's* name, which is not always the
+        executable that owns the window: HiSec's client windows report
+        "HiSecEndpoint" while the process is "EDRClient". Matching on it alone
+        made a lookup for EDRClient find nothing, so connect fell through to
+        the activation path and attached to a root daemon with no UI — every
+        accessibility query then failed against the wrong process.
+        """
+        pid = window.get("process_id") or window.get("pid")
+        if pid is not None:
+            try:
+                import psutil
+
+                if psutil.Process(int(pid)).name().lower() == process_lc:
+                    return True
+            except Exception:
+                pass
+        return process_lc in str(window.get("app_name") or "").lower()
 
     def _pid_for_app(self, app_name: str) -> Optional[int]:
         """Best-effort pid lookup by application name via osascript."""

@@ -321,3 +321,40 @@ def test_a_background_window_that_is_not_on_screen_is_never_matched(monkeypatch)
     monkeypatch.setattr(backend, "_cg_window_zorder", lambda: [])
 
     assert backend._locked_window_visible_state(backend._window_lock) is None
+
+
+def test_a_window_is_matched_by_its_executable_not_the_application_name(monkeypatch):
+    """The application name is not always the process that owns the window.
+
+    HiSec's client windows report an owner of "HiSecEndpoint" while the
+    process is "EDRClient". Matching on that name alone found nothing, so
+    connect fell through to the activation path and attached to a root
+    daemon with no UI — every accessibility query then went to the wrong
+    process, which looked like the client refusing to be enumerated at all.
+    """
+    backend = MacOSAccessibilityBackend()
+    monkeypatch.setattr(backend, "list_windows", lambda: {
+        "ok": True,
+        "windows": [
+            {"app_name": "HiSecEndpoint", "window_title": "HiSec Endpoint",
+             "pid": 41916, "process_id": 41916},
+        ],
+    })
+    monkeypatch.setattr(
+        MacOSAccessibilityBackend, "_window_owned_by_process",
+        staticmethod(lambda window, process_lc: int(window.get("pid")) == 41916
+                     and process_lc == "edrclient"),
+    )
+
+    result = backend.is_window_open(process_name="EDRClient", title_re=".*")
+
+    assert result["found"] is True
+    assert result["windows"][0]["pid"] == 41916
+
+
+def test_window_ownership_falls_back_to_the_application_name():
+    """A pid that cannot be resolved must not make the window unmatchable."""
+    owned = MacOSAccessibilityBackend._window_owned_by_process
+
+    assert owned({"app_name": "HiSecEndpoint", "pid": None}, "hisecendpoint") is True
+    assert owned({"app_name": "HiSecEndpoint", "pid": None}, "notepad") is False
