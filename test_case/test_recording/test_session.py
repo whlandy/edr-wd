@@ -222,3 +222,40 @@ def test_stop_closes_the_recorder_ui_before_draining_the_correlator():
     session.stop()
 
     assert order == ["indicator", "source"]
+
+
+def test_the_indicator_counts_actions_not_observed_events():
+    """A window opening is evidence, not something the user did.
+
+    The compiler folds a bound window transition into the preceding step's
+    verifier, so counting it made the indicator read ahead of the steps the
+    recording would actually contain — 18 observed against 15 compiled in one
+    live capture — for something the user never performed.
+    """
+    counts = []
+
+    class _Indicator:
+        def start(self): pass
+        def pause(self): pass
+        def resume(self): pass
+        def stop(self): pass
+        def open_assertion_editor(self, target=None): pass
+        def update_count(self, count): counts.append(count)
+
+    session = RecordingSession("REC", "flow", SCOPE)
+    session.attach_indicator(_Indicator())
+    session.start()
+
+    session.ingest(event(1))
+    session.ingest(RawCaptureEvent(
+        2, "2026-08-17T00:00:00Z", 20, "window_transition", SCOPE,
+        {"kind": "opened", "processName": "EDRClient.exe", "title": "日志中心",
+         "timeoutSeconds": 5.0},
+        causal_id="CAUSE-1",
+    ))
+    session.ingest(event(3))
+
+    # Three events observed, two actions performed.
+    assert counts == [1, 2]
+    assert session.status().sequence == 3
+    assert session.status().action_count == 2

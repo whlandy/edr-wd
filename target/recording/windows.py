@@ -440,6 +440,8 @@ class WindowsUIACorrelator:
         # so it must not be recorded as though it had.
         self._recorder_ui_rect: tuple[int, int, int, int] | None = None
         self.recorder_ui_events = 0
+        # Clicks that landed on nothing the application can name.
+        self.unidentified_target_events = 0
         # Sibling process names admitted alongside `scope.process_name`,
         # resolved at seed time from the application the scope names. An
         # application is not one process — HiSec's own flow crosses from its
@@ -447,6 +449,21 @@ class WindowsUIACorrelator:
         # everything after that crossing.
         self._scope_process_names: set[str] = set()
         self.scope_process_names: tuple[str, ...] = ()
+        # Every window of the application this capture saw, in the order it
+        # first appeared, with the action that opened it. Control identity is
+        # not always available — an application that does not expose its
+        # accessibility tree yields only anonymous groups — but which pages
+        # existed and how each was reached still describes the flow.
+        self.window_registry: list[dict[str, object]] = []
+        self._window_index: dict[object, dict[str, object]] = {}
+        # Why recent input was not recorded, with the window it resolved to.
+        # A bare count says a capture was short; it never says whether the
+        # recorder misjudged which window the user was in.
+        self.rejections: list[dict[str, object]] = []
+        # Windows seen opening before the action that caused them existed.
+        self._windows_awaiting_cause: list[tuple[int, dict[str, object]]] = []
+        # Input that belonged to some other application entirely.
+        self.foreign_app_events = 0
         if transition_window_ms < 0:
             raise ValueError("transition_window_ms must be non-negative")
         self._transition_window_ms = transition_window_ms
@@ -758,7 +775,92 @@ class WindowsUIACorrelator:
                 self._derived_scope_handles.add(handle)
             elif isinstance(title, str) and title:
                 self._derived_scope_titles.add(title)
+            self._register_window(
+                title=title if isinstance(title, str) else "",
+                process_name=str(window.get("processName") or ""),
+                handle=handle if isinstance(handle, int) else None,
+                pid=window.get("pid"),
+                origin="already_open",
+            )
         return tuple(seeded)
+
+    def _register_window(
+        self,
+        *,
+        title: str,
+        process_name: str,
+        handle: int | None,
+        pid: object,
+        origin: str,
+        opened_by: str | None = None,
+        appeared_ms: int | None = None,
+    ) -> None:
+        """Record a window of the application, keyed by handle when there is one."""
+        key = handle if handle is not None else ("title", process_name, title)
+        existing = self._window_index.get(key)
+        if existing is not None:
+            if existing.get("closed") and origin == "opened":
+                # Re-opened: the flow reached this page again.
+                existing["closed"] = False
+                existing["reopenedBy"] = opened_by
+            if opened_by is not None and existing.get("openedBy") is None:
+                # The poller and the input tap feed the same queue from
+                # different threads, so a window can be reported open before
+                # the action that opened it has been correlated. Learning the
+                # cause later is what keeps the entry from staying "opened by
+                # nothing" for the rest of the recording.
+                existing["openedBy"] = opened_by
+            return
+        entry: dict[str, object] = {
+            "title": title,
+            "processName": process_name,
+            "origin": origin,
+            "closed": False,
+        }
+        if handle is not None:
+            entry["handle"] = handle
+        if pid is not None:
+            try:
+                entry["pid"] = int(pid)  # type: ignore[arg-type]
+            except Exception:
+                pass
+        # The action that caused this window to appear — the edge that makes
+        # the registry a tree rather than a flat list. Always present, so a
+        # cause learned later has somewhere to go.
+        entry["openedBy"] = opened_by
+        self._window_index[key] = entry
+        self.window_registry.append(entry)
+        if opened_by is None and appeared_ms is not None:
+            # A window opens on mouse-down while the click that caused it is
+            # only produced on mouse-up, so looking backwards for a cause
+            # finds nothing. Hold the entry open for the action that is about
+            # to arrive.
+            self._windows_awaiting_cause.append((appeared_ms, entry))
+            del self._windows_awaiting_cause[:-16]
+
+    def _claim_windows_awaiting_cause(self, event: RawCaptureEvent) -> None:
+        """Attribute windows that appeared just before this action to it.
+
+        Only windows that appeared within the same causal window the backward
+        search uses; anything older opened for its own reasons and must stay
+        unattributed rather than be blamed on whatever the user did next.
+        """
+        if not self._windows_awaiting_cause:
+            return
+        remaining = []
+        for appeared_ms, entry in self._windows_awaiting_cause:
+            gap = event.monotonic_ms - appeared_ms
+            if 0 <= gap <= self._transition_window_ms and entry.get("openedBy") is None:
+                entry["openedBy"] = event.causal_id
+            elif gap < 0 or gap <= self._transition_window_ms:
+                remaining.append((appeared_ms, entry))
+        self._windows_awaiting_cause = remaining
+
+    def _close_window(self, *, title: str, process_name: str, handle: int | None) -> None:
+        key = handle if handle is not None else ("title", process_name, title)
+        entry = self._window_index.get(key)
+        if entry is not None:
+            entry["closed"] = True
 
     def set_recorder_ui_rect(self, rect: tuple[int, int, int, int] | None) -> None:
         """Tell the correlator where its own always-on-top UI sits on screen."""
@@ -895,6 +997,22 @@ class WindowsUIACorrelator:
         # is how a recording ends up empty.
         title = packet.native.get("title")
         handle = packet.native.get("handle")
+        if kind == "opened":
+            self._register_window(
+                title=title if isinstance(title, str) else "",
+                process_name=str(process_name or scope.process_name),
+                handle=handle if isinstance(handle, int) else None,
+                pid=packet.native.get("pid"),
+                origin="opened",
+                opened_by=self._last_action_causal_id,
+                appeared_ms=packet.monotonic_ms,
+            )
+        else:
+            self._close_window(
+                title=title if isinstance(title, str) else "",
+                process_name=str(process_name or scope.process_name),
+                handle=handle if isinstance(handle, int) else None,
+            )
         if isinstance(handle, int):
             # A handle is exact; also title-tracking this window would let a
             # later unrelated window that happens to share the title ride in
@@ -969,42 +1087,187 @@ class WindowsUIACorrelator:
             # target would put a step in the trace that never happened there —
             # a live HiSec capture did exactly that before this check existed.
             self.recorder_ui_events += 1
+            self._note_rejection("recorder_ui", packet, None)
             return None
-        foreground = self._resolver.foreground()
-        result = self._correlate(packet, scope, sequence)
+        # Resolve the owning window once: this is a live window-server query
+        # and doing it twice per packet doubled the correlation cost that the
+        # worker pays for every keystroke.
+        foreground = self._window_for(packet)
+        result = self._correlate(packet, scope, sequence, foreground)
         produced = (
             result if isinstance(result, tuple)
             else () if result is None else (result,)
         )
+        if not produced and packet.kind in {"pointer_up", "scroll"}:
+            # In scope, not on the recorder, yet nothing came out. Without
+            # this the step simply never appears and there is nothing to
+            # explain why.
+            self._note_rejection("no_event_produced", packet, foreground, scope=scope)
         stamped = tuple(self._with_window(event, foreground) for event in produced)
         for event in stamped:
             if event.type in ACTION_EVENT_TYPES:
                 self._last_action_causal_id = event.causal_id
                 self._last_action_ms = event.monotonic_ms
+                self._claim_windows_awaiting_cause(event)
         if not stamped:
             return None
         return stamped[0] if len(stamped) == 1 else stamped
+
+    def _element_at(
+        self,
+        point: tuple[int, int],
+        foreground: Mapping[str, object] | None,
+    ) -> Mapping[str, object] | None:
+        pid = (foreground or {}).get("pid")
+        if pid is not None:
+            try:
+                return self._resolver.element_at(*point, int(pid))
+            except TypeError:
+                pass  # resolver predates the pid argument
+            except Exception:
+                return None
+        return self._resolver.element_at(*point)
+
+    @staticmethod
+    def _identifiable(target_data: Mapping[str, object] | None) -> bool:
+        """Can a replay selector name this control at all?
+
+        `controlType` alone cannot: a bare container type matches any number
+        of elements. Only an automation id, an identifier or visible text
+        distinguishes one control from its siblings.
+        """
+        if not target_data:
+            return False
+        return any(
+            str(target_data.get(key) or "").strip()
+            for key in ("automationId", "identifier", "text")
+        )
+
+    def _target_owned_by_scope(
+        self,
+        target_data: Mapping[str, object],
+        foreground: Mapping[str, object] | None,
+        scope: CaptureScope,
+    ) -> bool:
+        """Does the resolved element belong to the application being recorded?
+
+        Only enforced when the resolver can say which process owns the
+        element; a resolver that cannot is left exactly as permissive as
+        before rather than silently dropping every step.
+        """
+        owner = target_data.get("ownerPid")
+        if owner is None:
+            return True
+        try:
+            owner = int(owner)
+        except (TypeError, ValueError):
+            return True
+        expected = (foreground or {}).get("pid")
+        if expected is not None:
+            try:
+                if int(expected) == owner:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        # The admitted window's pid is the strongest signal, but a flow that
+        # legitimately crosses the application's processes must still pass.
+        for window in self.window_registry:
+            if window.get("pid") == owner:
+                return True
+        return False
+
+    def _note_rejection(
+        self,
+        reason: str,
+        packet: HookPacket,
+        window: Mapping[str, object] | None,
+        *,
+        scope: CaptureScope | None = None,
+    ) -> None:
+        # Input aimed at a *different* application is expected and enormous in
+        # volume — ordinary typing elsewhere fills any buffer instantly and
+        # buries the one rejection that explains a lost click. Only input that
+        # resolved to this application's own windows is diagnostic.
+        if window is not None and scope is not None:
+            if not self._process_in_scope(window.get("processName"), scope):
+                self.foreign_app_events += 1
+                return
+        if len(self.rejections) >= 60:
+            self.rejections.pop(0)  # keep the most recent, not the first
+        entry: dict[str, object] = {"reason": reason, "kind": packet.kind}
+        if packet.screen_point is not None:
+            entry["point"] = list(packet.screen_point)
+        if window:
+            entry["resolvedProcess"] = window.get("processName")
+            entry["resolvedTitle"] = window.get("windowTitle")
+            entry["resolvedHandle"] = window.get("handle")
+        self.rejections.append(entry)
+
+    def _window_for(self, packet: HookPacket) -> Mapping[str, object]:
+        """Which window this input belongs to.
+
+        Pointer input carries its own answer: the window under the pointer.
+        Using the *frontmost* window instead attributes a click to whatever
+        happened to be in front, which in a live capture meant clicks inside
+        the target were judged out of scope and dropped whenever another
+        application was stacked above it.
+
+        Keyboard input has no coordinate, so it genuinely belongs to the
+        focused window and still resolves through `foreground()`.
+        """
+        # Prefer the window resolved while the input was happening. Deciding
+        # it here instead re-reads a stacking order that has moved on, which
+        # is how clicks admitted at the tap were judged to belong to another
+        # application milliseconds later and lost.
+        stamped = (packet.native or {}).get("window")
+        if isinstance(stamped, Mapping) and stamped.get("processName"):
+            return stamped
+        point = packet.screen_point
+        locate = getattr(self._resolver, "window_at", None)
+        if point is not None and callable(locate):
+            try:
+                located = locate(*point)
+            except Exception:
+                located = None
+            if located:
+                return located
+        return self._resolver.foreground()
 
     def _correlate(
         self,
         packet: HookPacket,
         scope: CaptureScope,
         sequence: int,
+        foreground: Mapping[str, object] | None = None,
     ) -> RawCaptureEvent | tuple[RawCaptureEvent, ...] | None:
-        foreground = self._resolver.foreground()
+        if foreground is None:
+            foreground = self._window_for(packet)
         if not self._in_scope(foreground, scope):
             # Out-of-scope input is expected (the user may alt-tab), but it
             # must be countable so a short recording is never mistaken for a
             # complete one.
             self.out_of_scope_events += 1
+            self._note_rejection("out_of_scope", packet, foreground, scope=scope)
             return None
 
         target_data = None
         if packet.screen_point is not None:
-            target_data = self._resolver.element_at(*packet.screen_point)
+            # Hit test inside the admitted window's application, not against
+            # whatever is on top of the screen.
+            target_data = self._element_at(packet.screen_point, foreground)
         elif packet.kind == "key_command":
             focused = getattr(self._resolver, "focused", None)
             target_data = focused() if callable(focused) else None
+        if target_data is not None and not self._target_owned_by_scope(
+            target_data, foreground, scope,
+        ):
+            # Scope admission judges the window; the hit test judges raw
+            # coordinates. When those disagree the recorder reads another
+            # application's content — a live capture pulled a browser's web
+            # area in this way. The recording must never carry it.
+            self.out_of_scope_events += 1
+            self._note_rejection("target_outside_scope", packet, foreground, scope=scope)
+            return None
         observed = self._observed(target_data)
 
         if self._scroll_continues(packet):
@@ -1147,6 +1410,19 @@ class WindowsUIACorrelator:
                 event_type = "selection_change"
                 event_input = {"value": target_data.get("text"), "selected": bool(target_data["selected"])}
             else:
+                if not self._identifiable(target_data):
+                    # The pointer landed on nothing the target application can
+                    # name — no automation id, no identifier, no text. Such a
+                    # step cannot be replayed as a click on anything: replay
+                    # would click a coordinate and hit whatever happens to be
+                    # there. It also makes selector synthesis ambiguous, which
+                    # marks the whole recording incomplete. The user did not
+                    # press a control, so this is not a step.
+                    self.unidentified_target_events += 1
+                    self._note_rejection(
+                        "target_not_identifiable", packet, foreground, scope=scope,
+                    )
+                    return pending_scroll
                 event_type = "pointer_click"
                 event_input = {
                     "button": packet.button or "left",

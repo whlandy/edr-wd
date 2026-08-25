@@ -45,9 +45,14 @@ class SessionReceipt:
     sequence: int
     monotonic_ms: int
     reason: str = ""
+    # Actions the user performed. `sequence` counts every observed event,
+    # including the window transitions the compiler folds into the preceding
+    # step's verifier, so it reads ahead of the steps a recording will
+    # actually contain and cannot be shown as a step count.
+    action_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        return {"sessionId": self.session_id, "state": self.state.value, "sequence": self.sequence, "monotonicMs": self.monotonic_ms, "reason": self.reason}
+        return {"sessionId": self.session_id, "state": self.state.value, "sequence": self.sequence, "monotonicMs": self.monotonic_ms, "reason": self.reason, "actionCount": self.action_count}
 
 
 class CaptureSource(Protocol):
@@ -84,6 +89,9 @@ class RecordingSession:
         self._indicator: RecordingIndicator = NullRecordingIndicator()
         self._monotonic = monotonic;self._state = CaptureSessionState.IDLE
         self._events: list[RawCaptureEvent] = [];self._last_heartbeat = monotonic()
+        # Actions the user performed, which is what the indicator reports.
+        # Distinct from len(self._events), which also holds result evidence.
+        self._action_count = 0
         self._lock = threading.RLock();self._reason = ""
         # Set once the session reaches a terminal state, so a second stop()
         # can wait for an in-flight one instead of losing the recording.
@@ -121,7 +129,10 @@ class RecordingSession:
         return int(self._monotonic() * 1000)
 
     def _receipt(self) -> SessionReceipt:
-        return SessionReceipt(self.session_id, self._state, len(self._events), self._now_ms(), self._reason)
+        return SessionReceipt(
+            self.session_id, self._state, len(self._events), self._now_ms(),
+            self._reason, self._action_count,
+        )
 
     def _expire_before_operation(self) -> bool:
         """Stop an expired session without holding the ingest lock while draining."""
@@ -175,10 +186,21 @@ class RecordingSession:
         The indicator is always-on-top, so anything clicked inside it never
         reached the target application and must not enter the recording.
         """
-        rect = getattr(self._indicator, "window_rect", None)
-        bind = getattr(getattr(self._source, "_correlator", None), "set_recorder_ui_rect", None)
-        if callable(bind):
-            bind(rect)
+        correlator = getattr(self._source, "_correlator", None)
+        bind = getattr(correlator, "set_recorder_ui_rect", None)
+        if not callable(bind):
+            return
+        # Prefer the window server's own bounds: the toolkit reports client
+        # geometry that excludes the title bar, and a drag on that title bar
+        # would then read as input inside the target window.
+        rect = None
+        resolve = getattr(getattr(correlator, "_resolver", None), "recorder_ui_rect", None)
+        if callable(resolve):
+            try:
+                rect = resolve()
+            except Exception:
+                rect = None
+        bind(rect or getattr(self._indicator, "window_rect", None))
 
     def heartbeat(self) -> SessionReceipt:
         self._expire_before_operation()
@@ -227,7 +249,20 @@ class RecordingSession:
             self._events.append(event);self._last_heartbeat = self._monotonic()
             if event.type in ACTION_EVENT_TYPES:
                 self._last_action_causal_id = event.causal_id
-            self._indicator.update_count(len(self._events));return True
+            # Count what the user did, not everything observed. A window
+            # opening or closing is evidence that the preceding click worked —
+            # the compiler folds it into that step's verifier — so counting it
+            # made the indicator read ahead of the steps the recording will
+            # actually contain (18 observed against 15 compiled in one live
+            # capture), for something the user never performed. An explicit
+            # assertion does count: the user authored it, and an unbound one
+            # becomes a step of its own.
+            if event.type in ACTION_EVENT_TYPES or event.assertion is not None:
+                self._action_count += 1
+                # Only notify on a change; the indicator lives in another
+                # process and every update is a pipe write.
+                self._indicator.update_count(self._action_count)
+            return True
 
     def request_assertion_editor(self) -> SessionReceipt:
         self._expire_before_operation()
@@ -456,6 +491,10 @@ class RecordingSession:
             return self._receipt()
 
     def recording(self) -> RawRecording:
+        correlator = getattr(self._source, "_correlator", None)
+        windows = tuple(
+            dict(entry) for entry in getattr(correlator, "window_registry", ()) or ()
+        )
         return RawRecording(
             self.session_id,
             self.name,
@@ -472,7 +511,15 @@ class RecordingSession:
                     getattr(self._source, "_correlator", None),
                     "recorder_ui_events", 0,
                 ) or 0),
+                # Clicks that landed on nothing the application can name.
+                # Not steps — replaying one would click a coordinate and hit
+                # whatever happened to be there — but never silently dropped.
+                "unidentifiedTargetEvents": int(getattr(
+                    getattr(self._source, "_correlator", None),
+                    "unidentified_target_events", 0,
+                ) or 0),
             },
+            windows=windows,
         )
 
 

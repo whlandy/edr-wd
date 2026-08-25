@@ -2158,7 +2158,12 @@ set depthLimit to {max_depth}
 
 tell application "System Events"
     tell process "{process_name}"
-        set frontmost to true
+        -- Deliberately does NOT set `frontmost`. Enumerating the
+        -- accessibility tree is a read; raising the window is a side effect
+        -- on the user's desktop. Recording captures evidence after every
+        -- step, and each capture enumerates protected controls, so this
+        -- line yanked the target window to the front on every recorded
+        -- action while the user was working in another window.
         set windowIndex to 1
         repeat with win in windows
             set winName to ""
@@ -2360,6 +2365,136 @@ return outText
             }, None
         scored.sort(key=lambda item: item[0], reverse=True)
         return None, scored[0][1]
+
+    def recorder_ui_rectangles(self) -> Optional[list]:
+        """Screen rects of the recorder's own always-on-top windows.
+
+        Evidence capture masks these out of every stored frame. Answering it
+        from `list_windows()` costs 5.3 s per call — measured — because that
+        enumerates every window on the system through AppleScript, and this
+        runs after every recorded step. The window server answers the same
+        question in milliseconds.
+
+        Returns None when CoreGraphics is unavailable so the caller falls
+        back rather than silently skipping the mask.
+        """
+        try:
+            import Quartz
+        except Exception:
+            return None
+        try:
+            listing = Quartz.CGWindowListCopyWindowInfo(
+                Quartz.kCGWindowListOptionOnScreenOnly
+                | Quartz.kCGWindowListExcludeDesktopElements,
+                Quartz.kCGNullWindowID,
+            ) or []
+        except Exception:
+            return None
+        found = []
+        for item in listing:
+            if "[recorder_ui=true]" not in str(item.get("kCGWindowName") or ""):
+                continue
+            bounds = item.get("kCGWindowBounds") or {}
+            try:
+                found.append({"rectangle": {
+                    "x": int(bounds["X"]), "y": int(bounds["Y"]),
+                    "w": int(bounds["Width"]), "h": int(bounds["Height"]),
+                }})
+            except Exception:
+                continue
+        return found
+
+    def protected_rectangles(self) -> Optional[list]:
+        """Screen rects of secure input fields, found through native AX.
+
+        Evidence capture runs after every recorded step and needs these to
+        redact passwords before a frame is stored. Enumerating the whole tree
+        through AppleScript to find them costs 18-24 s per call on a live
+        target — measured — so each recorded step took about ten seconds to
+        appear and the recorder looked broken. The same question answered
+        through the AX APIs directly takes milliseconds.
+
+        Returns None when native AX is unavailable, so the caller can fall
+        back rather than silently skipping redaction.
+        """
+        pid = getattr(self, "_connected_pid", None)
+        if pid is None:
+            return None
+        try:
+            from ApplicationServices import (  # type: ignore[import-not-found]
+                AXUIElementCreateApplication,
+                AXUIElementCopyAttributeValue,
+                AXValueGetValue,
+                kAXValueCGPointType,
+                kAXValueCGSizeType,
+            )
+        except Exception:
+            return None
+
+        def attribute(element, name):
+            try:
+                error, value = AXUIElementCopyAttributeValue(element, name, None)
+            except Exception:
+                return None
+            return value if error == 0 else None
+
+        def rect_of(element):
+            position = attribute(element, "AXPosition")
+            size = attribute(element, "AXSize")
+            if position is None or size is None:
+                return None
+            try:
+                ok_point, point = AXValueGetValue(position, kAXValueCGPointType, None)
+                ok_size, extent = AXValueGetValue(size, kAXValueCGSizeType, None)
+            except Exception:
+                return None
+            if not (ok_point and ok_size):
+                return None
+            return {
+                "x": int(point.x), "y": int(point.y),
+                "w": int(extent.width), "h": int(extent.height),
+            }
+
+        try:
+            root = AXUIElementCreateApplication(int(pid))
+        except Exception:
+            return None
+        # A walk that cannot read the application at all must not look like a
+        # window with nothing to redact: the caller would store an unredacted
+        # frame believing it was checked. Returning None makes it fall back.
+        if attribute(root, "AXRole") is None:
+            return None
+        found: list = []
+        # Bounded so a pathological tree can never stall capture the way the
+        # AppleScript walk did.
+        budget = 4000
+        stack = [(root, 0)]
+        while stack:
+            if budget <= 0:
+                # Ran out before finishing: the answer is incomplete, and an
+                # incomplete redaction list is not a safe one.
+                return None
+            element, depth = stack.pop()
+            budget -= 1
+            if depth > 25:
+                # Same reasoning as the budget: a subtree left unexamined
+                # could hold the secure field this exists to find.
+                return None
+            role = str(attribute(element, "AXRole") or "")
+            subrole = str(attribute(element, "AXSubrole") or "")
+            marker = f"{role} {subrole}".lower()
+            if "securetextfield" in marker or "password" in marker:
+                rectangle = rect_of(element)
+                if rectangle is None:
+                    # Found a secure field but cannot say where it is; the
+                    # caller must not proceed as though it were absent.
+                    return None
+                found.append({"rectangle": rectangle, "protected": True})
+                continue  # never descend into a secure field
+            children = attribute(element, "AXChildren") or ()
+            for child in children:
+                stack.append((child, depth + 1))
+        return found
 
     def dump_tree(self, window_title_re: Optional[str] = None, max_depth: int = 10) -> dict:
         err, controls = self._load_ax_controls(window_title_re=window_title_re, max_depth=max_depth)

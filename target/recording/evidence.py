@@ -12,6 +12,7 @@ import binascii
 import hashlib
 import io
 import threading
+import time
 import uuid
 from dataclasses import replace
 from typing import Any, Mapping
@@ -47,32 +48,140 @@ def _is_protected(control: Mapping[str, Any]) -> bool:
     return "securetextfield" in role or "password" in role
 
 
+_PROTECTED_CACHE_TTL_SECONDS = 4.0
+
+
+def _window_identity(backend: Any) -> tuple:
+    """Which window a cached redaction answer belongs to."""
+    snapshot = getattr(backend, "_connected_window_snapshot", None)
+    if isinstance(snapshot, Mapping):
+        return (snapshot.get("pid"), snapshot.get("title"))
+    return (getattr(backend, "_connected_pid", None), None)
+
+
+def _cached_protected_controls(backend: Any) -> list | None:
+    """Run the slow enumeration, reusing a recent answer for the same window.
+
+    The answer is kept on the backend, not in a module global: a global
+    outlives the session that produced it and would hand one recording's
+    redaction answer to the next.
+    """
+    identity = _window_identity(backend)
+    now = time.monotonic()
+    entry = getattr(backend, "_edr_protected_cache", None)
+    if (
+        isinstance(entry, dict)
+        and entry.get("identity") == identity
+        and now - entry.get("at", 0.0) < _PROTECTED_CACHE_TTL_SECONDS
+    ):
+        if entry.get("failed"):
+            # Remember the failure too. Some applications refuse this
+            # enumeration and only reveal it by timing out after 20 s; retrying
+            # per step would charge every step that timeout again.
+            raise ValueError("protected-control enumeration failed")
+        return entry["controls"]
+
+    def _remember(payload: dict) -> None:
+        payload.update({"identity": identity, "at": time.monotonic()})
+        try:
+            backend._edr_protected_cache = payload
+        except Exception:
+            pass  # a backend that refuses attributes simply gets no caching
+
+    try:
+        result = backend.dump_tree(max_depth=15)
+    except Exception:
+        _remember({"failed": True})
+        raise
+    if not isinstance(result, Mapping) or not result.get("ok"):
+        _remember({"failed": True})
+        raise ValueError("protected-control enumeration failed")
+    tree_controls = result.get("controls")
+    if not isinstance(tree_controls, list):
+        raise ValueError("protected-control enumeration returned no controls array")
+    controls = [
+        control for control in tree_controls
+        if isinstance(control, Mapping) and _is_protected(control)
+    ]
+    _remember({"controls": controls})
+    return controls
+
+
 def protected_rectangles(backend: Any) -> list[tuple[int, int, int, int]]:
     """Rectangles that must be painted out before a frame leaves the target."""
     rectangles: list[tuple[int, int, int, int]] = []
-    try:
-        result = backend.dump_tree(max_depth=15)
-    except Exception as exc:
-        raise ValueError("protected-control enumeration failed") from exc
-    if not isinstance(result, Mapping) or not result.get("ok"):
-        raise ValueError("protected-control enumeration failed")
-    controls = result.get("controls")
-    if not isinstance(controls, list):
-        raise ValueError("protected-control enumeration returned no controls array")
-    for control in controls:
-        if not isinstance(control, Mapping) or not _is_protected(control):
-            continue
-        rect = _rectangle(control)
-        if rect is None:
-            raise ValueError(
-                "protected control has no redaction rectangle"
-            )
-        rectangles.append(rect)
+    # Prefer a backend that can answer this directly. Deriving it from a full
+    # tree dump costs 18-24 s per call on macOS — and this runs after every
+    # recorded step, which is what made each step take about ten seconds to
+    # appear.
+    native = getattr(backend, "protected_rectangles", None)
+    controls = None
+    if callable(native):
+        try:
+            controls = native()
+        except Exception as exc:
+            raise ValueError("protected-control enumeration failed") from exc
+    if controls is None:
+        # The fast path could not answer, so the slow enumeration has to run.
+        # It costs 18-24 s on macOS and this is called after every recorded
+        # step, which is why a recording appeared to advance one step every
+        # ten seconds. Secure fields do not appear or move between adjacent
+        # steps of the same page, so the answer is reused briefly and always
+        # recomputed when the window changes — freshness is traded, but the
+        # enumeration itself is never skipped.
+        cached = _cached_protected_controls(backend)
+        if cached is not None:
+            controls = cached
+    if controls is not None:
+        for control in controls:
+            if not isinstance(control, Mapping):
+                continue
+            rect = _rectangle(control)
+            if rect is None:
+                raise ValueError("protected control has no redaction rectangle")
+            rectangles.append(rect)
+        # Falls through to the recorder-window mask below: skipping it would
+        # leave the recorder's own UI visible in stored evidence.
+        result = None
+    result = None
+    if result is not None:
+        if not isinstance(result, Mapping) or not result.get("ok"):
+            raise ValueError("protected-control enumeration failed")
+        tree_controls = result.get("controls")
+        if not isinstance(tree_controls, list):
+            raise ValueError("protected-control enumeration returned no controls array")
+        for control in tree_controls:
+            if not isinstance(control, Mapping) or not _is_protected(control):
+                continue
+            rect = _rectangle(control)
+            if rect is None:
+                raise ValueError(
+                    "protected control has no redaction rectangle"
+                )
+            rectangles.append(rect)
 
     # The recorder indicator is a separate process/window and therefore
     # is not part of the connected application's control tree.  Mask it
     # explicitly when a platform screenshot API can see overlapping or
     # full-screen windows.
+    # Prefer a backend that can locate its own recorder windows directly:
+    # deriving this from a full window enumeration costs 5.3 s per call on
+    # macOS, paid after every recorded step.
+    fast = getattr(backend, "recorder_ui_rectangles", None)
+    if callable(fast):
+        try:
+            recorder_windows = fast()
+        except Exception as exc:
+            raise ValueError("recorder-window enumeration failed") from exc
+        if recorder_windows is not None:
+            for window in recorder_windows:
+                if not isinstance(window, Mapping):
+                    continue
+                rect = _rectangle(window)
+                if rect is None:
+                    raise ValueError("recorder window has no redaction rectangle")
+                rectangles.append(rect)
+            return rectangles
     try:
         windows = backend.list_windows()
     except Exception as exc:

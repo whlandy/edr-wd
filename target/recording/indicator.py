@@ -12,6 +12,10 @@ from typing import Any, Callable, Mapping, Protocol
 
 from .models import CaptureScope, RecordingModelError
 
+# Marker carried in the recorder window's title so every layer — screenshot
+# redaction, foreground resolution — can recognise the recorder's own UI.
+RECORDER_UI_MARKER = "[recorder_ui=true]"
+
 
 @dataclass(frozen=True)
 class IndicatorCallbacks:
@@ -42,7 +46,7 @@ class NullRecordingIndicator:
 class TkRecordingIndicator:
     """Small always-on-top recorder UI running on its own Tk event loop."""
 
-    WINDOW_TITLE = "EDR-WD Recorder [recorder_ui=true]"
+    WINDOW_TITLE = f"EDR-WD Recorder {RECORDER_UI_MARKER}"
 
     def __init__(
         self,
