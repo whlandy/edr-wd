@@ -590,9 +590,9 @@ def _transition(kind, monotonic_ms, *, process="EDRClient.exe", title="策略详
     )
 
 
-def _click_then_transition(packet, *, transition_window_ms=3000):
+def _click_then_transition(packet, *, transition_attribution_ms=120_000):
     correlator = WindowsUIACorrelator(
-        _Resolver(), double_click_ms=650, transition_window_ms=transition_window_ms,
+        _Resolver(), double_click_ms=650, transition_attribution_ms=transition_attribution_ms,
     )
     click = correlator.correlate(_packet(monotonic_ms=100), SCOPE, 1)
     return correlator, click, correlator.correlate(packet, SCOPE, 2)
@@ -620,11 +620,39 @@ def test_a_window_transition_no_recent_action_explains_is_not_recorded():
     assert correlator.correlate(_transition("opened", 700), SCOPE, 1) is None
 
 
-def test_a_window_transition_outside_the_correlation_window_is_not_recorded():
+def test_a_slow_window_is_still_attributed_to_the_action_that_opened_it():
+    """An application's main UI can take many seconds to appear.
+
+    A fixed stopwatch discarded exactly the transitions worth asserting. What
+    ends an action's claim is the user doing something else, not elapsed time.
+    """
+    _, click, event = _click_then_transition(_transition("opened", 9000))
+
+    assert event is not None
+    assert event.causal_id == click.causal_id
+    # The wait replay performs grows with what the recording measured.
+    assert event.input["timeoutSeconds"] == 26.7
+
+
+def test_a_transition_beyond_the_attribution_bound_is_recorded_without_a_cause():
+    """Never silently dropped: an unbound transition stays visible."""
     _, _, event = _click_then_transition(
-        _transition("opened", 9000), transition_window_ms=3000,
+        _transition("opened", 500_000), transition_attribution_ms=120_000,
     )
-    assert event is None
+
+    assert event is not None
+    assert event.causal_id is None
+    assert "timeoutSeconds" not in event.input
+
+
+def test_a_later_action_takes_over_the_claim():
+    correlator = WindowsUIACorrelator(_Resolver(), transition_attribution_ms=120_000)
+    first = correlator.correlate(_packet(monotonic_ms=100), SCOPE, 1)
+    second = correlator.correlate(_packet(monotonic_ms=5000), SCOPE, 2)
+    event = correlator.correlate(_transition("opened", 9000), SCOPE, 3)
+
+    assert event.causal_id == second.causal_id
+    assert event.causal_id != first.causal_id
 
 
 def test_a_transition_belonging_to_another_process_is_not_recorded():
@@ -1622,7 +1650,7 @@ def test_a_window_that_opened_long_before_is_not_blamed_on_a_later_action():
     """
     resolver = _log_center_resolver()
     correlator = WindowsUIACorrelator(
-        resolver, transition_window_ms=3000,
+        resolver, transition_attribution_ms=120_000,
     )
     correlator.seed_scope(SCOPE)
 

@@ -88,11 +88,36 @@ def _cached_protected_controls(backend: Any) -> list | None:
         except Exception:
             pass  # a backend that refuses attributes simply gets no caching
 
+    def _dump():
+        return backend.dump_tree(max_depth=15)
+
+    def _dump_after_reconnect():
+        """One re-resolve before giving up on the window.
+
+        A stale wrapper fails every call identically, and the failure is
+        cached — so an application replacing its own top-level window turned
+        one bad moment into every remaining step losing its evidence: a live
+        capture lost nine of ten. Reconnecting costs one call.
+        """
+        reconnect = getattr(backend, "reconnect_locked_window", None)
+        if not callable(reconnect):
+            return None
+        try:
+            if not (reconnect() or {}).get("ok"):
+                return None
+            return _dump()
+        except Exception:
+            return None
+
     try:
-        result = backend.dump_tree(max_depth=15)
+        result = _dump()
     except Exception:
-        _remember({"failed": True})
-        raise
+        result = _dump_after_reconnect()
+        if result is None:
+            _remember({"failed": True})
+            raise
+    if not isinstance(result, Mapping) or not result.get("ok"):
+        result = _dump_after_reconnect()
     if not isinstance(result, Mapping) or not result.get("ok"):
         _remember({"failed": True})
         raise ValueError("protected-control enumeration failed")

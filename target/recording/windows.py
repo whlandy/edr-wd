@@ -406,7 +406,8 @@ class WindowsUIACorrelator:
         *,
         double_click_ms: int | None = None,
         drag_threshold: tuple[int, int] | None = None,
-        transition_window_ms: int = 3000,
+        transition_attribution_ms: int = 120_000,
+        transition_lookback_ms: int = 3000,
         scroll_gesture_ms: int = 500,
     ) -> None:
         self._resolver = resolver or WindowsUIAResolver()
@@ -464,9 +465,16 @@ class WindowsUIACorrelator:
         self._windows_awaiting_cause: list[tuple[int, dict[str, object]]] = []
         # Input that belonged to some other application entirely.
         self.foreign_app_events = 0
-        if transition_window_ms < 0:
-            raise ValueError("transition_window_ms must be non-negative")
-        self._transition_window_ms = transition_window_ms
+        if transition_attribution_ms < 0:
+            raise ValueError("transition_attribution_ms must be non-negative")
+        if transition_lookback_ms < 0:
+            raise ValueError("transition_lookback_ms must be non-negative")
+        # Forward: the action already happened and we are waiting for its
+        # effect, so only another action ends its claim. Backward: the window
+        # already existed, and blaming it on whatever the user did next is a
+        # guess that has to stay tightly bounded.
+        self._transition_attribution_ms = transition_attribution_ms
+        self._transition_lookback_ms = transition_lookback_ms
         self._drag_threshold = drag_threshold if drag_threshold is not None else self._system_drag_threshold()
         if (
             not isinstance(self._drag_threshold, tuple) or len(self._drag_threshold) != 2
@@ -841,18 +849,20 @@ class WindowsUIACorrelator:
     def _claim_windows_awaiting_cause(self, event: RawCaptureEvent) -> None:
         """Attribute windows that appeared just before this action to it.
 
-        Only windows that appeared within the same causal window the backward
-        search uses; anything older opened for its own reasons and must stay
-        unattributed rather than be blamed on whatever the user did next.
+        This direction stays tightly bounded: the window already existed when
+        the action happened, so attributing it to that action is a guess, and
+        an old window must stay unattributed rather than be blamed on whatever
+        the user did next. The forward direction is the opposite case and is
+        bounded by the next action instead.
         """
         if not self._windows_awaiting_cause:
             return
         remaining = []
         for appeared_ms, entry in self._windows_awaiting_cause:
             gap = event.monotonic_ms - appeared_ms
-            if 0 <= gap <= self._transition_window_ms and entry.get("openedBy") is None:
+            if 0 <= gap <= self._transition_lookback_ms and entry.get("openedBy") is None:
                 entry["openedBy"] = event.causal_id
-            elif gap < 0 or gap <= self._transition_window_ms:
+            elif gap < 0 or gap <= self._transition_lookback_ms:
                 remaining.append((appeared_ms, entry))
         self._windows_awaiting_cause = remaining
 
@@ -971,6 +981,38 @@ class WindowsUIACorrelator:
             causal_id=str(pending["causal_id"]),
         )
 
+    def _unbound_transition(
+        self,
+        packet: HookPacket,
+        scope: CaptureScope,
+        sequence: int,
+        kind: str,
+        process_name: object,
+        title: object,
+    ) -> RawCaptureEvent:
+        """Record a transition no action plausibly explains, without a cause.
+
+        Dropping it would repeat the mistake this whole area keeps making:
+        something the recorder saw disappears with no trace. The compiler turns
+        an unbound transition into a visible incomplete step instead.
+        """
+        event_input: dict[str, object] = {
+            "kind": kind,
+            "processName": str(process_name or scope.process_name),
+        }
+        if isinstance(title, str) and title:
+            event_input["title"] = title
+        return RawCaptureEvent(
+            sequence=sequence,
+            wall_time=packet.wall_time,
+            monotonic_ms=packet.monotonic_ms,
+            type="window_transition",
+            scope=scope,
+            input=event_input,
+            evidence={"foregroundPid": packet.native.get("pid")},
+            causal_id=None,
+        )
+
     def _window_transition(
         self,
         packet: HookPacket,
@@ -1030,14 +1072,26 @@ class WindowsUIACorrelator:
         if self._last_action_causal_id is None or self._last_action_ms is None:
             return None
         latency_ms = packet.monotonic_ms - self._last_action_ms
-        if not 0 <= latency_ms <= self._transition_window_ms:
+        # What breaks causality is the user doing something else, not a
+        # stopwatch. A fixed window silently discarded any window slower than
+        # it — and an application's main UI can take many seconds to appear,
+        # so the recording lost exactly the transitions worth asserting. The
+        # last action stands as the cause until another action replaces it;
+        # the elapsed time becomes evidence that sizes the replay wait rather
+        # than a gate that drops the event.
+        if latency_ms < 0:
             return None
+        if latency_ms > self._transition_attribution_ms:
+            # Far enough out that attributing it to that action would be a
+            # guess. Still recorded, without a cause, so the compiler surfaces
+            # it as an unbound transition instead of it vanishing.
+            return self._unbound_transition(packet, scope, sequence, kind, process_name, title)
         event_input: dict[str, object] = {
             "kind": kind,
             "processName": str(process_name or scope.process_name),
             # Replay waits proportionally to what the recording actually
             # observed, never on a fixed sleep.
-            "timeoutSeconds": min(30.0, max(5.0, round(latency_ms * 3 / 1000, 1))),
+            "timeoutSeconds": min(60.0, max(5.0, round(latency_ms * 3 / 1000, 1))),
         }
         if isinstance(title, str) and title:
             event_input["title"] = title

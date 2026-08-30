@@ -502,3 +502,80 @@ def test_a_different_window_is_enumerated_again():
     _cached_protected_controls(backend)
 
     assert backend.calls == 2
+
+
+# ── a replaced window must not cost the rest of the recording ────────────────
+
+
+class _StaleThenFresh:
+    """A backend whose window wrapper goes stale until it reconnects.
+
+    HiSec replaces its own top-level window mid-recording; every UIA call on
+    the old wrapper then fails identically.
+    """
+
+    COM_ERROR = "(-2147220991, '事件无法调用任何订户', (None, None, None, 0, None))"
+
+    def __init__(self, *, reconnects=True):
+        self.connected = False
+        self.dump_calls = 0
+        self.reconnects = reconnects
+        self.reconnect_calls = 0
+        self._edr_protected_cache = None
+
+    def dump_tree(self, max_depth=15):
+        self.dump_calls += 1
+        if not self.connected:
+            raise OSError(self.COM_ERROR)
+        return {"ok": True, "controls": []}
+
+    def reconnect_locked_window(self):
+        self.reconnect_calls += 1
+        if not self.reconnects:
+            return {"ok": False, "error": "no window lock to reconnect from"}
+        self.connected = True
+        return {"ok": True}
+
+    def list_windows(self):
+        return {"ok": True, "windows": []}
+
+
+def test_a_stale_window_is_reconnected_instead_of_failing_the_step():
+    from target.recording.evidence import protected_rectangles
+
+    backend = _StaleThenFresh()
+
+    assert protected_rectangles(backend) == []
+    assert backend.reconnect_calls == 1
+    assert backend.dump_calls == 2  # the failure, then the retry
+
+
+def test_a_reconnect_that_cannot_help_still_fails_closed():
+    """The original cause is preserved rather than replaced by a generic one."""
+    from target.recording.evidence import protected_rectangles
+
+    backend = _StaleThenFresh(reconnects=False)
+
+    with pytest.raises(OSError, match="事件无法调用任何订户"):
+        protected_rectangles(backend)
+    assert backend.reconnect_calls == 1
+
+
+def test_the_failure_is_only_cached_once_the_reconnect_has_been_tried():
+    """Caching before retrying is what turned one bad moment into nine."""
+    from target.recording.evidence import protected_rectangles
+
+    backend = _StaleThenFresh()
+    protected_rectangles(backend)
+
+    assert backend._edr_protected_cache.get("failed") is not True
+
+
+def test_a_backend_without_reconnect_support_is_unaffected():
+    from target.recording.evidence import protected_rectangles
+
+    class _Old(_StaleThenFresh):
+        reconnect_locked_window = None
+
+    with pytest.raises(Exception):
+        protected_rectangles(_Old())
