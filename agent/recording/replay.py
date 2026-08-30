@@ -398,7 +398,7 @@ class GoldenStepMaterializer:
         trace_store: TraceStore | None = None,
         trace_case_id: str | None = None,
         evidence_recorder: "ReplayEvidenceRecorder | None" = None,
-        window_focus: "Callable[[str, str], Any] | None" = None,
+        window_focus: "Callable[[str, str, str], Any] | None" = None,
     ) -> None:
         if replay_mode not in {"semantic_only", "semantic_first", "visual_only"}:
             raise RecordingModelError(
@@ -420,7 +420,7 @@ class GoldenStepMaterializer:
         self.trace_case_id = trace_case_id
         self._evidence_recorder = evidence_recorder
         self._window_focus = window_focus
-        self._focused_window: tuple[str, str] | None = None
+        self._focused_window: tuple[str, str, str] | None = None
 
     def _focus_for(self, selector: ReplaySelector | None, observation: Any) -> Any:
         """Bring the step's own window forward, observing it afresh."""
@@ -428,12 +428,16 @@ class GoldenStepMaterializer:
             return observation
         process = str(selector.window.get("processName") or "")
         title_regex = str(selector.window.get("titleRegex") or "")
-        if not process or not title_regex:
+        # The window root is the identity that survives the application
+        # replacing a window, renaming it, or two of its processes sharing a
+        # title; the title alone cannot tell those windows apart.
+        root = str(selector.window.get("rootAutomationId") or "")
+        if not process or not (title_regex or root):
             return observation
-        wanted = (process, title_regex)
+        wanted = (process, title_regex, root)
         if wanted == self._focused_window:
             return observation
-        refreshed = self._window_focus(process, title_regex)
+        refreshed = self._window_focus(process, title_regex, root)
         self._focused_window = wanted
         return refreshed if refreshed is not None else observation
 
@@ -591,7 +595,7 @@ class ReplayRuntime:
     replay_mode: str = "semantic_only"
     visual_resolver: SafeVisualResolver | None = None
     #: Focus the window a step belongs to and return a fresh observation of it.
-    window_focus: Callable[[str, str], Any] | None = None
+    window_focus: Callable[[str, str, str], Any] | None = None
     #: Persist source-redacted runtime frames into the trace's screenshots
     #: directory.  Requires a trace store; frames that the target did not
     #: redact are refused rather than written.

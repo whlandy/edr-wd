@@ -26,6 +26,38 @@ ACTION_EVENT_TYPES = frozenset({
 VERIFIER_REQUIRED_EVENT_TYPES = frozenset({"scroll_commit", "drag_commit"})
 
 
+def window_root_identity(target: "ObservedTarget | None") -> str | None:
+    """Name the window a control belongs to, from the control itself.
+
+    Titles are the least stable identity this recorder can key on: two HiSec
+    processes both title a window `logo1`, and one alternates between `logo1`
+    and `HiSecEndpointAgent` while it runs. Handles change when a window is
+    replaced and pids change on restart. A hierarchical automation id does not
+    — `EdrMainWindow.baseWidget...` names its own window in the first
+    component — and every hit-tested control already carries it.
+
+    A bare id such as `btnApply` names no window: taking it would invent an
+    identity per control in applications that do not use paths.
+    """
+    if target is None:
+        return None
+
+    def _root(automation_id: object) -> str | None:
+        text = str(automation_id or "")
+        if "." not in text:
+            return None
+        return text.split(".", 1)[0] or None
+
+    root = _root(getattr(target, "automation_id", None))
+    if root:
+        return root
+    for ancestor in reversed(tuple(getattr(target, "ancestry", ()) or ())):
+        root = _root(ancestor.get("automationId") if isinstance(ancestor, Mapping) else None)
+        if root:
+            return root
+    return None
+
+
 class RecordingModelError(ValueError):
     """Stable validation failure for recording wire data."""
 
@@ -107,7 +139,10 @@ def _validate_evidence(value: Mapping[str, Any]) -> None:
         # replay time gets a different handle — so it is diagnostic evidence
         # of which physical window produced the step, never a replay
         # selector field.
-        fields = _strict(window, {"title", "processName", "handle"}, "event.evidence.window")
+        fields = _strict(
+            window, {"title", "processName", "handle", "rootAutomationId"},
+            "event.evidence.window",
+        )
         for key in ("title", "processName"):
             if key in fields and not isinstance(fields[key], str):
                 raise RecordingModelError(

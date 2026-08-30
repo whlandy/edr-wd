@@ -21,6 +21,7 @@ from typing import Callable, Mapping
 
 from .models import (
     ACTION_EVENT_TYPES,
+    window_root_identity,
     CaptureScope,
     ObservedTarget,
     RawCaptureEvent,
@@ -1200,7 +1201,11 @@ class WindowsUIACorrelator:
         )
 
     @staticmethod
-    def _with_window(event: RawCaptureEvent, window: Mapping[str, object]) -> RawCaptureEvent:
+    def _window_root(event: RawCaptureEvent) -> str | None:
+        return window_root_identity(event.observed_target)
+
+    @classmethod
+    def _with_window(cls, event: RawCaptureEvent, window: Mapping[str, object]) -> RawCaptureEvent:
         """Stamp the event with the window it happened in."""
         title = window.get("windowTitle")
         if not isinstance(title, str) or not title:
@@ -1217,6 +1222,9 @@ class WindowsUIACorrelator:
         handle = window.get("handle")
         if isinstance(handle, int):
             stamp["handle"] = handle
+        root = cls._window_root(event)
+        if root:
+            stamp["rootAutomationId"] = root
         evidence["window"] = stamp
         return dataclasses.replace(event, evidence=evidence)
 

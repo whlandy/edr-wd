@@ -5,7 +5,11 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
-from target.recording.models import ObservedTarget, RawCaptureEvent
+from target.recording.models import (
+    ObservedTarget,
+    RawCaptureEvent,
+    window_root_identity,
+)
 
 from .models import ReplaySelector
 
@@ -20,10 +24,21 @@ def _window(event: RawCaptureEvent) -> dict[str, Any]:
     recorded = event.evidence.get("window") if isinstance(event.evidence, Mapping) else None
     title = (recorded or {}).get("title")
     process = (recorded or {}).get("processName") or event.scope.process_name
-    return {
+    window = {
         "processName": process,
         "titleRegex": f"^{re.escape(title)}$" if title else event.scope.window_title,
     }
+    # The title is the weakest identity this application offers: two of its
+    # processes both title a window `logo1`, and one alternates between two
+    # titles while running. The control tree's root names the window and does
+    # not move, so replay matches on that and keeps the title as a fallback
+    # for windows that expose no hierarchical identity.
+    root = (recorded or {}).get("rootAutomationId") or window_root_identity(
+        event.observed_target
+    )
+    if root:
+        window["rootAutomationId"] = str(root)
+    return window
 
 
 def _control(identity: Mapping[str, Any]) -> dict[str, Any] | None:

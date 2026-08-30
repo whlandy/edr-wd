@@ -94,7 +94,7 @@ class ReplaySelector:
     def __post_init__(self) -> None:
         if not isinstance(self.window, Mapping) or not isinstance(self.control, Mapping):
             raise RecordingModelError("type_error", "selector window/control must be objects", path="selector")
-        allowed_window = {"processName", "titleRegex", "bundleId"}
+        allowed_window = {"processName", "titleRegex", "bundleId", "rootAutomationId"}
         allowed_control = {
             "automationId", "identifier", "controlType", "name", "ancestry",
             "anchor", "fingerprint",
