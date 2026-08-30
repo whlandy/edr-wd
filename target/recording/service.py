@@ -91,6 +91,13 @@ class RecordingService:
             # An empty list next to a busy application is the visible symptom
             # of input being silently refused as out of scope.
             "seededScope": list(getattr(source, "seeded_scope", ()) or ()),
+            # Which processes count as this application. An empty list beside
+            # a multi-process product is the visible symptom of a flow that
+            # crosses into a sibling process being refused.
+            "scopeProcessNames": list(
+                getattr(getattr(source, "_correlator", None), "scope_process_names", ())
+                or ()
+            ),
             "seededScopeError": getattr(
                 getattr(source, "_correlator", None), "scope_seed_error", None,
             ),

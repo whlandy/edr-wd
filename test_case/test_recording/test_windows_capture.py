@@ -1664,3 +1664,89 @@ def test_a_window_that_opened_long_before_is_not_blamed_on_a_later_action():
 
     entry = next(w for w in correlator.window_registry if w["title"] == "弹窗")
     assert entry["openedBy"] is None
+
+
+# ── an application is not one process ────────────────────────────────────────
+
+
+HISEC_CLIENT = r"C:\Program Files\HiSec-Endpoint\core\EDRClient.exe"
+HISEC_AGENT = r"C:\Program Files\HiSec-Endpoint\core\safra\HiSecEndpointAgent.exe"
+
+
+def _install_root(path):
+    from target.recording.windows import WindowsUIAResolver
+
+    return WindowsUIAResolver._install_root(path)
+
+
+def test_two_executables_of_one_product_share_an_install_root(monkeypatch):
+    """HiSec's flow crosses from its agent to its client mid-recording."""
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+
+    assert _install_root(HISEC_CLIENT) == r"C:\Program Files\HiSec-Endpoint"
+    assert _install_root(HISEC_AGENT) == r"C:\Program Files\HiSec-Endpoint"
+
+
+def test_a_different_product_does_not_share_that_root(monkeypatch):
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+
+    other = _install_root(r"C:\Program Files\Notepad++\notepad++.exe")
+
+    assert other == r"C:\Program Files\Notepad++"
+    assert other != _install_root(HISEC_CLIENT)
+
+
+def test_an_executable_outside_a_program_root_falls_back_to_its_directory(monkeypatch):
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+
+    assert _install_root(r"D:\tools\probe.exe") == r"D:\tools"
+
+
+class _Proc:
+    def __init__(self, name, exe):
+        self.info = {"name": name, "exe": exe}
+
+
+def _psutil_with(processes, monkeypatch):
+    import sys
+    import types
+
+    stub = types.ModuleType("psutil")
+    stub.process_iter = lambda attrs=None: iter(processes)
+    monkeypatch.setitem(sys.modules, "psutil", stub)
+
+
+def test_the_scope_admits_the_sibling_process_of_the_same_product(monkeypatch):
+    from target.recording.windows import WindowsUIAResolver
+
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+    _psutil_with([
+        _Proc("EDRClient.exe", HISEC_CLIENT),
+        _Proc("HiSecEndpointAgent.exe", HISEC_AGENT),
+        _Proc("notepad.exe", r"C:\Windows\System32\notepad.exe"),
+    ], monkeypatch)
+
+    names = WindowsUIAResolver().application_process_names("EDRClient.exe")
+
+    assert names == ["edrclient", "hisecendpointagent"]
+    assert "notepad" not in names
+
+
+def test_an_unresolvable_application_keeps_single_process_behaviour(monkeypatch):
+    from target.recording.windows import WindowsUIAResolver
+
+    _psutil_with([], monkeypatch)
+
+    assert WindowsUIAResolver().application_process_names("EDRClient.exe") == []
+
+
+def test_input_from_the_sibling_process_is_admitted_once_seeded():
+    """The click that opens the security centre happens in the agent."""
+    correlator = WindowsUIACorrelator(_Resolver(process="HiSecEndpointAgent.exe"))
+    correlator._scope_process_names = {"edrclient", "hisecendpointagent"}
+
+    admitted = correlator._process_in_scope("HiSecEndpointAgent.exe", SCOPE)
+    refused = correlator._process_in_scope("notepad.exe", SCOPE)
+
+    assert admitted is True
+    assert refused is False

@@ -331,6 +331,99 @@ class WindowsUIAResolver:
             "_nativeElement": wrapper,
         }
 
+    #: Directories applications are installed into. An executable's first
+    #: directory beneath one of these is the application, the way a `.app`
+    #: bundle is on macOS.
+    _PROGRAM_ROOT_VARS = (
+        "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData",
+    )
+
+    @classmethod
+    def _install_root(cls, executable: str) -> str | None:
+        """The directory that holds one application, given one of its exes."""
+        import os as _os
+        from pathlib import PureWindowsPath
+
+        path = PureWindowsPath(executable)
+        roots = [
+            _os.environ.get(name) for name in cls._PROGRAM_ROOT_VARS
+        ]
+        roots.append(
+            str(PureWindowsPath(_os.environ.get("LOCALAPPDATA", ""), "Programs"))
+            if _os.environ.get("LOCALAPPDATA") else None
+        )
+        lowered = str(path).lower()
+        best = None
+        for root in roots:
+            if not root:
+                continue
+            prefix = root.rstrip("\\/").lower() + "\\"
+            if not lowered.startswith(prefix):
+                continue
+            remainder = str(path)[len(prefix):].split("\\")
+            if not remainder or not remainder[0]:
+                continue
+            candidate = str(PureWindowsPath(root, remainder[0]))
+            # Prefer the deepest matching root: Program Files (x86) is not a
+            # subdirectory of Program Files, but LOCALAPPDATA\Programs is a
+            # subdirectory of LOCALAPPDATA-derived roots on some layouts.
+            if best is None or len(candidate) > len(best):
+                best = candidate
+        if best is not None:
+            return best
+        parent = path.parent
+        return str(parent) if str(parent) not in ("", ".") else None
+
+    def application_process_names(self, process_name: str) -> list[str]:
+        """Process names belonging to the same application as `process_name`.
+
+        A Windows application is not one process. HiSec installs its agent and
+        its client as separate executables under one installation directory,
+        and its primary flow crosses from one to the other: the agent's window
+        opens the security centre, which is a different process. Scoping a
+        recording to a single process name drops everything the user does
+        after that crossing, while the installation directory keeps unrelated
+        applications out — the same boundary the macOS side draws with a
+        bundle.
+
+        Returns an empty list when the application cannot be resolved, leaving
+        the caller with single-process behaviour rather than a wider scope
+        chosen by accident.
+        """
+        try:
+            import psutil
+        except Exception:
+            return []
+        expected = str(process_name or "").lower().removesuffix(".exe")
+        if not expected:
+            return []
+        root = None
+        for proc in psutil.process_iter(["name", "exe"]):
+            try:
+                name = str(proc.info.get("name") or "").lower().removesuffix(".exe")
+                if name != expected:
+                    continue
+                executable = str(proc.info.get("exe") or "")
+                if executable:
+                    root = self._install_root(executable)
+                    if root:
+                        break
+            except Exception:
+                continue
+        if not root:
+            return []
+        prefix = root.rstrip("\\/").lower() + "\\"
+        names: set[str] = set()
+        for proc in psutil.process_iter(["name", "exe"]):
+            try:
+                executable = str(proc.info.get("exe") or "")
+                if executable and executable.lower().startswith(prefix):
+                    names.add(str(proc.info.get("name") or "").lower().removesuffix(".exe"))
+            except Exception:
+                continue
+        names.discard("")
+        return sorted(names)
+
     def windows(self) -> list[Mapping[str, object]]:  # pragma: no cover - Windows only
         """Top-level windows with their owning process, for scope seeding.
 
