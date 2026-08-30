@@ -489,11 +489,22 @@ def test_offline_compilation_writes_complete_rebuildable_artifact_set(tmp_path):
     recording = _recording(_event(1))
     result = compile_recording(recording, catalog_digest="sha256:catalog")
     artifacts = write_compilation_artifacts(tmp_path, recording, result)
-    assert {p.name for p in artifacts.directory.iterdir()} == {
+    expected = {
         "recording.json", "case.json", "golden-trace.json",
         "test_policy_flow.py", "conftest.py", "pytest.ini",
         "compile-report.json",
     }
+    # maa 节点表是附加产物：转换器在 edr-cloud-recorder 那边，本机没有就不写。
+    # 写死进集合的话，这条测试会在没装录制器的机器上红 —— 那是环境问题，
+    # 不是产物集合的问题。
+    from agent.recording.maa_export import recorder_home
+
+    if recorder_home() is not None:
+        expected.add("trace.json")
+    assert {p.name for p in artifacts.directory.iterdir()} == expected
+
+    report = json.loads(artifacts.compile_report.read_text())
+    assert report["maaExport"]["written"] is (recorder_home() is not None)
     loaded = GoldenTrace.from_dict(json.loads(artifacts.golden_trace.read_text()))
     assert loaded.to_dict() == result.golden.to_dict()
     ast.parse(artifacts.generated_test.read_text())

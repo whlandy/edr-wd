@@ -181,6 +181,18 @@ def _persist_capture_observations(
             persisted.add(capture_id)
 
 
+def _write_maa_nodes(directory: Path, result: CompilationResult) -> dict[str, object]:
+    """导出 maa 节点表。做不成不影响编译 —— 它是附加产物，不是必需品。"""
+    from agent.recording.maa_export import to_maa_nodes
+
+    trace, note = to_maa_nodes(json.loads(result.golden_json()))
+    if trace is None:
+        return {"written": False, "reason": note}
+    path = directory / "trace.json"
+    _atomic_text(path, canonical_json(trace))
+    return {"written": True, "path": path.name, "nodes": len(trace) - 1}
+
+
 def write_compilation_artifacts(
     output_root: str | Path,
     recording: RawRecording,
@@ -206,10 +218,14 @@ def write_compilation_artifacts(
     _atomic_text(artifacts.recording, canonical_json(recording.to_dict()))
     _atomic_text(artifacts.case, result.case_json())
     _atomic_text(artifacts.golden_trace, result.golden_json())
+    # 顺手导出 maa-fw 的节点表。靠人记得跑一条命令是不行的 —— 忘了不会报错，
+    # 只会变成「maa-fw 那边加载了什么都不做」，两边都看不出来。
+    maa_note = _write_maa_nodes(directory, result)
     _atomic_text(artifacts.generated_test, render_pytest(recording.name))
     _atomic_text(artifacts.conftest, render_conftest())
     _atomic_text(artifacts.pytest_ini, render_pytest_ini())
     report = result.report_dict()
     report["artifactIssues"] = [dict(issue) for issue in artifact_issues]
+    report["maaExport"] = maa_note
     _atomic_text(artifacts.compile_report, canonical_json(report))
     return artifacts
