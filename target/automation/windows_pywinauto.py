@@ -1035,6 +1035,9 @@ class WindowsPywinautoBackend:
     def dump_tree(self, window_title_re: Optional[str] = None, max_depth: int = 10) -> dict:
         return self._gui.dump_tree(window_title_re, max_depth=max_depth)  # type: ignore[arg-type]
 
+    def dump_tree_for_window(self, handle: int, max_depth: int = 12) -> dict:
+        return self._gui.dump_tree_for_window(handle, max_depth=max_depth)
+
     def find_control(
         self,
         text: Optional[str] = None,

@@ -96,6 +96,7 @@ class QueuedCaptureSource:
         correlator: PacketCorrelator,
         queue_size: int = 2048,
         stop_timeout: float = 30.0,
+        inventory: object | None = None,
     ) -> None:
         if queue_size < 1:
             raise ValueError("queue_size must be positive")
@@ -112,6 +113,10 @@ class QueuedCaptureSource:
         self._started = False
         self._stop_timeout = stop_timeout
         self._sequence = 0
+        # Whole-window control capture. It runs on its own thread precisely so
+        # that a tree walk never delays correlation, but its lifetime is this
+        # source's: it must not outlive the hooks that drive it.
+        self._inventory = inventory
         self.dropped_packets = 0
         self.correlation_errors: list[str] = []
         self.last_observed_target = None
@@ -138,6 +143,13 @@ class QueuedCaptureSource:
                         self.last_observed_target = event.observed_target
         except Exception as exc:
             self.correlation_errors.append(str(exc))
+
+    @property
+    def control_snapshots(self) -> tuple[Mapping[str, object], ...]:
+        """Complete control trees captured for the windows this flow visited."""
+        if self._inventory is None:
+            return ()
+        return tuple(getattr(self._inventory, "snapshots", ()) or ())
 
     @property
     def out_of_scope_events(self) -> int:
@@ -221,6 +233,10 @@ class QueuedCaptureSource:
                 self.seeded_scope = tuple(seed(self.scope) or ())
             except Exception as exc:
                 self.correlation_errors.append(str(exc))
+        if self._inventory is not None:
+            # Started after seeding, so the walks the seed queued for windows
+            # that were already open are the first thing it does.
+            self._inventory.start()
         self._started = True
         self._stop_requested.clear()
         self._flushed = False
@@ -277,3 +293,12 @@ class QueuedCaptureSource:
                         f"{self._stop_timeout:g}s; recording truncated"
                     )
                 self._started = False
+        if self._inventory is not None:
+            # Last, and never before the correlator has drained: the final
+            # walk it queues is the page the user ended on, which is the one a
+            # generated trace most needs and the one whose debounce has not
+            # expired.
+            try:
+                self._inventory.stop()
+            except Exception as exc:
+                self.correlation_errors.append(f"control inventory stop: {exc}")
