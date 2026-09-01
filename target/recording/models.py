@@ -26,6 +26,38 @@ ACTION_EVENT_TYPES = frozenset({
 VERIFIER_REQUIRED_EVENT_TYPES = frozenset({"scroll_commit", "drag_commit"})
 
 
+def window_root_identity(target: "ObservedTarget | None") -> str | None:
+    """Name the window a control belongs to, from the control itself.
+
+    Titles are the least stable identity this recorder can key on: two HiSec
+    processes both title a window `logo1`, and one alternates between `logo1`
+    and `HiSecEndpointAgent` while it runs. Handles change when a window is
+    replaced and pids change on restart. A hierarchical automation id does not
+    — `EdrMainWindow.baseWidget...` names its own window in the first
+    component — and every hit-tested control already carries it.
+
+    A bare id such as `btnApply` names no window: taking it would invent an
+    identity per control in applications that do not use paths.
+    """
+    if target is None:
+        return None
+
+    def _root(automation_id: object) -> str | None:
+        text = str(automation_id or "")
+        if "." not in text:
+            return None
+        return text.split(".", 1)[0] or None
+
+    root = _root(getattr(target, "automation_id", None))
+    if root:
+        return root
+    for ancestor in reversed(tuple(getattr(target, "ancestry", ()) or ())):
+        root = _root(ancestor.get("automationId") if isinstance(ancestor, Mapping) else None)
+        if root:
+            return root
+    return None
+
+
 class RecordingModelError(ValueError):
     """Stable validation failure for recording wire data."""
 
@@ -92,10 +124,19 @@ def _validate_evidence(value: Mapping[str, Any]) -> None:
         value,
         {
             "foregroundPid", "doubleClickIntervalMs", "beforeCapture",
-            "capture", "captureError", "window",
+            "capture", "captureError", "window", "handle",
         },
         "event.evidence",
     )
+    # A window event names the window it reports, and that name is what joins
+    # the transition to the control inventory captured for the same window.
+    # Session-local, like `window.handle`, and diagnostic for the same reason.
+    handle = data.get("handle")
+    if handle is not None and (not isinstance(handle, int) or isinstance(handle, bool)):
+        raise RecordingModelError(
+            "type_error", "evidence.handle must be an integer",
+            path="event.evidence.handle",
+        )
     window = data.get("window")
     if window is not None:
         # Which window the event happened in. A recorded flow moves between an
@@ -107,7 +148,10 @@ def _validate_evidence(value: Mapping[str, Any]) -> None:
         # replay time gets a different handle — so it is diagnostic evidence
         # of which physical window produced the step, never a replay
         # selector field.
-        fields = _strict(window, {"title", "processName", "handle"}, "event.evidence.window")
+        fields = _strict(
+            window, {"title", "processName", "handle", "rootAutomationId"},
+            "event.evidence.window",
+        )
         for key in ("title", "processName"):
             if key in fields and not isinstance(fields[key], str):
                 raise RecordingModelError(
@@ -430,6 +474,17 @@ class RawRecording:
     # unavailable: an application that does not expose its accessibility tree
     # yields anonymous controls, but the page structure is still recorded.
     windows: tuple[Mapping[str, Any], ...] = ()
+    # Complete control trees for the windows the flow visited, in capture
+    # order. Events name the one control the user acted on, which is enough to
+    # replay a step and not enough to *generate* one: a MAA node table or a
+    # pytest script written from this recording can only refer to controls the
+    # recording knows exist. Deduplicated by content, so a window walked twice
+    # without changing appears once and earlier steps still resolve to it.
+    control_snapshots: tuple[Mapping[str, Any], ...] = ()
+    # Input this capture saw and did not record, with the window it resolved
+    # to. The counts in captureDiagnostics say a recording was short; only
+    # these say whether the recorder misjudged which window the user was in.
+    rejections: tuple[Mapping[str, Any], ...] = ()
     schema: str = RAW_RECORDING_SCHEMA
 
     def __post_init__(self) -> None:
@@ -482,6 +537,43 @@ class RawRecording:
                         "type_error", f"{path}.{key} must be a string",
                         path=f"{path}.{key}",
                     )
+        for index, snapshot in enumerate(self.control_snapshots):
+            path = f"recording.controlSnapshots[{index}]"
+            fields = _strict(
+                snapshot,
+                {
+                    "snapshotId", "capturedAtMs", "reason", "durationMs",
+                    "window", "contentHash", "controlCount", "controls",
+                },
+                path,
+            )
+            _text(fields.get("snapshotId"), f"{path}.snapshotId")
+            _text(fields.get("contentHash"), f"{path}.contentHash")
+            if not isinstance(fields.get("controls"), (list, tuple)):
+                raise RecordingModelError(
+                    "type_error", f"{path}.controls must be an array",
+                    path=f"{path}.controls",
+                )
+            if not isinstance(fields.get("window"), Mapping):
+                raise RecordingModelError(
+                    "type_error", f"{path}.window must be an object",
+                    path=f"{path}.window",
+                )
+        snapshot_ids = [
+            snapshot.get("snapshotId") for snapshot in self.control_snapshots
+        ]
+        if len(set(snapshot_ids)) != len(snapshot_ids):
+            raise RecordingModelError(
+                "sequence_invalid", "controlSnapshots ids must be unique",
+                path="recording.controlSnapshots",
+            )
+        for index, rejection in enumerate(self.rejections):
+            if not isinstance(rejection, Mapping):
+                raise RecordingModelError(
+                    "type_error", "rejections must contain objects",
+                    path=f"recording.rejections[{index}]",
+                )
+            _text(rejection.get("reason"), f"recording.rejections[{index}].reason")
         if not isinstance(self.events, (list, tuple)) or not all(
             isinstance(event, RawCaptureEvent) for event in self.events
         ):
@@ -502,7 +594,10 @@ class RawRecording:
     def from_dict(cls, data: Mapping[str, Any]) -> "RawRecording":
         d = _strict(
             data,
-            {"schema", "sessionId", "name", "events", "captureDiagnostics", "windows"},
+            {
+                "schema", "sessionId", "name", "events", "captureDiagnostics",
+                "windows", "controlSnapshots", "rejections",
+            },
             "recording",
         )
         if d.get("schema") != RAW_RECORDING_SCHEMA:
@@ -530,12 +625,26 @@ class RawRecording:
         # `schema` is keyword-passed: it is no longer the field right after
         # captureDiagnostics, and passing it positionally silently landed it
         # in `windows`.
+        raw_snapshots = d.get("controlSnapshots") or ()
+        if not isinstance(raw_snapshots, (list, tuple)):
+            raise RecordingModelError(
+                "type_error", "controlSnapshots must be an array",
+                path="recording.controlSnapshots",
+            )
+        raw_rejections = d.get("rejections") or ()
+        if not isinstance(raw_rejections, (list, tuple)):
+            raise RecordingModelError(
+                "type_error", "rejections must be an array",
+                path="recording.rejections",
+            )
         return cls(
             _text(d.get("sessionId"), "recording.sessionId"),
             _text(d.get("name"), "recording.name"),
             events,
             dict(diagnostics),
             windows=tuple(dict(w) for w in raw_windows),
+            control_snapshots=tuple(dict(x) for x in raw_snapshots),
+            rejections=tuple(dict(x) for x in raw_rejections),
             schema=d["schema"],
         )
 
@@ -546,5 +655,7 @@ class RawRecording:
             "name": self.name,
             "captureDiagnostics": dict(self.capture_diagnostics),
             "windows": [dict(w) for w in self.windows],
+            "controlSnapshots": [dict(x) for x in self.control_snapshots],
+            "rejections": [dict(x) for x in self.rejections],
             "events": [x.to_dict() for x in self.events],
         }

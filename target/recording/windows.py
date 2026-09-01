@@ -21,16 +21,32 @@ from typing import Callable, Mapping
 
 from .models import (
     ACTION_EVENT_TYPES,
+    window_root_identity,
     CaptureScope,
     ObservedTarget,
     RawCaptureEvent,
     RecordingModelError,
 )
+from .inventory import ControlInventory
 from .source import CompositeHookDriver, HookPacket, QueuedCaptureSource
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _transition_evidence(packet: "HookPacket") -> dict[str, object]:
+    """What a window event knows about the window it is reporting.
+
+    The handle is diagnostic, never a replay selector — it identifies a window
+    only within this one live session. It is kept because it is what joins a
+    transition to the control inventory captured for that same window.
+    """
+    evidence: dict[str, object] = {"foregroundPid": packet.native.get("pid")}
+    handle = packet.native.get("handle")
+    if isinstance(handle, int) and not isinstance(handle, bool):
+        evidence["handle"] = handle
+    return evidence
 
 
 class WindowsLowLevelHookDriver:
@@ -331,6 +347,136 @@ class WindowsUIAResolver:
             "_nativeElement": wrapper,
         }
 
+    #: Directories applications are installed into. An executable's first
+    #: directory beneath one of these is the application, the way a `.app`
+    #: bundle is on macOS.
+    _PROGRAM_ROOT_VARS = (
+        "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData",
+    )
+
+    @classmethod
+    def _install_root(cls, executable: str) -> str | None:
+        """The directory that holds one application, given one of its exes."""
+        import os as _os
+        from pathlib import PureWindowsPath
+
+        path = PureWindowsPath(executable)
+        roots = [
+            _os.environ.get(name) for name in cls._PROGRAM_ROOT_VARS
+        ]
+        roots.append(
+            str(PureWindowsPath(_os.environ.get("LOCALAPPDATA", ""), "Programs"))
+            if _os.environ.get("LOCALAPPDATA") else None
+        )
+        lowered = str(path).lower()
+        best = None
+        for root in roots:
+            if not root:
+                continue
+            prefix = root.rstrip("\\/").lower() + "\\"
+            if not lowered.startswith(prefix):
+                continue
+            remainder = str(path)[len(prefix):].split("\\")
+            if not remainder or not remainder[0]:
+                continue
+            candidate = str(PureWindowsPath(root, remainder[0]))
+            # Prefer the deepest matching root: Program Files (x86) is not a
+            # subdirectory of Program Files, but LOCALAPPDATA\Programs is a
+            # subdirectory of LOCALAPPDATA-derived roots on some layouts.
+            if best is None or len(candidate) > len(best):
+                best = candidate
+        if best is not None:
+            return best
+        parent = path.parent
+        return str(parent) if str(parent) not in ("", ".") else None
+
+    def application_root(self, process_name: str) -> str | None:
+        """The installation directory shared by one application's processes."""
+        try:
+            import psutil
+        except Exception:
+            return None
+        expected = str(process_name or "").lower().removesuffix(".exe")
+        if not expected:
+            return None
+        for proc in psutil.process_iter(["name", "exe"]):
+            try:
+                name = str(proc.info.get("name") or "").lower().removesuffix(".exe")
+                if name != expected:
+                    continue
+                executable = str(proc.info.get("exe") or "")
+                if executable:
+                    root = self._install_root(executable)
+                    if root:
+                        return root
+            except Exception:
+                continue
+        return None
+
+    def process_belongs_to_root(self, process_name: str, root: str) -> bool | None:
+        """Is a running process of this name installed under `root`?
+
+        Returns None when no process of that name is running, which is a
+        different answer from "no": a process the recording has not seen yet
+        must stay undecided rather than be rejected permanently.
+        """
+        try:
+            import psutil
+        except Exception:
+            return None
+        expected = str(process_name or "").lower().removesuffix(".exe")
+        if not expected or not root:
+            return None
+        prefix = root.rstrip("\\/").lower() + "\\"
+        seen = False
+        for proc in psutil.process_iter(["name", "exe"]):
+            try:
+                name = str(proc.info.get("name") or "").lower().removesuffix(".exe")
+                if name != expected:
+                    continue
+                seen = True
+                executable = str(proc.info.get("exe") or "")
+                if executable and executable.lower().startswith(prefix):
+                    return True
+            except Exception:
+                continue
+        return False if seen else None
+
+    def application_process_names(self, process_name: str) -> list[str]:
+        """Process names belonging to the same application as `process_name`.
+
+        A Windows application is not one process. HiSec installs its agent and
+        its client as separate executables under one installation directory,
+        and its primary flow crosses from one to the other: the agent's window
+        opens the security centre, which is a different process. Scoping a
+        recording to a single process name drops everything the user does
+        after that crossing, while the installation directory keeps unrelated
+        applications out — the same boundary the macOS side draws with a
+        bundle.
+
+        Returns an empty list when the application cannot be resolved, leaving
+        the caller with single-process behaviour rather than a wider scope
+        chosen by accident.
+        """
+        try:
+            import psutil
+        except Exception:
+            return []
+        root = self.application_root(process_name)
+        if not root:
+            return []
+        prefix = root.rstrip("\\/").lower() + "\\"
+        names: set[str] = set()
+        for proc in psutil.process_iter(["name", "exe"]):
+            try:
+                executable = str(proc.info.get("exe") or "")
+                if executable and executable.lower().startswith(prefix):
+                    names.add(str(proc.info.get("name") or "").lower().removesuffix(".exe"))
+            except Exception:
+                continue
+        names.discard("")
+        return sorted(names)
+
     def windows(self) -> list[Mapping[str, object]]:  # pragma: no cover - Windows only
         """Top-level windows with their owning process, for scope seeding.
 
@@ -369,12 +515,34 @@ class WindowsUIAResolver:
                     names[pid] = psutil.Process(pid).name()
                 except Exception:
                     names[pid] = ""
-            found.append({
+            entry: dict[str, object] = {
                 "title": str(window.get("title") or ""),
                 "pid": pid,
                 "processName": names[pid],
-            })
+            }
+            # The handle the enumeration already carries. Dropping it forced
+            # every already-open window to be tracked by title, which is the
+            # one identity this application changes underneath us.
+            handle = window.get("handle")
+            if isinstance(handle, int) and not isinstance(handle, bool):
+                entry["handle"] = handle
+            found.append(entry)
         return found
+
+    def control_tree(self, handle: int, max_depth: int = 12) -> Mapping[str, object] | None:
+        """The full control tree of one window, addressed by handle.
+
+        Deliberately does not go through connect/lock: this runs while the
+        user is recording, and taking the backend's connection or raising the
+        window would change the very flow being captured.
+        """
+        if self._backend is None:
+            return None
+        dump = getattr(self._backend, "dump_tree_for_window", None)
+        if not callable(dump):
+            return None
+        result = dump(int(handle), max_depth=max_depth)
+        return result if isinstance(result, Mapping) else None
 
     def element_at(self, x: int, y: int) -> Mapping[str, object] | None:  # pragma: no cover - Windows only
         from pywinauto import Desktop
@@ -406,10 +574,16 @@ class WindowsUIACorrelator:
         *,
         double_click_ms: int | None = None,
         drag_threshold: tuple[int, int] | None = None,
-        transition_window_ms: int = 3000,
+        transition_attribution_ms: int = 120_000,
+        transition_lookback_ms: int = 3000,
         scroll_gesture_ms: int = 500,
+        inventory: object | None = None,
     ) -> None:
         self._resolver = resolver or WindowsUIAResolver()
+        # Whole-window control capture, when the session wants it. It owns its
+        # own thread; requesting a walk from here is a queue push, never the
+        # walk itself, because this method runs on the correlation path.
+        self._inventory = inventory
         self._active_edit: Mapping[str, object] | None = None
         self._edit_dirty = False
         self._pending_click: tuple[int, str, str, str] | None = None
@@ -449,6 +623,15 @@ class WindowsUIACorrelator:
         # everything after that crossing.
         self._scope_process_names: set[str] = set()
         self.scope_process_names: tuple[str, ...] = ()
+        # The application's installation directory, resolved once at seed.
+        # It is the invariant the process set is derived from: which
+        # executables are *running* changes during the very flow being
+        # recorded, where they are installed does not.
+        self._scope_root: str | None = None
+        # Decisions already made about a process name, so an answer costs one
+        # process scan per name rather than one per event. Only definite
+        # answers are cached; "not running yet" stays undecided.
+        self._process_scope_cache: dict[str, bool] = {}
         # Every window of the application this capture saw, in the order it
         # first appeared, with the action that opened it. Control identity is
         # not always available — an application that does not expose its
@@ -464,9 +647,16 @@ class WindowsUIACorrelator:
         self._windows_awaiting_cause: list[tuple[int, dict[str, object]]] = []
         # Input that belonged to some other application entirely.
         self.foreign_app_events = 0
-        if transition_window_ms < 0:
-            raise ValueError("transition_window_ms must be non-negative")
-        self._transition_window_ms = transition_window_ms
+        if transition_attribution_ms < 0:
+            raise ValueError("transition_attribution_ms must be non-negative")
+        if transition_lookback_ms < 0:
+            raise ValueError("transition_lookback_ms must be non-negative")
+        # Forward: the action already happened and we are waiting for its
+        # effect, so only another action ends its claim. Backward: the window
+        # already existed, and blaming it on whatever the user did next is a
+        # guess that has to stay tightly bounded.
+        self._transition_attribution_ms = transition_attribution_ms
+        self._transition_lookback_ms = transition_lookback_ms
         self._drag_threshold = drag_threshold if drag_threshold is not None else self._system_drag_threshold()
         if (
             not isinstance(self._drag_threshold, tuple) or len(self._drag_threshold) != 2
@@ -543,7 +733,45 @@ class WindowsUIACorrelator:
         if self._process_matches(actual, scope.process_name):
             return True
         normalized = str(actual or "").lower().removesuffix(".exe")
-        return bool(normalized) and normalized in self._scope_process_names
+        if not normalized:
+            return False
+        if normalized in self._scope_process_names:
+            return True
+        return self._admits_process(normalized)
+
+    def _admits_process(self, normalized: str) -> bool:
+        """Does a process that appeared *after* seeding belong to this app?
+
+        The set of an application's processes is not fixed when recording
+        starts. HiSec's client is launched by its agent part-way through the
+        flow being recorded, so a set resolved once at seed time excludes
+        exactly the process the user is about to work in — every click there
+        was dropped as out of scope, and the window never reached the
+        registry. The installation directory does not move, so membership is
+        decided against that instead.
+        """
+        cached = self._process_scope_cache.get(normalized)
+        if cached is not None:
+            return cached
+        if not self._scope_root:
+            return False
+        belongs = getattr(self._resolver, "process_belongs_to_root", None)
+        if not callable(belongs):
+            return False
+        try:
+            verdict = belongs(normalized, self._scope_root)
+        except Exception:
+            return False
+        if verdict is None:
+            # No process of that name is running, so this is not an answer.
+            # Caching it would recreate the seed-time snapshot bug one name
+            # at a time.
+            return False
+        self._process_scope_cache[normalized] = bool(verdict)
+        if verdict:
+            self._scope_process_names.add(normalized)
+            self.scope_process_names = tuple(sorted(self._scope_process_names))
+        return bool(verdict)
 
     @staticmethod
     def _observed(target_data: Mapping[str, object] | None) -> ObservedTarget | None:
@@ -784,6 +1012,32 @@ class WindowsUIACorrelator:
             )
         return tuple(seeded)
 
+    def _request_inventory(
+        self,
+        window: Mapping[str, object] | None,
+        *,
+        reason: str,
+        monotonic_ms: int | None = None,
+    ) -> None:
+        """Ask for a control walk of this window. Cheap, and never raises."""
+        if self._inventory is None or not window:
+            return
+        request = getattr(self._inventory, "request", None)
+        if not callable(request):
+            return
+        try:
+            request(
+                handle=window.get("handle"),
+                title=str(window.get("windowTitle") or window.get("title") or ""),
+                process_name=str(window.get("processName") or ""),
+                monotonic_ms=monotonic_ms,
+                reason=reason,
+            )
+        except Exception:
+            # Material capture is additive: failing to collect it must never
+            # cost the step that was actually recorded.
+            pass
+
     def _register_window(
         self,
         *,
@@ -830,6 +1084,11 @@ class WindowsUIACorrelator:
         entry["openedBy"] = opened_by
         self._window_index[key] = entry
         self.window_registry.append(entry)
+        self._request_inventory(
+            {"handle": handle, "title": title, "processName": process_name},
+            reason="window_changed",
+            monotonic_ms=appeared_ms,
+        )
         if opened_by is None and appeared_ms is not None:
             # A window opens on mouse-down while the click that caused it is
             # only produced on mouse-up, so looking backwards for a cause
@@ -841,18 +1100,20 @@ class WindowsUIACorrelator:
     def _claim_windows_awaiting_cause(self, event: RawCaptureEvent) -> None:
         """Attribute windows that appeared just before this action to it.
 
-        Only windows that appeared within the same causal window the backward
-        search uses; anything older opened for its own reasons and must stay
-        unattributed rather than be blamed on whatever the user did next.
+        This direction stays tightly bounded: the window already existed when
+        the action happened, so attributing it to that action is a guess, and
+        an old window must stay unattributed rather than be blamed on whatever
+        the user did next. The forward direction is the opposite case and is
+        bounded by the next action instead.
         """
         if not self._windows_awaiting_cause:
             return
         remaining = []
         for appeared_ms, entry in self._windows_awaiting_cause:
             gap = event.monotonic_ms - appeared_ms
-            if 0 <= gap <= self._transition_window_ms and entry.get("openedBy") is None:
+            if 0 <= gap <= self._transition_lookback_ms and entry.get("openedBy") is None:
                 entry["openedBy"] = event.causal_id
-            elif gap < 0 or gap <= self._transition_window_ms:
+            elif gap < 0 or gap <= self._transition_lookback_ms:
                 remaining.append((appeared_ms, entry))
         self._windows_awaiting_cause = remaining
 
@@ -893,6 +1154,13 @@ class WindowsUIACorrelator:
         }
         self._scope_process_names = admitted
         self.scope_process_names = tuple(sorted(admitted))
+        self._process_scope_cache = {name: True for name in admitted}
+        resolve_root = getattr(self._resolver, "application_root", None)
+        if callable(resolve_root):
+            try:
+                self._scope_root = resolve_root(scope.process_name) or None
+            except Exception as exc:
+                self.scope_seed_error = f"{type(exc).__name__}: {exc}"
 
     def _in_scope(self, foreground: Mapping[str, object], scope: CaptureScope) -> bool:
         """Is this foreground window part of the recording's scope?
@@ -971,6 +1239,38 @@ class WindowsUIACorrelator:
             causal_id=str(pending["causal_id"]),
         )
 
+    def _unbound_transition(
+        self,
+        packet: HookPacket,
+        scope: CaptureScope,
+        sequence: int,
+        kind: str,
+        process_name: object,
+        title: object,
+    ) -> RawCaptureEvent:
+        """Record a transition no action plausibly explains, without a cause.
+
+        Dropping it would repeat the mistake this whole area keeps making:
+        something the recorder saw disappears with no trace. The compiler turns
+        an unbound transition into a visible incomplete step instead.
+        """
+        event_input: dict[str, object] = {
+            "kind": kind,
+            "processName": str(process_name or scope.process_name),
+        }
+        if isinstance(title, str) and title:
+            event_input["title"] = title
+        return RawCaptureEvent(
+            sequence=sequence,
+            wall_time=packet.wall_time,
+            monotonic_ms=packet.monotonic_ms,
+            type="window_transition",
+            scope=scope,
+            input=event_input,
+            evidence=_transition_evidence(packet),
+            causal_id=None,
+        )
+
     def _window_transition(
         self,
         packet: HookPacket,
@@ -1030,14 +1330,26 @@ class WindowsUIACorrelator:
         if self._last_action_causal_id is None or self._last_action_ms is None:
             return None
         latency_ms = packet.monotonic_ms - self._last_action_ms
-        if not 0 <= latency_ms <= self._transition_window_ms:
+        # What breaks causality is the user doing something else, not a
+        # stopwatch. A fixed window silently discarded any window slower than
+        # it — and an application's main UI can take many seconds to appear,
+        # so the recording lost exactly the transitions worth asserting. The
+        # last action stands as the cause until another action replaces it;
+        # the elapsed time becomes evidence that sizes the replay wait rather
+        # than a gate that drops the event.
+        if latency_ms < 0:
             return None
+        if latency_ms > self._transition_attribution_ms:
+            # Far enough out that attributing it to that action would be a
+            # guess. Still recorded, without a cause, so the compiler surfaces
+            # it as an unbound transition instead of it vanishing.
+            return self._unbound_transition(packet, scope, sequence, kind, process_name, title)
         event_input: dict[str, object] = {
             "kind": kind,
             "processName": str(process_name or scope.process_name),
             # Replay waits proportionally to what the recording actually
             # observed, never on a fixed sleep.
-            "timeoutSeconds": min(30.0, max(5.0, round(latency_ms * 3 / 1000, 1))),
+            "timeoutSeconds": min(60.0, max(5.0, round(latency_ms * 3 / 1000, 1))),
         }
         if isinstance(title, str) and title:
             event_input["title"] = title
@@ -1048,12 +1360,16 @@ class WindowsUIACorrelator:
             type="window_transition",
             scope=scope,
             input=event_input,
-            evidence={"foregroundPid": packet.native.get("pid")},
+            evidence=_transition_evidence(packet),
             causal_id=self._last_action_causal_id,
         )
 
     @staticmethod
-    def _with_window(event: RawCaptureEvent, window: Mapping[str, object]) -> RawCaptureEvent:
+    def _window_root(event: RawCaptureEvent) -> str | None:
+        return window_root_identity(event.observed_target)
+
+    @classmethod
+    def _with_window(cls, event: RawCaptureEvent, window: Mapping[str, object]) -> RawCaptureEvent:
         """Stamp the event with the window it happened in."""
         title = window.get("windowTitle")
         if not isinstance(title, str) or not title:
@@ -1070,6 +1386,9 @@ class WindowsUIACorrelator:
         handle = window.get("handle")
         if isinstance(handle, int):
             stamp["handle"] = handle
+        root = cls._window_root(event)
+        if root:
+            stamp["rootAutomationId"] = root
         evidence["window"] = stamp
         return dataclasses.replace(event, evidence=evidence)
 
@@ -1104,6 +1423,14 @@ class WindowsUIACorrelator:
             # explain why.
             self._note_rejection("no_event_produced", packet, foreground, scope=scope)
         stamped = tuple(self._with_window(event, foreground) for event in produced)
+        if stamped:
+            # The page as it stood around this step. Debounced by the
+            # inventory, so a burst of typing costs one walk, not one each.
+            self._request_inventory(
+                foreground,
+                reason="step",
+                monotonic_ms=stamped[0].monotonic_ms,
+            )
         for event in stamped:
             if event.type in ACTION_EVENT_TYPES:
                 self._last_action_causal_id = event.causal_id
@@ -1651,6 +1978,8 @@ def windows_source_factory(backend: object | None = None):
                 "windows_pywinauto recording requires a Windows target",
                 path="scope.backend",
             )
+        resolver = WindowsUIAResolver(backend)
+        inventory = ControlInventory(resolver)
         return QueuedCaptureSource(
             scope=scope,
             sink=sink,
@@ -1658,7 +1987,8 @@ def windows_source_factory(backend: object | None = None):
                 WindowsLowLevelHookDriver(),
                 WindowsWinEventDriver(scope.process_name),
             ),
-            correlator=WindowsUIACorrelator(WindowsUIAResolver(backend)),
+            correlator=WindowsUIACorrelator(resolver, inventory=inventory),
+            inventory=inventory,
         )
 
     return create

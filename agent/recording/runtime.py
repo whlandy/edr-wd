@@ -171,8 +171,10 @@ def build_replay_runtime(
         replay_mode=replay_mode,
         visual_resolver=resolver,
         persist_replay_screenshots=persist_screenshots,
-        window_focus=lambda process_name, title_regex: observations.get_snapshot(
-            observations.focus_window(process_name, title_regex)
+        window_focus=lambda process_name, title_regex, root="": (
+            observations.get_snapshot(
+                observations.focus_window(process_name, title_regex, root)
+            )
         ),
     )
 

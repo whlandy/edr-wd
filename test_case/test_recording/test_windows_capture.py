@@ -590,9 +590,9 @@ def _transition(kind, monotonic_ms, *, process="EDRClient.exe", title="策略详
     )
 
 
-def _click_then_transition(packet, *, transition_window_ms=3000):
+def _click_then_transition(packet, *, transition_attribution_ms=120_000):
     correlator = WindowsUIACorrelator(
-        _Resolver(), double_click_ms=650, transition_window_ms=transition_window_ms,
+        _Resolver(), double_click_ms=650, transition_attribution_ms=transition_attribution_ms,
     )
     click = correlator.correlate(_packet(monotonic_ms=100), SCOPE, 1)
     return correlator, click, correlator.correlate(packet, SCOPE, 2)
@@ -620,11 +620,39 @@ def test_a_window_transition_no_recent_action_explains_is_not_recorded():
     assert correlator.correlate(_transition("opened", 700), SCOPE, 1) is None
 
 
-def test_a_window_transition_outside_the_correlation_window_is_not_recorded():
+def test_a_slow_window_is_still_attributed_to_the_action_that_opened_it():
+    """An application's main UI can take many seconds to appear.
+
+    A fixed stopwatch discarded exactly the transitions worth asserting. What
+    ends an action's claim is the user doing something else, not elapsed time.
+    """
+    _, click, event = _click_then_transition(_transition("opened", 9000))
+
+    assert event is not None
+    assert event.causal_id == click.causal_id
+    # The wait replay performs grows with what the recording measured.
+    assert event.input["timeoutSeconds"] == 26.7
+
+
+def test_a_transition_beyond_the_attribution_bound_is_recorded_without_a_cause():
+    """Never silently dropped: an unbound transition stays visible."""
     _, _, event = _click_then_transition(
-        _transition("opened", 9000), transition_window_ms=3000,
+        _transition("opened", 500_000), transition_attribution_ms=120_000,
     )
-    assert event is None
+
+    assert event is not None
+    assert event.causal_id is None
+    assert "timeoutSeconds" not in event.input
+
+
+def test_a_later_action_takes_over_the_claim():
+    correlator = WindowsUIACorrelator(_Resolver(), transition_attribution_ms=120_000)
+    first = correlator.correlate(_packet(monotonic_ms=100), SCOPE, 1)
+    second = correlator.correlate(_packet(monotonic_ms=5000), SCOPE, 2)
+    event = correlator.correlate(_transition("opened", 9000), SCOPE, 3)
+
+    assert event.causal_id == second.causal_id
+    assert event.causal_id != first.causal_id
 
 
 def test_a_transition_belonging_to_another_process_is_not_recorded():
@@ -1622,7 +1650,7 @@ def test_a_window_that_opened_long_before_is_not_blamed_on_a_later_action():
     """
     resolver = _log_center_resolver()
     correlator = WindowsUIACorrelator(
-        resolver, transition_window_ms=3000,
+        resolver, transition_attribution_ms=120_000,
     )
     correlator.seed_scope(SCOPE)
 
@@ -1636,3 +1664,89 @@ def test_a_window_that_opened_long_before_is_not_blamed_on_a_later_action():
 
     entry = next(w for w in correlator.window_registry if w["title"] == "弹窗")
     assert entry["openedBy"] is None
+
+
+# ── an application is not one process ────────────────────────────────────────
+
+
+HISEC_CLIENT = r"C:\Program Files\HiSec-Endpoint\core\EDRClient.exe"
+HISEC_AGENT = r"C:\Program Files\HiSec-Endpoint\core\safra\HiSecEndpointAgent.exe"
+
+
+def _install_root(path):
+    from target.recording.windows import WindowsUIAResolver
+
+    return WindowsUIAResolver._install_root(path)
+
+
+def test_two_executables_of_one_product_share_an_install_root(monkeypatch):
+    """HiSec's flow crosses from its agent to its client mid-recording."""
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+
+    assert _install_root(HISEC_CLIENT) == r"C:\Program Files\HiSec-Endpoint"
+    assert _install_root(HISEC_AGENT) == r"C:\Program Files\HiSec-Endpoint"
+
+
+def test_a_different_product_does_not_share_that_root(monkeypatch):
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+
+    other = _install_root(r"C:\Program Files\Notepad++\notepad++.exe")
+
+    assert other == r"C:\Program Files\Notepad++"
+    assert other != _install_root(HISEC_CLIENT)
+
+
+def test_an_executable_outside_a_program_root_falls_back_to_its_directory(monkeypatch):
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+
+    assert _install_root(r"D:\tools\probe.exe") == r"D:\tools"
+
+
+class _Proc:
+    def __init__(self, name, exe):
+        self.info = {"name": name, "exe": exe}
+
+
+def _psutil_with(processes, monkeypatch):
+    import sys
+    import types
+
+    stub = types.ModuleType("psutil")
+    stub.process_iter = lambda attrs=None: iter(processes)
+    monkeypatch.setitem(sys.modules, "psutil", stub)
+
+
+def test_the_scope_admits_the_sibling_process_of_the_same_product(monkeypatch):
+    from target.recording.windows import WindowsUIAResolver
+
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+    _psutil_with([
+        _Proc("EDRClient.exe", HISEC_CLIENT),
+        _Proc("HiSecEndpointAgent.exe", HISEC_AGENT),
+        _Proc("notepad.exe", r"C:\Windows\System32\notepad.exe"),
+    ], monkeypatch)
+
+    names = WindowsUIAResolver().application_process_names("EDRClient.exe")
+
+    assert names == ["edrclient", "hisecendpointagent"]
+    assert "notepad" not in names
+
+
+def test_an_unresolvable_application_keeps_single_process_behaviour(monkeypatch):
+    from target.recording.windows import WindowsUIAResolver
+
+    _psutil_with([], monkeypatch)
+
+    assert WindowsUIAResolver().application_process_names("EDRClient.exe") == []
+
+
+def test_input_from_the_sibling_process_is_admitted_once_seeded():
+    """The click that opens the security centre happens in the agent."""
+    correlator = WindowsUIACorrelator(_Resolver(process="HiSecEndpointAgent.exe"))
+    correlator._scope_process_names = {"edrclient", "hisecendpointagent"}
+
+    admitted = correlator._process_in_scope("HiSecEndpointAgent.exe", SCOPE)
+    refused = correlator._process_in_scope("notepad.exe", SCOPE)
+
+    assert admitted is True
+    assert refused is False

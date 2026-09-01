@@ -186,6 +186,32 @@ Screenshots must use relative report links, content digests, ownership metadata,
 and configured redaction. Recovery creates a new trace branch and never rewrites
 failed history.
 
+## MaaFramework Node Table
+
+Compilation also writes `trace.json` next to `golden-trace.json`: the same golden
+path in the MaaFramework node-table shape (`edr.success-trace/v2`), which
+maa-fw's `MaaNodeRunner` loads directly. The converter lives in
+edr-cloud-recorder (`scripts/desktop_to_v2.py`) because the shape is defined
+there once; set `EDR_RECORDER_HOME` if it is not the sibling directory. Missing
+converter is not a failure — `compile-report.json` records `maaExport` either way.
+
+Do not hand `golden-trace.json` to maa-fw directly. It loads without error and
+does nothing: every node becomes `DirectHit` + `DoNothing`, and a string `next`
+is iterated character by character (`"step-0002"` → `['s','t','e','p',…]`).
+Both sides stay silent about it.
+
+To judge whether a recording is worth trusting — separately from whether it
+replays — audit it:
+
+```bash
+python3 ../trace-eval/trust/audit.py recordings/<case>
+```
+
+It reads `golden-trace.json` directly and reports per-node evidence along two
+axes: will it replay the same way again, and what does a green run prove. It
+surfaces the compiler's own `issues` (ambiguous selectors, actions with no
+verifier) as findings rather than leaving them in the report.
+
 ## Test Commands
 
 ```bash

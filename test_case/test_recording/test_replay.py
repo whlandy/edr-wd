@@ -974,7 +974,7 @@ class _WindowedObservations(_Observations):
         self.focused = None
         self.focus_calls = []
 
-    def focus(self, process_name, title_regex):
+    def focus(self, process_name, title_regex, root=""):
         self.focus_calls.append((process_name, title_regex))
         self.focused = title_regex
         self.controls = self._windows.get(title_regex, [])
@@ -1046,3 +1046,63 @@ def test_consecutive_steps_in_one_window_focus_it_only_once():
 
     assert result.task_success is True
     assert observations.focus_calls == [("EDRClient.exe", "^日志中心$")]
+
+
+def test_the_window_root_distinguishes_two_windows_that_share_a_title():
+    """HiSec titles both its agent and its client window `logo1`."""
+    observations = _WindowedObservations({
+        "^logo1$": [_control("logo1", "logCenterBtn")],
+    })
+    seen = []
+
+    def focus(process_name, title_regex, root=""):
+        seen.append(root)
+        observations.focused = title_regex
+        observations.controls = observations._windows.get(title_regex, [])
+        return observations.get_snapshot(observations.refresh())
+
+    def dispatch(**kwargs):
+        return ActionReceipt.from_ok(
+            action_id=kwargs["action_id"], action_code=kwargs["action_code"],
+            request_id=kwargs["request_id"], result={"ok": True},
+        )
+
+    runtime = ReplayRuntime(
+        AtomicExecutor(dispatch=dispatch, observation_provider=observations),
+        "1.0.0", "sha256:catalog", window_focus=focus,
+    )
+
+    def _selector(root):
+        return ReplaySelector(
+            window={
+                "processName": "EDRClient.exe", "titleRegex": "^logo1$",
+                "rootAutomationId": root,
+            },
+            control={"automationId": "logCenterBtn"},
+        )
+
+    golden = _golden(
+        RecordedStep("step-0001", "gui.click", {}, _selector("SafraUIMainWindow")),
+        RecordedStep("step-0002", "gui.click", {}, _selector("EdrMainWindow")),
+    )
+
+    replay_golden_trace(runtime, golden)
+
+    # Same process, same title, two different windows: only the root separates
+    # them, so each one must be focused in its own right.
+    assert seen == ["SafraUIMainWindow", "EdrMainWindow"]
+
+
+def test_focusing_reports_when_the_title_matched_the_wrong_window():
+    from agent.recording.mcp_runtime import MCPObservationProvider
+
+    class _Agent(_MCPAgent):
+        def call_tool(self, name, arguments, timeout=None):
+            if name in {"connect", "lock_window"}:
+                return {"ok": True}
+            return super().call_tool(name, arguments, timeout=timeout)
+
+    provider = MCPObservationProvider(_Agent())
+
+    with pytest.raises(BackendUnavailable, match="EdrMainWindow"):
+        provider.focus_window("EDRClient.exe", "^logo1$", "EdrMainWindow")

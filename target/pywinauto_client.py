@@ -714,6 +714,35 @@ class WindowsGUI:
             logger.exception("dump_tree failed")
             return {"ok": False, "error": str(e)}
 
+    def dump_tree_for_window(self, handle: int, max_depth: int = 12) -> dict:
+        """Dump one window's control tree without connecting to it.
+
+        `dump_tree` walks whichever window this client is connected to, so
+        using it to inspect a second window means re-connecting and losing the
+        first. This addresses the window directly through the desktop, leaves
+        `self.app` / `self.main_window` untouched, and never activates
+        anything — it is safe to call while a recording is in progress.
+        """
+        try:
+            from pywinauto import Desktop
+
+            win = Desktop(backend=self.backend).window(handle=int(handle))
+            rect = win.rectangle()
+            return {
+                "ok": True,
+                "title": win.window_text(),
+                "handle": int(handle),
+                "window_rectangle": {
+                    "x": rect.left, "y": rect.top,
+                    "w": rect.width(), "h": rect.height(),
+                },
+                "rectangle_mode": "screen",
+                "controls": self._build_tree(win, depth=0, max_depth=max_depth),
+            }
+        except Exception as e:
+            logger.exception("dump_tree_for_window failed")
+            return {"ok": False, "error": str(e), "handle": int(handle)}
+
     # Hard cap: prevent accidentally passing unbounded depth values
     _MAX_TREE_DEPTH = 15
 

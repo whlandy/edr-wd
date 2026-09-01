@@ -67,6 +67,27 @@ def _run(cmd: list[str], timeout: float = 10.0) -> tuple[int, str]:
         return -1, f"command not found: {e}"
 
 
+def _applescript_string(value: str) -> str:
+    """Quote a Python string as an AppleScript string literal.
+
+    `json.dumps` looks close enough — it escapes `"` and `\\` exactly the way
+    AppleScript does — but it also escapes every non-ASCII character as
+    `\\uXXXX`, which AppleScript does not understand: it yields the literal
+    characters `u5b89` rather than the intended one. On a Chinese-language
+    product that breaks every application and window name, so the escaping has
+    to be written for AppleScript rather than borrowed from JSON.
+    """
+    escaped = (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+
 def _run_osascript(script: str, timeout: float = 10.0) -> tuple[int, str]:
     """Run an osascript -e invocation."""
     return _run(["osascript", "-e", script], timeout=timeout)
@@ -105,7 +126,7 @@ class _MacOSConnectedApp:
                 'repeat with w in wList\n'
                 '    try\n'
                 '        set owner to "" & (kCGWindowOwnerName of w as string)\n'
-                '        if owner contains "' + app_name + '" then\n'
+                '        if owner contains ' + _applescript_string(app_name) + ' then\n'
                 '            try\n'
                 '                set wName to "" & (kCGWindowName of w as string)\n'
                 '            on error\n'
@@ -1036,9 +1057,9 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 target_pid = self._pid_for_app(app_name)
 
         if bundle_id:
-            script = f'tell application id {json.dumps(bundle_id)} to activate'
+            script = f'tell application id {_applescript_string(bundle_id)} to activate'
         else:
-            script = f'tell application {json.dumps(app_name)} to activate'
+            script = f'tell application {_applescript_string(app_name)} to activate'
         app_rc, app_out = _run_osascript(script, timeout=10)
 
         pid_rc = None

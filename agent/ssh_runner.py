@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import subprocess
 from pathlib import Path
 from typing import Tuple
@@ -236,24 +237,30 @@ def _paramiko_connect(ssh_config: dict, timeout: int = 10) -> paramiko.SSHClient
 
 
 def _paramiko_run_ssh(ssh_config: dict, command: str, timeout: int = 30) -> Tuple[int, str]:
-    """Run a command via Paramiko SSH. Returns (exit_code, combined_output)."""
-    try:
-        client = _paramiko_connect(ssh_config, timeout=timeout)
-    except Exception:
-        # Already a clean SSHAuthError — let it propagate
-        raise
+    """Run a command via Paramiko SSH. Returns (exit_code, combined_output).
 
+    Connection and authentication failures propagate: they are the caller's to
+    handle and are already free of credentials. Only command execution is
+    reduced to a return value, and it names which kind of failure occurred —
+    collapsing a timeout, a dropped channel and a protocol error into one
+    opaque string makes an operator debug the wrong thing. The channel carries
+    `timeout` (paramiko applies it to reads), so a command that stops producing
+    output does return rather than hang; it is an inactivity timeout, not a
+    wall-clock deadline, so a command that keeps emitting output can still run
+    longer than `timeout`.
+    """
+    client = _paramiko_connect(ssh_config, timeout=timeout)
     try:
-        # Use the high-level exec_command — it properly handles stdout/stderr
-        # reading and blocks until the command exits.
         stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
         out = stdout.read().decode("utf-8", errors="replace")
         err = stderr.read().decode("utf-8", errors="replace")
         exit_code = stdout.channel.recv_exit_status()
         return exit_code, out + err
-    except Exception:
-        # Do not leak exception details — they may contain host/user info
-        return -1, "Paramiko command execution failed"
+    except socket.timeout:
+        return -1, f"ssh command produced no output for {timeout}s"
+    except Exception as exc:
+        # The type is diagnostic; the message can carry host/user details.
+        return -1, f"ssh command execution failed: {type(exc).__name__}"
     finally:
         client.close()
 

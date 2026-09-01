@@ -107,6 +107,163 @@
           }
         }
       }
+    },
+    "controlSnapshots": {
+      "type": "array",
+      "description": "Complete control trees for the windows the flow visited, in capture order and deduplicated by content. Events name only the control the user acted on; a generated trace can refer only to controls the recording knows exist, so the whole page is captured alongside.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "snapshotId",
+          "capturedAtMs",
+          "window",
+          "contentHash",
+          "controls"
+        ],
+        "properties": {
+          "snapshotId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "capturedAtMs": {
+            "type": "integer"
+          },
+          "reason": {
+            "enum": [
+              "window_changed",
+              "step"
+            ]
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "contentHash": {
+            "type": "string",
+            "minLength": 1
+          },
+          "controlCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "window": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "handle": {
+                "type": "integer"
+              },
+              "title": {
+                "type": "string"
+              },
+              "processName": {
+                "type": "string"
+              },
+              "rootAutomationId": {
+                "type": "string"
+              }
+            }
+          },
+          "controls": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "automationId": {
+                  "type": "string"
+                },
+                "controlType": {
+                  "type": "string"
+                },
+                "className": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "controlId": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "visible": {
+                  "type": "boolean"
+                },
+                "protected": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "rect": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  },
+                  "minItems": 4,
+                  "maxItems": 4
+                },
+                "depth": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "rejections": {
+      "type": "array",
+      "description": "Input this capture saw and refused, with the window it resolved to. captureDiagnostics counts say a recording was short; only these say whether the recorder misjudged which window the user was in.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string"
+          },
+          "point": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "resolvedProcess": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolvedTitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolvedHandle": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      }
     }
   },
   "$defs": {
@@ -322,6 +479,9 @@
               "description": "Native window handle (HWND / CGWindowNumber). Identifies the window only within the live capture session that produced it — a fresh run of the application at replay time gets a different handle, so this is diagnostic evidence, never a replay selector field."
             }
           }
+        },
+        "handle": {
+          "type": "integer"
         }
       }
     },

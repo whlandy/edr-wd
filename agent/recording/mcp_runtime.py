@@ -54,7 +54,9 @@ class MCPObservationProvider:
         self._trace_store = trace_store
         self._capture_screenshot = capture_screenshot
 
-    def focus_window(self, process_name: str, title_regex: str) -> str:
+    def focus_window(
+        self, process_name: str, title_regex: str, root_automation_id: str = "",
+    ) -> str:
         """Connect and lock a specific window, then observe it.
 
         A recorded flow moves between an application's windows. Observation is
@@ -79,7 +81,28 @@ class MCPObservationProvider:
                 (locked.get("error") if isinstance(locked, Mapping) else None)
                 or f"cannot lock the window {title_regex!r}"
             )
-        return self.refresh()
+        snapshot_id = self.refresh()
+        if root_automation_id and not self._observes_window(snapshot_id, root_automation_id):
+            raise BackendUnavailable(
+                f"focused a window that is not {root_automation_id!r}; the title "
+                "matched a different window of the same application"
+            )
+        return snapshot_id
+
+    def _observes_window(self, snapshot_id: str, root_automation_id: str) -> bool:
+        """Did focusing actually land on the window the step belongs to?
+
+        Two of this application's processes title a window identically, so a
+        title match is not proof. The observed controls name their own window
+        in the first component of their automation id.
+        """
+        snapshot = self._snapshots.get(snapshot_id) or {}
+        prefix = root_automation_id + "."
+        for control in snapshot.get("controls", ()):
+            identifier = str((control or {}).get("automation_id") or "")
+            if identifier == root_automation_id or identifier.startswith(prefix):
+                return True
+        return False
 
     def refresh(self) -> str:
         verified = self._agent.call_tool("verify_window_lock", {"activate": False}, timeout=self._timeout)

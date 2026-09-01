@@ -520,6 +520,16 @@ class RecordingSession:
                 ) or 0),
             },
             windows=windows,
+            control_snapshots=tuple(
+                dict(entry)
+                for entry in getattr(self._source, "control_snapshots", ()) or ()
+            ),
+            # Persisted, not just counted. A capture that dropped a click the
+            # user remembers making is only explainable if the recording says
+            # which window that click resolved to and why it was refused.
+            rejections=tuple(
+                dict(entry) for entry in getattr(correlator, "rejections", ()) or ()
+            ),
         )
 
 
