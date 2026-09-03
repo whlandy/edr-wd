@@ -29,6 +29,14 @@ logger = logging.getLogger("edr_wd.pywinauto_client")
 # Default HiSec entry executable path (can be overridden via EDR_WD_EDR_EXE env var)
 DEFAULT_EDR_EXE = r"C:\Program Files\HiSec-Endpoint\core\safra\HisecEndpointAgent.exe"
 DEFAULT_EDR_CLIENT_EXE = r"C:\Program Files\HiSec-Endpoint\core\EDRClient.exe"
+#: The service that actually draws the EDR UI. `HisecEndpointAgent.exe cmd ui`
+#: is not a launcher — it is a gRPC client that asks this service, over local
+#: IPC, to show the window. With the service absent nothing is listening, the
+#: command exits 0 having sent nothing, and no window ever appears.
+DEFAULT_EDR_SERVICE = "HiSec OneAgent Service"
+#: Where that IPC listens. Read from core\safra\etc\ipcportconf.ini when set;
+#: this is the agent's own default for an empty file.
+DEFAULT_EDR_IPC_PORT = 58299
 
 
 class WindowsGUI:
@@ -469,6 +477,109 @@ class WindowsGUI:
             "error": None if after.get("tab") == "安全防护" else after.get("error", "tab did not switch to 安全防护"),
         }
 
+    @staticmethod
+    def _service_state(name: str) -> str:
+        """One of: "running", "stopped", "missing", "unknown".
+
+        Read through `sc query`, which needs no extra dependency and reports a
+        missing service distinctly from a stopped one — the distinction that
+        decides whether activation is a retry or a reinstall.
+        """
+        try:
+            completed = subprocess.run(
+                ["sc", "query", name],
+                capture_output=True, text=True, timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            return "unknown"
+        output = (completed.stdout or "") + (completed.stderr or "")
+        if completed.returncode == 1060 or "1060" in output:
+            return "missing"
+        if "RUNNING" in output:
+            return "running"
+        if "STOPPED" in output or "STOP_PENDING" in output:
+            return "stopped"
+        return "unknown"
+
+    @staticmethod
+    def _start_service(name: str, timeout: float = 30.0) -> tuple[bool, str | None]:
+        try:
+            completed = subprocess.run(
+                ["sc", "start", name],
+                capture_output=True, text=True, timeout=timeout,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as e:
+            return False, str(e)
+        if completed.returncode == 0:
+            return True, None
+        return False, ((completed.stdout or "") + (completed.stderr or "")).strip()[:200]
+
+    @staticmethod
+    def _ipc_listening(port: int, timeout: float = 1.0) -> bool:
+        import socket
+
+        try:
+            with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
+    def _ensure_ui_service(self, service: str, port: int, timeout: float) -> dict:
+        """Make the UI service available, or say precisely why it is not.
+
+        Reporting "window did not appear" for this costs a whole debugging
+        session: the command that was supposed to open the window exits 0
+        whether or not anything received it, so the only visible symptom is a
+        window that is missing for no stated reason.
+        """
+        state = self._service_state(service)
+        if state == "missing":
+            return {
+                "ok": False,
+                "stage": "ui_service_missing",
+                "service": service,
+                "service_state": state,
+                "error": (
+                    f"the service {service!r} is not installed. The EDR UI is "
+                    "drawn by that service and `cmd ui` only asks it over local "
+                    "IPC, so no command can open the window until the product "
+                    "is reinstalled."
+                ),
+            }
+        started = False
+        if state in {"stopped", "unknown"}:
+            started, start_error = self._start_service(service)
+            if not started and state == "stopped":
+                return {
+                    "ok": False,
+                    "stage": "ui_service_will_not_start",
+                    "service": service,
+                    "service_state": state,
+                    "error": f"{service!r} is installed but would not start: {start_error}",
+                }
+        deadline = time.time() + max(timeout, 5.0)
+        while time.time() < deadline:
+            if self._ipc_listening(port):
+                return {
+                    "ok": True, "service": service, "service_state": "running",
+                    "started_service": started, "ipc_port": port,
+                }
+            time.sleep(0.5)
+        return {
+            "ok": False,
+            "stage": "ui_service_ipc_unreachable",
+            "service": service,
+            "service_state": self._service_state(service),
+            "started_service": started,
+            "ipc_port": port,
+            "error": (
+                f"nothing is listening on 127.0.0.1:{port}, so the request to "
+                "show the window cannot be delivered"
+            ),
+        }
+
     def activate_edr(self, exe_path: str = None, wait: bool = True,
                      timeout: float = 15.0,
                      edr_widget_auto_id: str = None) -> dict:
@@ -490,6 +601,11 @@ class WindowsGUI:
         """
         exe = exe_path or os.environ.get("EDR_WD_EDR_EXE", DEFAULT_EDR_EXE)
         client_exe = os.environ.get("EDR_WD_EDR_CLIENT_EXE", DEFAULT_EDR_CLIENT_EXE)
+        ui_service = os.environ.get("EDR_WD_EDR_SERVICE", DEFAULT_EDR_SERVICE)
+        try:
+            ipc_port = int(os.environ.get("EDR_WD_EDR_IPC_PORT", DEFAULT_EDR_IPC_PORT))
+        except ValueError:
+            ipc_port = DEFAULT_EDR_IPC_PORT
 
         # Default automation_id for the edrWidget GroupBox (card-button parent
         # of the "前往安全防护中心" Static label). This path is stable for
@@ -510,7 +626,21 @@ class WindowsGUI:
 
         # ── Step 1: ensure HisecEndpointAgent entry window ──────────────
         hisec_win = self.is_window_open(process_name="HisecEndpointAgent.exe")
+        service_check = {"ok": True, "skipped": "agent window already open"}
         if not hisec_win.get("found"):
+            # `cmd ui` sends an IPC message and exits 0 whether or not anything
+            # received it, so it must not be issued into the void: without the
+            # service there is nothing to receive it, and the only symptom
+            # would be a window that never appears for no stated reason.
+            service_check = self._ensure_ui_service(ui_service, ipc_port, timeout)
+            if not service_check.get("ok"):
+                return {
+                    "ok": False,
+                    "error": service_check.get("error"),
+                    "stage": service_check.get("stage"),
+                    "service_check": service_check,
+                    "exe_path": exe,
+                }
             launched, launch_error = _launch([exe, "cmd", "ui"], cwd=os.path.dirname(exe) or None)
             if not launched:
                 return {"ok": False, "error": f"Failed to launch HisecEndpointAgent: {launch_error}"}
@@ -525,7 +655,12 @@ class WindowsGUI:
             if not hisec_win.get("found"):
                 return {
                     "ok": False,
-                    "error": "HisecEndpointAgent.exe window did not appear",
+                    "error": (
+                        "HisecEndpointAgent.exe window did not appear; the show-UI "
+                        f"request reached {ui_service!r} but no window followed"
+                    ),
+                    "stage": "agent_window_did_not_appear",
+                    "service_check": service_check,
                     "exe_path": exe,
                 }
 
