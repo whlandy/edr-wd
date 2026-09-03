@@ -138,6 +138,20 @@ class TkRecordingIndicator:
         except Exception as exc:
             self._startup_error = exc
             self._ready.set()
+        finally:
+            # Let the interpreter be finalized on the thread that created it.
+            # `destroy()` runs here, but these references outlive it, so the
+            # Tk object was deallocated whenever the session was collected —
+            # on whatever thread happened to be running the collector. Tcl
+            # answers a cross-thread finalize with Tcl_Panic and abort(), and
+            # that took the whole MCP server down three times in ten days,
+            # always at the same offset in tcl86t.dll. Dropping them here
+            # leaves the local `root` as the last reference, and it dies with
+            # this frame, on this thread.
+            self._root = None
+            self._state_label = None
+            self._count_label = None
+            self._pause_button = None
 
     @staticmethod
     def _place_clear_of_default_windows(root) -> None:  # pragma: no cover - live UI
