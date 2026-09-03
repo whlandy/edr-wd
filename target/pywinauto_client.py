@@ -625,44 +625,36 @@ class WindowsGUI:
                 return False, str(e)
 
         # ── Step 1: ensure HisecEndpointAgent entry window ──────────────
+        # The agent window is not a precondition for activation. It is only
+        # needed by step 3's fallback click, and step 2 — the primary path —
+        # launches the client directly. Treating a missing agent window as
+        # fatal cost a whole session on a target whose agent service was not
+        # registered: the client would have opened on the first try.
         hisec_win = self.is_window_open(process_name="HisecEndpointAgent.exe")
         service_check = {"ok": True, "skipped": "agent window already open"}
+        agent_error: str | None = None
         if not hisec_win.get("found"):
             # `cmd ui` sends an IPC message and exits 0 whether or not anything
-            # received it, so it must not be issued into the void: without the
-            # service there is nothing to receive it, and the only symptom
-            # would be a window that never appears for no stated reason.
+            # received it, so a failure here is otherwise invisible. Diagnose
+            # it, report it, and carry on to the path that does not need it.
             service_check = self._ensure_ui_service(ui_service, ipc_port, timeout)
             if not service_check.get("ok"):
-                return {
-                    "ok": False,
-                    "error": service_check.get("error"),
-                    "stage": service_check.get("stage"),
-                    "service_check": service_check,
-                    "exe_path": exe,
-                }
-            launched, launch_error = _launch([exe, "cmd", "ui"], cwd=os.path.dirname(exe) or None)
-            if not launched:
-                return {"ok": False, "error": f"Failed to launch HisecEndpointAgent: {launch_error}"}
-
-            if not wait:
-                return {"ok": True, "already_open": False, "exe_path": exe}
-
-            # Wait for HisecEndpointAgent window to appear
-            hisec_win = self.wait_window(
-                process_name="HisecEndpointAgent.exe", timeout=timeout
-            )
-            if not hisec_win.get("found"):
-                return {
-                    "ok": False,
-                    "error": (
-                        "HisecEndpointAgent.exe window did not appear; the show-UI "
-                        f"request reached {ui_service!r} but no window followed"
-                    ),
-                    "stage": "agent_window_did_not_appear",
-                    "service_check": service_check,
-                    "exe_path": exe,
-                }
+                agent_error = service_check.get("error")
+            else:
+                launched, launch_error = _launch(
+                    [exe, "cmd", "ui"], cwd=os.path.dirname(exe) or None,
+                )
+                if not launched:
+                    agent_error = f"failed to launch HisecEndpointAgent: {launch_error}"
+                elif wait:
+                    hisec_win = self.wait_window(
+                        process_name="HisecEndpointAgent.exe", timeout=timeout,
+                    )
+                    if not hisec_win.get("found"):
+                        agent_error = (
+                            "the show-UI request reached "
+                            f"{ui_service!r} but no window followed"
+                        )
 
         # ── Step 2: primary EDRClient path ──────────────────────────────
         primary_launch = {"ok": None, "path": client_exe, "args": ["17", "--show"]}
@@ -701,8 +693,17 @@ class WindowsGUI:
             if not conn.get("ok"):
                 return {
                     "ok": False,
-                    "error": f"Cannot connect to HisecEndpointAgent: {conn.get('error')}",
+                    # The fallback needs the agent window; when the agent
+                    # itself never came up, that reason is the useful one.
+                    "error": (
+                        f"the client did not open and the fallback needs the "
+                        f"agent window, which is unavailable: {agent_error}"
+                        if agent_error else
+                        f"Cannot connect to HisecEndpointAgent: {conn.get('error')}"
+                    ),
                     "stage": "fallback_connect_hisec",
+                    "agent_error": agent_error,
+                    "service_check": service_check,
                     "main": {"window_found": bool(hisec_win.get("found")), "window": hisec_win},
                     "client": {"window_found": False, "window": edr_client},
                     "primary_launch": primary_launch,
