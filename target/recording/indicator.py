@@ -331,11 +331,15 @@ class SubprocessTkIndicator:
         env["PYTHONPATH"] = os.pathsep.join(
             path for path in sys.path if path
         )
+        # The target deploys this package flattened — `recording.indicator`
+        # there, `target.recording.indicator` in a source checkout — so the
+        # child's import is derived from how *this* module was imported
+        # rather than spelled out for one of the two layouts.
         self._process = subprocess.Popen(
             [
                 sys.executable,
                 "-c",
-                "from target.recording.indicator import _indicator_child_main;"
+                f"from {__name__} import _indicator_child_main;"
                 " _indicator_child_main()",
             ],
             stdin=subprocess.PIPE,
@@ -469,7 +473,17 @@ def tkinter_indicator_factory(
     scope: CaptureScope,
     callbacks: IndicatorCallbacks,
 ) -> RecordingIndicator:
-    if sys.platform == "darwin":
+    """Show the indicator in a child process wherever Tk is available.
+
+    macOS needs this because Aqua Tk must own the process main thread.
+    Windows needs it for a different reason, learned the hard way: driving Tk
+    from a worker thread works until the interpreter is torn down and built
+    again, and the third recording of one server session aborted the whole
+    process inside tcl86t.dll (0x80000003, a Tcl panic) — taking the MCP
+    server, not just the indicator, down with it. A child process gets a fresh
+    Tk per recording, and a panic can only kill the child.
+    """
+    if sys.platform in {"darwin", "win32"}:
         return SubprocessTkIndicator(name, scope, callbacks)
     return TkRecordingIndicator(name, scope, callbacks)
 

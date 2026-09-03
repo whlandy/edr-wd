@@ -399,3 +399,41 @@ def test_a_broken_inventory_never_costs_the_step_that_was_recorded():
         origin="already_open",
     )
     assert [entry["title"] for entry in correlator.window_registry] == ["logo1"]
+
+
+# --- the indicator must not be able to abort the server -------------------
+
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_the_indicator_runs_out_of_process_on_every_tk_platform(monkeypatch, platform):
+    """A Tk panic killed the MCP server, not just the indicator.
+
+    Windows drove Tk from a worker thread; the third recording of one server
+    session aborted python.exe inside tcl86t.dll (0x80000003, a Tcl panic).
+    Both Tk platforms now get a child process, so a panic can only kill the
+    child.
+    """
+    import target.recording.indicator as indicator_module
+
+    monkeypatch.setattr(indicator_module.sys, "platform", platform)
+    made = indicator_module.tkinter_indicator_factory(
+        "case", SCOPE, indicator_module.IndicatorCallbacks(
+            pause=lambda: None, resume=lambda: None, stop=lambda: None,
+            add_assertion=lambda target: None,
+        ),
+    )
+    assert isinstance(made, indicator_module.SubprocessTkIndicator)
+
+
+def test_the_indicator_child_import_follows_the_deployed_layout():
+    """The target deploys this package flattened.
+
+    A child spawned with a hard-coded `target.recording.indicator` import
+    cannot start there, which is what kept Windows on the in-process Tk that
+    aborted the server.
+    """
+    import inspect
+    import target.recording.indicator as indicator_module
+
+    body = inspect.getsource(indicator_module.SubprocessTkIndicator.start)
+    assert "from {__name__} import" in body
+    assert "from target.recording.indicator import" not in body
