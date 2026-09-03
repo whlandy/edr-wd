@@ -437,3 +437,76 @@ def test_the_indicator_child_import_follows_the_deployed_layout():
     body = inspect.getsource(indicator_module.SubprocessTkIndicator.start)
     assert "from {__name__} import" in body
     assert "from target.recording.indicator import" not in body
+
+
+def test_the_indicator_lets_tk_be_finalized_on_the_thread_that_built_it():
+    """A Tk interpreter must not outlive its thread as a live reference.
+
+    `destroy()` already ran on the indicator thread, but the widget and root
+    references outlived it on the indicator object, so the interpreter was
+    deallocated whenever the session was collected — on whatever thread the
+    collector happened to run. Tcl answers a cross-thread finalize with
+    Tcl_Panic and abort(), which is how the MCP server died three times in ten
+    days, every time at the same offset in tcl86t.dll.
+    """
+    import sys
+    import types
+    import threading
+
+    import target.recording.indicator as indicator_module
+
+    finalized_on: list[str] = []
+
+    class _Widget:
+        def grid(self, **kwargs): return None
+        def configure(self, **kwargs): return None
+
+    class _Root(_Widget):
+        def __init__(self): self.after_calls = 0
+        def title(self, *a): return None
+        def attributes(self, *a): return None
+        def resizable(self, *a): return None
+        def protocol(self, *a): return None
+        def winfo_screenwidth(self): return 1920
+        def winfo_screenheight(self): return 1080
+        def geometry(self, *a): return None
+        def update_idletasks(self): return None
+        def winfo_width(self): return 200
+        def winfo_height(self): return 100
+        def after(self, ms, fn=None): self.after_calls += 1
+        def destroy(self): return None
+        def mainloop(self): return None
+        def __del__(self): finalized_on.append(threading.current_thread().name)
+
+    fake_tk = types.ModuleType("tkinter")
+    fake_tk.Tk = _Root
+    fake_ttk = types.ModuleType("tkinter.ttk")
+    fake_ttk.Frame = lambda *a, **k: _Widget()
+    fake_ttk.Label = lambda *a, **k: _Widget()
+    fake_ttk.Button = lambda *a, **k: _Widget()
+    fake_tk.ttk = fake_ttk
+    fake_messagebox = types.ModuleType("tkinter.messagebox")
+    fake_tk.messagebox = fake_messagebox
+
+    saved = {name: sys.modules.get(name) for name in
+             ("tkinter", "tkinter.ttk", "tkinter.messagebox")}
+    sys.modules.update({"tkinter": fake_tk, "tkinter.ttk": fake_ttk,
+                        "tkinter.messagebox": fake_messagebox})
+    try:
+        made = indicator_module.TkRecordingIndicator(
+            "case", SCOPE, indicator_module.IndicatorCallbacks(
+                pause=lambda: None, resume=lambda: None, stop=lambda: None,
+                add_assertion=lambda target: None,
+            ),
+        )
+        made._run()
+        assert made._root is None
+        assert made._state_label is None
+        assert made._count_label is None
+        assert made._pause_button is None
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
