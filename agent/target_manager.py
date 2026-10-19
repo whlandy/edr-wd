@@ -65,6 +65,8 @@ def _catch(target_name: str, stage: str, func, *args, **kwargs) -> dict:
         return func(*args, **kwargs)
     except SSHAuthError as e:
         return _err(target_name or "?", stage, f"SSH auth error: {e}")
+    except TimeoutError:
+        return _err(target_name or "?", stage, "SSH connection timed out")
     except UnsupportedPlatformError as e:
         return _err(target_name or "?", stage, f"Platform error: {e}")
     except ConfigNotFound as e:

@@ -21,6 +21,7 @@ from .generate_pytest import (
     safe_test_name,
 )
 from .models import ReplaySelector, canonical_json
+from .selectors import window_for_event
 from .templates import generate_redacted_templates
 from agent.execution import StepMaterializationError
 
@@ -38,6 +39,7 @@ class RecordingArtifacts:
     conftest: Path
     pytest_ini: Path
     compile_report: Path
+    compilation: CompilationResult
 
 
 def _atomic_text(path: Path, content: str) -> None:
@@ -75,13 +77,19 @@ def _attach_visual_templates(
     """Project target-redacted capture evidence into replay selectors."""
     compiled_events = events_for_compiled_steps(recording.events)
     updated_steps = []
+    promoted_sequences: set[int] = set()
     for step, event in zip(result.case.steps, compiled_events):
-        capture = event.evidence.get("capture")
+        # A selector must find the element before dispatch. ``capture`` is
+        # the post-action frame; clicks that navigate/close a window may have
+        # removed the target by then. The recording lifecycle explicitly
+        # links the preceding frame as ``beforeCapture``.
+        capture = event.evidence.get("beforeCapture")
         if (
             step.action_id != "gui.click"
-            or step.selector is None
+            or (step.selector is None and "compile_selector_ambiguous" not in step.issues)
             or event.observed_target is None
             or event.observed_target.rect is None
+            or event.observed_target.protected is not False
             or not isinstance(capture, Mapping)
             or capture.get("redacted") is not True
         ):
@@ -129,21 +137,40 @@ def _attach_visual_templates(
             "contextTemplate": templates.context.relative_to(directory).as_posix(),
             "elementSha256": templates.element_sha256,
             "contextSha256": templates.context_sha256,
+            "contextOffset": list(templates.context_offset),
             "relativePoint": list(templates.relative_point),
             "redacted": True,
         }
         selector = ReplaySelector(
-            window=step.selector.window,
-            control=step.selector.control,
+            window=step.selector.window if step.selector is not None else window_for_event(event),
+            control=step.selector.control if step.selector is not None else {},
             visual=visual,
         )
-        updated_steps.append(replace(step, selector=selector))
+        if step.selector is None:
+            # A click without semantic identity becomes replayable only after
+            # an actual, digest-verified, redacted pre-action template exists.
+            # Other compile issues still keep the step incomplete.
+            remaining = tuple(code for code in step.issues
+                              if code != "compile_selector_ambiguous")
+            updated_steps.append(replace(
+                step, selector=selector, issues=remaining,
+                status="ready" if not remaining else "incomplete",
+            ))
+            promoted_sequences.add(event.sequence)
+        else:
+            updated_steps.append(replace(step, selector=selector))
 
     steps = tuple(updated_steps)
+    issues = tuple(issue for issue in result.issues if not (
+        issue.code == "compile_selector_ambiguous"
+        and issue.sequence in promoted_sequences
+    ))
+    status = "ready" if not issues and all(step.status == "ready" for step in steps) else "incomplete"
     return replace(
         result,
-        case=replace(result.case, steps=steps),
-        golden=replace(result.golden, steps=steps),
+        case=replace(result.case, steps=steps, status=status),
+        golden=replace(result.golden, steps=steps, status=status),
+        issues=issues,
     )
 
 
@@ -202,6 +229,9 @@ def write_compilation_artifacts(
     artifact_issues: Iterable[Mapping[str, object]] = (),
 ) -> RecordingArtifacts:
     directory = Path(output_root).expanduser().resolve() / safe_test_name(recording.name)
+    if captures:
+        _persist_capture_observations(directory, recording, captures)
+        result = _attach_visual_templates(directory, recording, result, captures)
     artifacts = RecordingArtifacts(
         directory=directory,
         recording=directory / "recording.json",
@@ -211,10 +241,8 @@ def write_compilation_artifacts(
         conftest=directory / "conftest.py",
         pytest_ini=directory / "pytest.ini",
         compile_report=directory / "compile-report.json",
+        compilation=result,
     )
-    if captures:
-        _persist_capture_observations(directory, recording, captures)
-        result = _attach_visual_templates(directory, recording, result, captures)
     _atomic_text(artifacts.recording, canonical_json(recording.to_dict()))
     _atomic_text(artifacts.case, result.case_json())
     _atomic_text(artifacts.golden_trace, result.golden_json())

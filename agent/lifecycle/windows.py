@@ -40,6 +40,7 @@ from typing import Optional
 
 from agent.ssh_runner import run_ssh, scp_to, scp_dir_to, SSHAuthError
 from agent.target_config import verify_observed_identity
+from .payload import WINDOWS_REQUIRED_FILES, validate_local_payload, verify_runtime_tools
 
 AGENT_ROOT = Path(__file__).resolve().parents[2]  # .../edr-wd
 LOCAL_SCRIPTS = AGENT_ROOT / "target" / "scripts"
@@ -306,6 +307,11 @@ class WindowsLifecycle:
         win_cfg = cfg["windows"]
         target_root = win_cfg["target_root"]
 
+        try:
+            validate_local_payload(LOCAL_TARGET, WINDOWS_REQUIRED_FILES)
+        except ValueError as exc:
+            return self._err("deploy", "deploy_incomplete", str(exc))
+
         # Check for nested path mistake before uploading
         nested_check_cmd = (
             f'powershell -NoProfile -Command "'
@@ -325,15 +331,17 @@ class WindowsLifecycle:
         if rc != 0:
             return self._err("deploy", "deploy_failed", msg[:300])
 
-        # Verify key files landed at the correct level (not nested)
-        for fname in ["server.py", "automation/__init__.py"]:
+        # Verify the current runtime payload, not merely a stale server.py.
+        for fname in WINDOWS_REQUIRED_FILES:
             remote_check = _remote_join(target_root, fname)
-            rc_check, _ = run_ssh(
+            rc_check, out_check = run_ssh(
                 ssh_cfg,
-                f'powershell -NoProfile -Command "Test-Path \\"{remote_check}\\""',
+                'powershell -NoProfile -Command "'
+                f'if (Test-Path -LiteralPath \'{_ps_quote(remote_check)}\' -PathType Leaf) '
+                '{ Write-Output \'found\' } else { Write-Output \'missing\' }"',
                 timeout=10,
             )
-            if rc_check != 0:
+            if rc_check != 0 or out_check.strip().lower() != "found":
                 return self._err(
                     "deploy", "deploy_incomplete",
                     f"Expected file not found at {remote_check}",
@@ -351,12 +359,8 @@ class WindowsLifecycle:
         Read-only check: are required tracked target payload files present
         on the target?  Does not upload or modify anything.
 
-        Required files (see references/agent-workflow.md lifecycle docs):
-          <target_root>/server.py
-          <target_root>/automation/__init__.py
-          <target_root>/scripts/start_server.ps1
-          <target_root>/scripts/stop_server.ps1
-          <target_root>/scripts/install_task.ps1
+        Required files are WINDOWS_REQUIRED_FILES, including the current
+        product, windowing, OCR and time-assertion modules plus startup scripts.
 
         Returns:
           ok=True:  {"ok": True, "stage": "integrity",
@@ -374,13 +378,7 @@ class WindowsLifecycle:
         win_cfg = cfg["windows"]
         target_root = win_cfg["target_root"]
 
-        required = [
-            "server.py",
-            "automation/__init__.py",
-            "scripts/start_server.ps1",
-            "scripts/stop_server.ps1",
-            "scripts/install_task.ps1",
-        ]
+        required = WINDOWS_REQUIRED_FILES
 
         missing: list[str] = []
         ssh_failures: list[dict] = []
@@ -687,6 +685,14 @@ class WindowsLifecycle:
 
         # Phase 1: TCP probe — if already running, do a full GUI readiness check
         if _target_port_listening():
+            # A listener can be an older server. Do not call it ready when the
+            # current runtime's required modules have not been deployed.
+            integrity = self._target_integrity(cfg)
+            if not integrity.get("ok"):
+                return integrity
+            capabilities = verify_runtime_tools(cfg.get("_target_name"))
+            if not capabilities.get("ok"):
+                return capabilities
             gui_check = self._check_gui_readiness(cfg)
             return {
                 "ok": True,
@@ -751,6 +757,9 @@ class WindowsLifecycle:
 
         # Phase 6: GUI readiness check
         time.sleep(2)  # allow server to fully initialize
+        capabilities = verify_runtime_tools(cfg.get("_target_name"))
+        if not capabilities.get("ok"):
+            return capabilities
         gui_check = self._check_gui_readiness(cfg)
 
         return {

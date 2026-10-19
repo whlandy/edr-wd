@@ -22,6 +22,7 @@ class TemplateArtifacts:
     element_sha256: str
     context_sha256: str
     relative_point: tuple[float, float]
+    context_offset: tuple[int, int]
 
 
 def _overlap(left: Rect, right: Rect) -> bool:
@@ -76,6 +77,7 @@ def generate_redacted_templates(
         element_sha256=_digest(element_path),
         context_sha256=_digest(context_path),
         relative_point=relative_point,
+        context_offset=(x0 - context_rect[0], y0 - context_rect[1]),
     )
 
 

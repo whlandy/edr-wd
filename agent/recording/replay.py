@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from agent.execution import AtomicExecutor, CaseRunResult, StepMaterializationError, StepStatus
+from agent.locator import HybridLocator, LocatorError, LocatorRequest, LocatorPolicy
 from agent.execution.confirmation import ExecutionContext
 from agent.trace.events import EventType
 from agent.trace.evidence import EvidenceRecord, persist_screenshot
@@ -19,6 +20,7 @@ from target.protocol_models import AtomicTestStep, Expectation, TargetRef, TestC
 from target.recording.models import RecordingModelError
 
 from .models import GoldenTrace, RecordedStep, ReplayEvaluation, ReplaySelector, canonical_json
+from .selectors import expectation_match
 from .visual import SafeVisualResolver
 
 
@@ -108,60 +110,34 @@ def _snake(name: str) -> str:
 
 def resolve_replay_selector(selector: ReplaySelector, observation: Any) -> TargetRef:
     """Resolve exactly one current target; never reuse a recorded target ID."""
-    window = selector.window
-    expected_process = str(window.get("processName") or "")
-    title_regex = window.get("titleRegex")
-    candidates = []
-    for candidate in _targets(observation):
-        if expected_process and not _matches_process(
-            _get(candidate, "process_name", "processName"), expected_process
-        ):
-            continue
-        if title_regex:
-            title = str(_get(candidate, "window_title", "windowTitle", "title") or "")
-            try:
-                if not re.search(str(title_regex), title):
-                    continue
-            except re.error as exc:
-                raise StepMaterializationError(
-                    "replay_selector_invalid", str(exc), details={"titleRegex": title_regex}
-                )
-        if _control_match(candidate, selector.control):
-            candidates.append(candidate)
-
-    diagnostic = {
-        "strategy": "semantic",
-        "candidate_count": len(candidates),
-        "selector": selector.to_dict(),
+    snapshot_id = _snapshot_id(observation)
+    items = [item if isinstance(item, Mapping) else vars(item)
+             for item in _targets(observation)]
+    bundle = {
+        "snapshot_id": snapshot_id, "observation_id": snapshot_id,
+        "controls": items,
+        "active_window": _get(observation, "active_window") or {},
+        "window_identity": _get(observation, "window_identity") or {},
     }
-    if not candidates:
-        raise StepMaterializationError(
-            "replay_target_not_found",
-            "semantic replay selector matched no current target",
-            details=diagnostic,
+    try:
+        resolution = HybridLocator().resolve(
+            LocatorRequest("gui.click", selector.window, selector.control),
+            bundle, LocatorPolicy(mode="semantic_only"),
         )
-    if len(candidates) > 1:
-        diagnostic["candidate_target_ids"] = [
-            _get(candidate, "target_id", "targetId") for candidate in candidates
-        ]
+    except LocatorError as exc:
+        code = "replay_target_ambiguous" if exc.code == "locator_ambiguous" else exc.code
         raise StepMaterializationError(
-            "replay_target_ambiguous",
-            "semantic replay selector matched multiple current targets",
-            details=diagnostic,
-        )
-    candidate = candidates[0]
-    target_id = _get(candidate, "target_id", "targetId")
-    if not isinstance(target_id, str) or not target_id:
-        raise StepMaterializationError(
-            "replay_observation_invalid",
-            "resolved current target has no target id",
-            details=diagnostic,
-        )
+            code, "semantic replay selector could not resolve one current target",
+            details={"candidate_count": exc.candidate_count, "strategy": "semantic"},
+        ) from exc
+    candidate = resolution.candidate
+    if candidate is None:
+        raise StepMaterializationError("replay_target_not_found", "no semantic target")
     return TargetRef(
-        snapshot_id=_snapshot_id(observation),
-        target_id=target_id,
-        expected_process_name=expected_process,
-        fingerprint=_get(candidate, "fingerprint"),
+        snapshot_id=snapshot_id,
+        target_id=candidate.target_id,
+        expected_process_name=str(selector.window.get("processName") or ""),
+        fingerprint=_get(candidate.source, "fingerprint"),
         selector_hint=dict(selector.control),
     )
 
@@ -249,6 +225,11 @@ def _anchor_point(candidate: Any, control: Mapping[str, Any]) -> tuple[int, int]
             "resolved current target has no rectangle to anchor a pointer path in",
         )
     left, top, right, bottom = rect
+    if right <= left or bottom <= top:
+        raise StepMaterializationError(
+            "replay_observation_invalid",
+            "resolved current target has an empty or inverted rectangle",
+        )
     relative = (control.get("anchor") or {}).get("relativePoint", [0.5, 0.5])
     if (
         not isinstance(relative, (list, tuple)) or len(relative) != 2
@@ -263,26 +244,15 @@ def _anchor_point(candidate: Any, control: Mapping[str, Any]) -> tuple[int, int]
             details={"relativePoint": relative},
         )
     return (
-        left + round((right - left) * float(relative[0])),
-        top + round((bottom - top) * float(relative[1])),
+        min(right - 1, max(left, left + round((right - left) * float(relative[0])))),
+        min(bottom - 1, max(top, top + round((bottom - top) * float(relative[1])))),
     )
 
 
 def _expectation_match(selector: ReplaySelector | None) -> dict[str, Any]:
     if selector is None:
         return {}
-    control = selector.control
-    mapping = {
-        "automationId": "automation_id",
-        "identifier": "identifier",
-        "controlType": "control_type",
-        "name": "text",
-    }
-    return {
-        target: control[source]
-        for source, target in mapping.items()
-        if control.get(source) not in (None, "")
-    }
+    return expectation_match(selector.control)
 
 
 def _verifier_expectation(step: RecordedStep, verifier: Mapping[str, Any]) -> Expectation:
@@ -294,7 +264,17 @@ def _verifier_expectation(step: RecordedStep, verifier: Mapping[str, Any]) -> Ex
             path=f"steps.{step.step_id}.verifiers",
         )
     expected = verifier["expected"]
-    match = _expectation_match(step.selector)
+    match = verifier.get("match", _expectation_match(step.selector))
+    control_assertions = {
+        "visible", "text_contains_time", "text_time_range",
+        "text_equals", "text_contains", "value_equals", "checked", "enabled",
+    }
+    if kind in control_assertions and not match:
+        raise RecordingModelError(
+            "golden_verifier_selector_missing",
+            "control assertion has no stable control identity",
+            path=f"steps.{step.step_id}.verifiers.match",
+        )
     timeout = float(verifier.get("timeoutSeconds", 10.0))
     if kind == "visible":
         return Expectation(
@@ -302,15 +282,17 @@ def _verifier_expectation(step: RecordedStep, verifier: Mapping[str, Any]) -> Ex
             value=match,
             timeout_seconds=timeout,
         )
-    if kind in {"window_text_contains", "window_text_contains_time"}:
+    if kind in {"window_text_contains", "window_text_contains_time", "window_text_time_range"}:
         # No control identity: the pattern or literal need only appear
         # somewhere in the window.
         return Expectation(
             type=(
-                "window_text_contains_time"
-                if kind == "window_text_contains_time" else "window_text_contains"
+                "window_text_time_range" if kind == "window_text_time_range" else
+                "window_text_contains_time" if kind == "window_text_contains_time" else
+                "window_text_contains"
             ),
-            value=expected,
+            value=({"prefix": expected, "durationSeconds": verifier.get("durationSeconds")}
+                   if kind == "window_text_time_range" else expected),
             timeout_seconds=timeout,
         )
     if kind == "text_contains_time":
@@ -319,6 +301,13 @@ def _verifier_expectation(step: RecordedStep, verifier: Mapping[str, Any]) -> Ex
         return Expectation(
             type="control_text_contains_time",
             value={"match": match, "pattern": expected},
+            timeout_seconds=timeout,
+        )
+    if kind == "text_time_range":
+        return Expectation(
+            type="control_text_time_range",
+            value={"match": match, "prefix": expected,
+                   "durationSeconds": verifier.get("durationSeconds")},
             timeout_seconds=timeout,
         )
     if kind in {"text_equals", "text_contains"}:
@@ -410,6 +399,12 @@ class GoldenStepMaterializer:
         self._end_selectors = {
             step.step_id: step.end_selector for step in (*golden.steps, *golden.cleanup)
         }
+        self._next_selectors: dict[str, ReplaySelector | None] = {}
+        for group in (golden.steps, golden.cleanup):
+            for index, recorded in enumerate(group):
+                self._next_selectors[recorded.step_id] = (
+                    group[index + 1].selector if index + 1 < len(group) else None
+                )
         self._environment = environment if environment is not None else os.environ
         self.resolution_attempts = 0
         self.semantic_resolutions = 0
@@ -441,6 +436,45 @@ class GoldenStepMaterializer:
         self._focused_window = wanted
         return refreshed if refreshed is not None else observation
 
+    def prepare_observation_for_step(self, step: AtomicTestStep) -> None:
+        """Focus the recorded window before the executor refreshes its lock.
+
+        A preceding click can transfer foreground to a newly opened window.
+        Refreshing the old lock first would fail before replay can switch to
+        the next step's window.
+        """
+        self._focus_for(self._selectors.get(step.step_id), None)
+
+    def recover_pre_action_observation(self, step: AtomicTestStep) -> bool:
+        """Re-lock the recorded window once if its cached lock went stale.
+
+        This runs before dispatch, so it cannot repeat a GUI mutation. A
+        missing selector or failed focus still blocks the step.
+        """
+        selector = self._selectors.get(step.step_id)
+        if selector is None or self._window_focus is None:
+            return False
+        self._focused_window = None
+        self._focus_for(selector, None)
+        return True
+
+    def recover_post_action_observation(self, step: AtomicTestStep) -> bool:
+        """Re-lock a declared next window when a click transferred foreground.
+
+        This is only safe for an action receipt and optional window-open
+        verifier; a control assertion on the old window must not be silently
+        evaluated against a different window.
+        """
+        current = self._selectors.get(step.step_id)
+        following = self._next_selectors.get(step.step_id)
+        if (self._window_focus is None or current is None or following is None
+                or current.window == following.window
+                or any(exp.type not in {"action_ok", "window_open"}
+                       for exp in step.expectations)):
+            return False
+        self._focus_for(following, None)
+        return True
+
     @property
     def evidence_index(self) -> Mapping[str, EvidenceRecord]:
         if self._evidence_recorder is None:
@@ -469,9 +503,17 @@ class GoldenStepMaterializer:
         candidate = None
         action_id = step.action_id
         visual_args = None
-        if selector is not None and selector.control:
+        # A pure assertion has no action target to materialize. Its evaluator
+        # resolves the declared identity against the fresh observation; forcing
+        # a click-style selector first makes changing text fail prematurely.
+        if selector is not None and (selector.control or selector.visual) and step.action_id != "observe.assert":
             self.resolution_attempts += 1
-            use_visual_only = self._replay_mode == "visual_only" and step.action_id != "observe.assert"
+            if not selector.control and self._replay_mode == "semantic_only":
+                raise StepMaterializationError(
+                    "replay_selector_semantic_missing",
+                    "this click has only a visual selector; choose semantic_first or visual_only replay",
+                )
+            use_visual_only = (self._replay_mode == "visual_only" or not selector.control)
             if use_visual_only:
                 if self._visual_resolver is None or selector.visual is None:
                     raise StepMaterializationError(
@@ -482,6 +524,52 @@ class GoldenStepMaterializer:
                 visual_args = dict(fallback.args)
                 target_ref = None
                 self.visual_fallbacks += 1
+            elif (self._replay_mode == "semantic_first" and
+                  self._visual_resolver is not None and selector.visual is not None):
+                visual_evidence = self._visual_resolver.collect_evidence(selector, observation)
+                snapshot_id = _snapshot_id(observation)
+                bundle = {
+                    "observation_id": snapshot_id,
+                    "controls": [item if isinstance(item, Mapping) else vars(item)
+                                 for item in _targets(observation)],
+                    "active_window": _get(observation, "active_window") or {},
+                    "window_identity": _get(observation, "window_identity") or {},
+                    "screenshot_scope": _get(observation, "screenshot_scope"),
+                    "screenshot_redacted": _get(observation, "screenshot_redacted"),
+                }
+                ocr_boxes = tuple(_get(observation, "ocr_boxes") or ())
+                try:
+                    fused = HybridLocator().resolve(
+                        LocatorRequest(step.action_id, selector.window, selector.control,
+                                       ocr_text=str(selector.control.get("name") or "")),
+                        bundle, LocatorPolicy(mode="semantic_first"),
+                        visual_candidates=visual_evidence, ocr_boxes=ocr_boxes,
+                    )
+                except LocatorError as exc:
+                    if exc.code == "locator_ambiguous":
+                        semantic_count = len(HybridLocator().collect_candidates(
+                            LocatorRequest(step.action_id, selector.window, selector.control), bundle))
+                        code = "visual_match_ambiguous" if semantic_count == 0 else "replay_target_ambiguous"
+                    else:
+                        code = exc.code
+                    raise StepMaterializationError(code, str(exc),
+                                                   details={"candidate_count": exc.candidate_count}) from exc
+                if fused.candidate is None:
+                    fallback = self._visual_resolver.resolve(step.action_id, selector, observation)
+                    action_id = fallback.action_id
+                    visual_args = dict(fallback.args)
+                    target_ref = None
+                    self.visual_fallbacks += 1
+                else:
+                    item = fused.candidate
+                    target_ref = TargetRef(
+                        snapshot_id=snapshot_id, target_id=item.target_id,
+                        expected_process_name=str(selector.window.get("processName") or ""),
+                        fingerprint=_get(item.source, "fingerprint"),
+                        selector_hint=dict(selector.control),
+                    )
+                    self.semantic_resolutions += 1
+                    candidate = item.source
             else:
                 try:
                     target_ref = resolve_replay_selector(selector, observation)
@@ -530,7 +618,7 @@ class GoldenStepMaterializer:
         if visual_args is None and step.action_id in {"gui.click", "gui.click_target"}:
             semantic_args = {
                 "automation_id": control.get("automationId"),
-                "text": control.get("name"),
+                "text": None if control.get("automationId") or control.get("identifier") else control.get("name"),
                 "control_type": control.get("controlType"),
                 "expected_process_name": expected_process,
             }
@@ -600,6 +688,7 @@ class ReplayRuntime:
     #: directory.  Requires a trace store; frames that the target did not
     #: redact are refused rather than written.
     persist_replay_screenshots: bool = False
+    end_product_run: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -643,7 +732,7 @@ def _persist_evaluation(path: Path, evaluation: ReplayEvaluation) -> None:
             pass
 
 
-def replay_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRunResult:
+def _run_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRunResult:
     if golden.status != "ready":
         raise RecordingModelError(
             "golden_trace_incomplete", "only ready golden traces can replay", path="golden.status"
@@ -824,6 +913,15 @@ def replay_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRun
         target.trace_store.root if target.trace_store is not None else None,
         evaluation_path,
     )
+
+
+def replay_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRunResult:
+    """Ensure target GUI lease is released even when replay raises."""
+    try:
+        return _run_golden_trace(target, golden)
+    finally:
+        if target.end_product_run is not None:
+            target.end_product_run()
 
 
 __all__ = [

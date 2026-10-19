@@ -13,7 +13,8 @@ from .visual import VisualCandidate
 
 def _confidence(region: Image.Image, template: Image.Image) -> float:
     difference = ImageChops.difference(region, template)
-    mean = ImageStat.Stat(difference).mean[0]
+    channels = ImageStat.Stat(difference).mean
+    mean = sum(channels) / len(channels)
     return max(0.0, 1.0 - float(mean) / 255.0)
 
 
@@ -33,7 +34,7 @@ class PillowTemplateMatcher:
         self,
         *,
         scales: Sequence[float] = (0.75, 1.0, 1.25, 1.5),
-        max_candidates: int = 8,
+        max_candidates: int = 32,
     ) -> None:
         self.scales = tuple(scales)
         self.max_candidates = max_candidates
@@ -50,9 +51,9 @@ class PillowTemplateMatcher:
             else getattr(observation, "screenshot_bytes", None)
         )
         if screenshot_bytes is not None:
-            screenshot = Image.open(BytesIO(screenshot_bytes)).convert("L")
+            screenshot = Image.open(BytesIO(screenshot_bytes)).convert("RGB")
         elif screenshot_path:
-            screenshot = Image.open(Path(screenshot_path)).convert("L")
+            screenshot = Image.open(Path(screenshot_path)).convert("RGB")
         else:
             return []
         origin = (
@@ -63,7 +64,22 @@ class PillowTemplateMatcher:
         if not isinstance(origin, (list, tuple)) or len(origin) != 2:
             origin = [0, 0]
         offset_x, offset_y = int(origin[0]), int(origin[1])
-        template_source = Image.open(Path(template_path)).convert("L")
+        search_rect = (
+            observation.get("search_rect") if isinstance(observation, Mapping) else None
+        )
+        if search_rect is not None:
+            if not isinstance(search_rect, (list, tuple)) or len(search_rect) != 4:
+                return []
+            x0 = max(0, int(search_rect[0]) - offset_x)
+            y0 = max(0, int(search_rect[1]) - offset_y)
+            x1 = min(screenshot.width, int(search_rect[2]) - offset_x)
+            y1 = min(screenshot.height, int(search_rect[3]) - offset_y)
+            if x0 >= x1 or y0 >= y1:
+                return []
+            screenshot = screenshot.crop((x0, y0, x1, y1))
+            offset_x += x0
+            offset_y += y0
+        template_source = Image.open(Path(template_path)).convert("RGB")
         scored: list[VisualCandidate] = []
         for scale in self.scales:
             width = max(1, round(template_source.width * scale))
@@ -77,7 +93,18 @@ class PillowTemplateMatcher:
                 for x in range(0, screenshot.width - width + 1, stride):
                     score = _confidence(screenshot.crop((x, y, x + width, y + height)), template)
                     coarse.append((score, x, y))
-            for _, coarse_x, coarse_y in sorted(coarse, reverse=True)[:5]:
+            # A global top-five often contains five neighbouring offsets of
+            # one repeated icon, hiding the other icons entirely. Keep
+            # spatially distinct seeds before pixel-level refinement.
+            seeds = []
+            for score, x, y in sorted(coarse, reverse=True):
+                rect = (x, y, x + width, y + height)
+                if any(_iou(rect, previous) > 0.3 for _, _, _, previous in seeds):
+                    continue
+                seeds.append((score, x, y, rect))
+                if len(seeds) >= self.max_candidates:
+                    break
+            for _, coarse_x, coarse_y, _ in seeds:
                 x_start, x_end = max(0, coarse_x - stride), min(screenshot.width - width, coarse_x + stride)
                 y_start, y_end = max(0, coarse_y - stride), min(screenshot.height - height, coarse_y + stride)
                 best = (0.0, coarse_x, coarse_y)

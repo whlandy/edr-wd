@@ -47,6 +47,7 @@ import re
 from typing import Any, Callable, Mapping
 
 from target.action_dispatcher import ActionReceipt
+from target.time_assertions import matching_times, parse_time_range
 
 from .models import ExpectationResult, StepStatus
 
@@ -129,6 +130,23 @@ def _controls(observation: Any) -> list[dict]:
         return ctrls
     targets = getattr(observation, "targets", ()) or ()
     return [_target_dict(item) for item in targets if getattr(item, "kind", None) == "control"]
+
+
+def _has_observed_collection(observation: Any, field: str) -> bool:
+    """A negative assertion needs an actual inventory, not a missing field."""
+    if observation is None:
+        return False
+    if isinstance(observation, Mapping):
+        values = observation.get(field)
+    else:
+        values = getattr(observation, field, None)
+    if isinstance(values, list):
+        return all(isinstance(item, Mapping) for item in values)
+    if isinstance(observation, Mapping):
+        return False
+    targets = getattr(observation, "targets", None)
+    return (isinstance(targets, (list, tuple))
+            and all(hasattr(item, "kind") for item in targets))
 
 
 def _target_dict(target: Any) -> dict:
@@ -241,6 +259,9 @@ def evaluate_window_closed(
     step: Any, expectation: Any, observation: Any, action_receipt: ActionReceipt | None,
 ) -> ExpectationResult:
     expected = _expectation_value_window(expectation)
+    if not _has_observed_collection(observation, "windows"):
+        return _failed("window_closed", expected, None, _observation_id(observation), 0,
+                       diagnostic="window inventory unavailable or invalid")
     windows = _windows(observation)
     for w in windows:
         if _matches(w, expected):
@@ -263,11 +284,32 @@ def evaluate_active_window_owner(
                    diagnostic="active window owner mismatch")
 
 
+def _matching_controls(observation: Any, expected: Any) -> list[dict]:
+    return [control for control in _controls(observation)
+            if _matches(control, expected)]
+
+
+def _valid_control_selector(expected: Any) -> bool:
+    """A control assertion must name a widget, never the whole inventory."""
+    if isinstance(expected, Mapping):
+        identity_fields = {
+            "automation_id", "identifier", "control_id", "control_type",
+            "text", "name", "title", "title_regex", "class_name",
+        }
+        return bool(identity_fields.intersection(expected)) and all(
+            isinstance(key, str) and bool(key)
+            and value is not None and value != ""
+            for key, value in expected.items()
+        )
+    return isinstance(expected, str) and bool(expected)
+
+
 def _find_control(observation: Any, expected: Any) -> dict | None:
-    for c in _controls(observation):
-        if _matches(c, expected):
-            return c
-    return None
+    """A positive control assertion must identify exactly one current widget."""
+    if not _valid_control_selector(expected):
+        return None
+    matches = _matching_controls(observation, expected)
+    return matches[0] if len(matches) == 1 else None
 
 
 def evaluate_control_exists(
@@ -278,15 +320,21 @@ def evaluate_control_exists(
     if found is not None:
         return _passed("control_exists", expected, found, _observation_id(observation), 0)
     return _failed("control_exists", expected, None, _observation_id(observation), 0,
-                   diagnostic="control not found")
+                   diagnostic="control not uniquely found")
 
 
 def evaluate_control_absent(
     step: Any, expectation: Any, observation: Any, action_receipt: ActionReceipt | None,
 ) -> ExpectationResult:
     expected = expectation.value
-    found = _find_control(observation, expected)
-    if found is None:
+    if not _valid_control_selector(expected):
+        return _failed("control_absent", expected, None, _observation_id(observation), 0,
+                       diagnostic="control selector is missing or invalid")
+    if not _has_observed_collection(observation, "controls"):
+        return _failed("control_absent", expected, None, _observation_id(observation), 0,
+                       diagnostic="control inventory unavailable or invalid")
+    found = _matching_controls(observation, expected)
+    if not found:
         return _passed("control_absent", expected, None, _observation_id(observation), 0)
     return _failed("control_absent", expected, found, _observation_id(observation), 0,
                    diagnostic="control unexpectedly present")
@@ -296,6 +344,14 @@ def _control_text(control: dict | None) -> str:
     if control is None:
         return ""
     return str(control.get("text") or control.get("name") or "")
+
+
+def _control_time_texts(control: dict | None) -> tuple[str, ...]:
+    """UIA/Accessibility may expose log timestamps as text, name, or value."""
+    if control is None:
+        return ()
+    return tuple(str(value) for key in ("text", "name", "value")
+                 if (value := control.get(key)) not in (None, ""))
 
 
 def evaluate_control_text_equals(
@@ -309,6 +365,9 @@ def evaluate_control_text_equals(
     match = raw.get("match")
     text = raw.get("text")
     control = _find_control(observation, match)
+    if control is None:
+        return _failed("control_text_equals", text, None, _observation_id(observation),
+                       0, diagnostic="assertion control not uniquely found")
     actual = _control_text(control)
     if actual == text:
         return _passed("control_text_equals", text, actual, _observation_id(observation), 0)
@@ -325,7 +384,13 @@ def evaluate_control_text_contains(
                        0, diagnostic="value must be {match, text}")
     match = raw.get("match")
     text = raw.get("text", "")
+    if not isinstance(text, str) or not text:
+        return _failed("control_text_contains", text, None, _observation_id(observation),
+                       0, diagnostic="expected substring must be non-empty")
     control = _find_control(observation, match)
+    if control is None:
+        return _failed("control_text_contains", text, None, _observation_id(observation),
+                       0, diagnostic="assertion control not uniquely found")
     actual = _control_text(control)
     if text in actual:
         return _passed("control_text_contains", text, actual, _observation_id(observation), 0)
@@ -389,6 +454,10 @@ def evaluate_control_text_contains_time(
                        _observation_id(observation), 0,
                        diagnostic=f"invalid strftime pattern: {exc}")
     control = _find_control(observation, raw.get("match"))
+    if control is None:
+        return _failed("control_text_contains_time", expected, None,
+                       _observation_id(observation), 0,
+                       diagnostic="assertion control not uniquely found")
     actual = _control_text(control)
     if expected in actual:
         return _passed("control_text_contains_time", expected, actual,
@@ -406,6 +475,11 @@ def _evaluate_control_property(expectation_type, property_name, expectation, obs
             diagnostic="value must be {match, expected}",
         )
     control = _find_control(observation, raw.get("match"))
+    if control is None:
+        return _failed(
+            expectation_type, raw["expected"], None, _observation_id(observation), 0,
+            diagnostic="assertion control not uniquely found",
+        )
     actual = control.get(property_name) if control is not None else None
     expected = raw["expected"]
     if actual == expected:
@@ -432,6 +506,10 @@ def evaluate_window_text_contains(
     step: Any, expectation: Any, observation: Any, action_receipt: ActionReceipt | None,
 ) -> ExpectationResult:
     expected_text = expectation.value
+    if not isinstance(expected_text, str) or not expected_text:
+        return _failed("window_text_contains", expected_text, None,
+                       _observation_id(observation), 0,
+                       diagnostic="expected substring must be non-empty")
     hits: list[str] = []
     for w in _windows(observation):
         text = str(w.get("text") or w.get("title") or "")
@@ -484,6 +562,52 @@ def evaluate_window_text_contains_time(
     return _failed("window_text_contains_time", expected, [],
                    _observation_id(observation), 0,
                    diagnostic=f"rendered pattern {pattern!r} not found in window or tree")
+
+
+def _time_range_spec(value: Any) -> tuple[str, int | None]:
+    if not isinstance(value, dict):
+        raise ValueError("time range value must be {prefix, durationSeconds?}")
+    prefix = value.get("prefix")
+    duration = value.get("durationSeconds")
+    parse_time_range(prefix, duration)
+    return prefix, duration
+
+
+def evaluate_control_text_time_range(
+    step: Any, expectation: Any, observation: Any, action_receipt: ActionReceipt | None,
+) -> ExpectationResult:
+    raw = expectation.value
+    try:
+        prefix, duration = _time_range_spec(raw)
+    except ValueError as exc:
+        return _failed("control_text_time_range", raw, None, _observation_id(observation), 0, str(exc))
+    control = _find_control(observation, raw.get("match"))
+    if control is None:
+        return _failed("control_text_time_range", raw, None, _observation_id(observation), 0,
+                       "assertion control not uniquely found")
+    actual = _control_time_texts(control)
+    if any(matching_times(text, prefix, duration) for text in actual):
+        return _passed("control_text_time_range", raw, actual, _observation_id(observation), 0)
+    return _failed("control_text_time_range", raw, actual, _observation_id(observation), 0,
+                   "no observed time is within the expected range")
+
+
+def evaluate_window_text_time_range(
+    step: Any, expectation: Any, observation: Any, action_receipt: ActionReceipt | None,
+) -> ExpectationResult:
+    raw = expectation.value
+    try:
+        prefix, duration = _time_range_spec(raw)
+    except ValueError as exc:
+        return _failed("window_text_time_range", raw, None, _observation_id(observation), 0, str(exc))
+    texts = [str(window.get("text") or window.get("title") or "") for window in _windows(observation)]
+    texts.extend(text for control in _controls(observation)
+                 for text in _control_time_texts(control))
+    matches = [text for text in texts if matching_times(text, prefix, duration)]
+    if matches:
+        return _passed("window_text_time_range", raw, matches, _observation_id(observation), 0)
+    return _failed("window_text_time_range", raw, texts, _observation_id(observation), 0,
+                   "no observed time is within the expected range")
 
 
 # ---------------------------------------------------------------------------
@@ -622,6 +746,8 @@ EXPECTATION_REGISTRY: dict[str, Callable[..., ExpectationResult]] = {
     "window_text_contains": evaluate_window_text_contains,
     "control_text_contains_time": evaluate_control_text_contains_time,
     "window_text_contains_time": evaluate_window_text_contains_time,
+    "control_text_time_range": evaluate_control_text_time_range,
+    "window_text_time_range": evaluate_window_text_time_range,
     "visual_evidence_captured": evaluate_visual_evidence_captured,
 }
 

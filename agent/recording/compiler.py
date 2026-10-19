@@ -14,7 +14,10 @@ from target.recording.models import (
 )
 
 from .models import GoldenTrace, RecordedStep, RecordedTestCase, ReplaySelector, canonical_json
-from .selectors import synthesize_drag_end_selector, synthesize_selector
+from .selectors import (
+    assertion_match, synthesize_drag_end_selector, synthesize_selector,
+    window_for_event,
+)
 
 _ACTION_MAP = {
     "pointer_click": "gui.click",
@@ -37,6 +40,11 @@ _VERIFIER_REQUIRED_ISSUE = {
         "recorded drag requires an explicit result verifier before replay",
     ),
 }
+
+_CONTROL_ASSERTION_TYPES = frozenset({
+    "text_equals", "text_contains", "value_equals", "visible", "checked",
+    "enabled", "text_contains_time", "text_time_range",
+})
 
 
 @dataclass(frozen=True)
@@ -285,20 +293,57 @@ def _assertion_is_bound(
     )
 
 
+def _cross_window_bound_assertion(
+    event: RawCaptureEvent, action_event: RawCaptureEvent | None,
+) -> bool:
+    """A content verifier must observe its own window after the action.
+
+    Window-open assertions use the product inventory and can remain attached
+    to the action. Older recordings without an assertion-window stamp retain
+    their legacy binding because their destination cannot be determined.
+    """
+    return bool(
+        action_event is not None
+        and isinstance(event.evidence.get("window"), Mapping)
+        and (event.assertion or {}).get("type") != "window_open"
+        and (
+            window_for_event(event) != window_for_event(action_event)
+            or _different_recorded_handles(event, action_event)
+        )
+    )
+
+
+def _different_recorded_handles(event: RawCaptureEvent, action_event: RawCaptureEvent) -> bool:
+    """Use HWND only to recognize distinct windows within one recording."""
+    current = event.evidence.get("window")
+    previous = action_event.evidence.get("window")
+    if not isinstance(current, Mapping) or not isinstance(previous, Mapping):
+        return False
+    current_handle, previous_handle = current.get("handle"), previous.get("handle")
+    return bool(
+        isinstance(current_handle, int) and not isinstance(current_handle, bool)
+        and isinstance(previous_handle, int) and not isinstance(previous_handle, bool)
+        and current_handle != previous_handle
+    )
+
+
 def events_for_compiled_steps(events: Iterable[RawCaptureEvent]) -> tuple[RawCaptureEvent, ...]:
     """Return one source event per compiled step, including unbound transitions."""
     aligned: list[RawCaptureEvent] = []
     last_action_causal_id: str | None = None
     has_last_action = False
+    last_action_event: RawCaptureEvent | None = None
     for event in coalesce_events(events):
         if _transition_is_bound(event, last_action_causal_id, has_last_action):
             continue
-        if _assertion_is_bound(event, last_action_causal_id, has_last_action):
+        if (_assertion_is_bound(event, last_action_causal_id, has_last_action)
+                and not _cross_window_bound_assertion(event, last_action_event)):
             continue
         aligned.append(event)
         if event.type in _ACTION_MAP:
             last_action_causal_id = event.causal_id
             has_last_action = True
+            last_action_event = event
     return tuple(aligned)
 
 
@@ -327,6 +372,10 @@ def _compile_event(event: RawCaptureEvent, step_no: int) -> tuple[RecordedStep, 
         if "expected" not in assertion:
             issues.append(CompileIssue("compile_assertion_missing_expected", event.sequence, "assertion requires explicit expected"))
         else:
+            if assertion.get("type") in _CONTROL_ASSERTION_TYPES:
+                match = assertion_match(event)
+                if match:
+                    assertion["match"] = match
             verifiers.append(assertion)
     elif action_id is None:
         issues.append(CompileIssue("compile_action_unsupported", event.sequence, f"unsupported event type {event.type!r}"))
@@ -432,11 +481,27 @@ def compile_recording(
         ))
     last_action_index: int | None = None
     last_action_causal_id: str | None = None
+    last_action_event: RawCaptureEvent | None = None
     verifier_required: dict[int, tuple[str, int]] = {}
+    cross_window_verified_actions: set[int] = set()
 
     def bind_verifier(index: int, verifier: dict[str, Any], event: RawCaptureEvent) -> None:
         """Fold a causally bound verifier into the action step it proves."""
         previous = steps[index]
+        if event.type == "assertion" and verifier.get("type") in _CONTROL_ASSERTION_TYPES:
+            match = assertion_match(event)
+            if match is None:
+                selector_issue = CompileIssue(
+                    "compile_assertion_selector_ambiguous", event.sequence,
+                    "bound control assertion has no stable selector of its own",
+                )
+                issues.append(selector_issue)
+                previous = replace(
+                    previous, status="incomplete",
+                    issues=(*previous.issues, selector_issue.code),
+                )
+            else:
+                verifier = {**verifier, "match": match}
         step = replace(previous, verifiers=(*previous.verifiers, verifier))
         if event.evidence.get("captureError"):
             capture_issue = CompileIssue(
@@ -451,10 +516,21 @@ def compile_recording(
         steps[index] = step
 
     for event in events:
+        ambiguous_bound_window = False
         if _assertion_is_bound(event, last_action_causal_id, last_action_index is not None):
             assert last_action_index is not None
-            bind_verifier(last_action_index, dict(event.assertion or {}), event)
-            continue
+            if _cross_window_bound_assertion(event, last_action_event):
+                # Keep the causal proof for verifier-required scroll/drag, but
+                # execute the assertion after focusing its destination window.
+                cross_window_verified_actions.add(last_action_index)
+                ambiguous_bound_window = bool(
+                    last_action_event is not None
+                    and _different_recorded_handles(event, last_action_event)
+                    and window_for_event(event) == window_for_event(last_action_event)
+                )
+            else:
+                bind_verifier(last_action_index, dict(event.assertion or {}), event)
+                continue
         if event.type == "window_transition":
             transition_kind = event.input.get("kind")
             bound = _transition_is_bound(
@@ -518,6 +594,13 @@ def compile_recording(
             ))
             continue
         step, event_issues = _compile_event(event, len(steps) + 1)
+        if ambiguous_bound_window:
+            identity_issue = CompileIssue(
+                "compile_window_identity_ambiguous", event.sequence,
+                "distinct recorded windows share one replay selector; capture a stable window root identity",
+            )
+            step = replace(step, status="incomplete", issues=(*step.issues, identity_issue.code))
+            event_issues.append(identity_issue)
         if event.evidence.get("captureError"):
             capture_issue = CompileIssue(
                 "recording_capture_evidence_unavailable",
@@ -534,6 +617,7 @@ def compile_recording(
         if step.action_id is not None:
             last_action_index = len(steps) - 1
             last_action_causal_id = event.causal_id
+            last_action_event = event
             if event.type in VERIFIER_REQUIRED_EVENT_TYPES:
                 verifier_required[last_action_index] = (event.type, event.sequence)
 
@@ -555,7 +639,7 @@ def compile_recording(
         return False
 
     for index, (event_type, sequence) in verifier_required.items():
-        if steps[index].verifiers or _run_is_verified(index):
+        if index in cross_window_verified_actions or steps[index].verifiers or _run_is_verified(index):
             continue
         code, message = _VERIFIER_REQUIRED_ISSUE[event_type]
         issue = CompileIssue(code, sequence, message)

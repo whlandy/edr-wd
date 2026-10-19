@@ -8,22 +8,11 @@ from typing import Any, Optional
 
 from agent import mcp_manager, target_manager
 from agent.target_config import TargetConfig
+from agent.products.registry import normalize_backend
+from target.product_profiles import (default_profile_for_backend as catalog_default_profile,
+                                     get_capability)
 
 from .state import TargetState
-
-
-DEFAULT_PROFILE_BY_BACKEND: dict[str, str] = {
-    "windows_pywinauto": "windows_hisec",
-    "uia": "windows_hisec",
-    "win32": "windows_hisec",
-    "macos_accessibility": "macos_generic",
-}
-
-PROFILE_BACKENDS: dict[str, set[str]] = {
-    "windows_hisec": {"windows_pywinauto", "uia", "win32"},
-    "macos_generic": {"macos_accessibility"},
-    "macos_hisec": {"macos_accessibility"},
-}
 
 
 class TargetSubAgent:
@@ -43,7 +32,7 @@ class TargetSubAgent:
         self.state = TargetState(
             target=target,
             platform=raw.get("platform", "windows"),
-            app_profile=raw.get("app_profile"),
+            app_profile=self.config.get_target_app_profile(target),
         )
         self._lock = threading.RLock()
 
@@ -196,12 +185,20 @@ class TargetSubAgent:
         backend = self.state.backend_kind
         if not backend:
             return False
-        expected = PROFILE_BACKENDS.get(profile)
-        return expected is not None and backend not in expected
+        try:
+            get_capability(profile, normalize_backend(backend))
+        except ValueError:
+            return True
+        return False
 
     def default_profile_for_backend(self) -> Optional[str]:
         backend = self.state.backend_kind
-        return DEFAULT_PROFILE_BY_BACKEND.get(backend or "")
+        if not backend:
+            return None
+        try:
+            return catalog_default_profile(normalize_backend(backend))
+        except ValueError:
+            return None
 
     def resolve_profile_for_live_backend(
         self,

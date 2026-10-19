@@ -36,6 +36,7 @@ from typing import Optional
 
 from agent.ssh_runner import run_ssh, scp_to, scp_dir_to
 from agent.target_config import verify_observed_identity
+from .payload import MACOS_REQUIRED_FILES, validate_local_payload, verify_runtime_tools
 
 AGENT_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_SCRIPTS = AGENT_ROOT / "target" / "scripts" / "macos"
@@ -196,6 +197,11 @@ class MacOSLifecycle:
         mac_cfg = cfg["macos"]
         macos_root = mac_cfg["root"]
 
+        try:
+            validate_local_payload(LOCAL_TARGET, MACOS_REQUIRED_FILES)
+        except ValueError as exc:
+            return self._err("deploy", "deploy_incomplete", str(exc))
+
         # Upload tracked local target/ contents to remote macos_root.
         # tracked_only=True excludes untracked files (logs/, *.pyc, .tmp,
         # local config) from the sync, mirroring Windows scp_dir_to.
@@ -206,15 +212,16 @@ class MacOSLifecycle:
         if rc != 0:
             return self._err("deploy", "deploy_failed", msg[:300])
 
-        # Verify key files landed at the correct level
-        for fname in ["server.py", "automation/__init__.py"]:
+        # Verify the current runtime payload, not merely a stale server.py.
+        for fname in MACOS_REQUIRED_FILES:
             remote_check = _remote_join(macos_root, fname)
-            rc_check, _ = run_ssh(
+            sh_escaped = remote_check.replace("'", "'\\''")
+            rc_check, out_check = run_ssh(
                 ssh_cfg,
-                f"test -f '{remote_check}' && echo 'found' || echo 'missing'",
+                f"test -f '{sh_escaped}' && echo 'found' || echo 'missing'",
                 timeout=10,
             )
-            if rc_check != 0:
+            if rc_check != 0 or out_check.strip() != "found":
                 return self._err(
                     "deploy", "deploy_incomplete",
                     f"Expected file not found: {remote_check}",
@@ -232,13 +239,8 @@ class MacOSLifecycle:
         Read-only check: are required tracked macOS target payload files
         present on the target?  Does not upload or modify anything.
 
-        Required files (see references/agent-workflow.md lifecycle docs):
-          <root>/server.py
-          <root>/automation/__init__.py
-          <root>/scripts/macos/start_server.sh
-          <root>/scripts/macos/stop_server.sh
-          <root>/scripts/macos/install_launch_agent.sh
-          <root>/scripts/macos/com.edr-wd.target.plist.template
+        Required files are MACOS_REQUIRED_FILES, including the current
+        product, windowing, OCR and time-assertion modules plus launch scripts.
 
         Returns:
           ok=True:  {"ok": True, "stage": "integrity",
@@ -253,14 +255,7 @@ class MacOSLifecycle:
         mac_cfg = cfg["macos"]
         target_root = mac_cfg["root"]
 
-        required = [
-            "server.py",
-            "automation/__init__.py",
-            "scripts/macos/start_server.sh",
-            "scripts/macos/stop_server.sh",
-            "scripts/macos/install_launch_agent.sh",
-            "scripts/macos/com.edr-wd.target.plist.template",
-        ]
+        required = MACOS_REQUIRED_FILES
 
         missing: list[str] = []
         ssh_failures: list[dict] = []
@@ -513,6 +508,14 @@ class MacOSLifecycle:
                         ),
                     },
                 }
+            # Matching process/cwd proves ownership, not that the current
+            # product/windowing payload is present on disk.
+            integrity = self._target_integrity(cfg)
+            if not integrity.get("ok"):
+                return integrity
+            capabilities = verify_runtime_tools(cfg.get("_target_name"))
+            if not capabilities.get("ok"):
+                return capabilities
             gui_check = self._check_gui_readiness(cfg)
             return {
                 "ok": True,
@@ -576,6 +579,9 @@ class MacOSLifecycle:
             )
 
         time.sleep(2)
+        capabilities = verify_runtime_tools(cfg.get("_target_name"))
+        if not capabilities.get("ok"):
+            return capabilities
         gui_check = self._check_gui_readiness(cfg)
 
         return {

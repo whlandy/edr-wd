@@ -242,9 +242,15 @@ class AtomicExecutor:
         started = _utcnow_iso()
         start_perf = time.perf_counter()
 
-        backend_unavailable = self._probe_backend()
-
         steps = list(case.steps)
+        materializer = step_materializer or self._step_materializer
+        prepare_observation = getattr(materializer, "prepare_observation_for_step", None)
+        try:
+            if steps and callable(prepare_observation):
+                prepare_observation(steps[0])
+            backend_unavailable = self._probe_backend()
+        except (BackendUnavailable, StepMaterializationError):
+            backend_unavailable = True
         required_flags = tuple(step.required for step in steps)
         step_results: list[StepResult] = []
         aborted = False
@@ -274,7 +280,6 @@ class AtomicExecutor:
                 abort_reason="backend_unavailable",
             )
 
-        materializer = step_materializer or self._step_materializer
         for step_index, step in enumerate(steps):
             sr = self.run_step(case, step, snapshot=None, step_materializer=materializer)
             step_results.append(sr)
@@ -378,18 +383,40 @@ class AtomicExecutor:
 
         # 2. VALIDATING -> OBSERVING (refresh).
         state = next_state(state, StepState.OBSERVING)
+        materializer = step_materializer or self._step_materializer
+        prepare_observation = getattr(materializer, "prepare_observation_for_step", None)
+        if callable(prepare_observation):
+            try:
+                prepare_observation(step)
+            except (BackendUnavailable, StepMaterializationError) as exc:
+                ended = _utcnow_iso()
+                return self._finalise_blocked(
+                    step, started, ended, start_perf,
+                    error_payload={"code": getattr(exc, "code", "backend_unavailable"),
+                                   "message": str(exc)},
+                    transition_expected=transition_expected,
+                )
         try:
             snapshot_id = self._observations.refresh()
             observation = self._observations.get_snapshot(snapshot_id)
         except BackendUnavailable as exc:
-            ended = _utcnow_iso()
-            return self._finalise_blocked(
-                step, started, ended, start_perf,
-                error_payload={"code": "backend_unavailable", "message": str(exc)},
-                transition_expected=transition_expected,
-            )
+            recover_observation = getattr(materializer, "recover_pre_action_observation", None)
+            try:
+                if not callable(recover_observation) or not recover_observation(step):
+                    raise exc
+                snapshot_id = self._observations.refresh()
+                observation = self._observations.get_snapshot(snapshot_id)
+            except (BackendUnavailable, StepMaterializationError) as recovery_error:
+                ended = _utcnow_iso()
+                return self._finalise_blocked(
+                    step, started, ended, start_perf,
+                    error_payload={
+                        "code": getattr(recovery_error, "code", "backend_unavailable"),
+                        "message": str(recovery_error),
+                    },
+                    transition_expected=transition_expected,
+                )
 
-        materializer = step_materializer or self._step_materializer
         if materializer is not None:
             try:
                 step = materializer(step, observation)
@@ -514,17 +541,39 @@ class AtomicExecutor:
         # P1.2 does not classify transitions; that's P2.1. We do,
         # however, refresh the observation so expectations evaluate
         # against post-action state.
+        inventory_refresh = getattr(self._observations, "refresh_window_inventory", None)
+        window_only_assertions = (
+            bool(receipt.ok) and callable(inventory_refresh)
+            and any(exp.type in {"window_open", "window_closed"} for exp in step.expectations)
+            and all(exp.type in {"action_ok", "window_open", "window_closed"}
+                    for exp in step.expectations)
+        )
+
+        def refresh_after_action() -> Any:
+            return inventory_refresh() if window_only_assertions else self._observations.refresh()
+
         try:
-            snapshot_id = self._observations.refresh()
+            snapshot_id = refresh_after_action()
             observation = self._observations.get_snapshot(snapshot_id)
         except BackendUnavailable as exc:
-            ended = _utcnow_iso()
-            return self._finalise_blocked(
-                step, started, ended, start_perf,
-                error_payload={"code": "backend_unavailable", "message": str(exc)},
-                transition_expected=transition_expected,
-                receipt=receipt,
-            )
+            recover_observation = getattr(materializer, "recover_post_action_observation", None)
+            try:
+                if (window_only_assertions or not receipt.ok or not callable(recover_observation)
+                        or not recover_observation(step)):
+                    raise exc
+                snapshot_id = refresh_after_action()
+                observation = self._observations.get_snapshot(snapshot_id)
+            except (BackendUnavailable, StepMaterializationError) as recovery_error:
+                ended = _utcnow_iso()
+                return self._finalise_blocked(
+                    step, started, ended, start_perf,
+                    error_payload={
+                        "code": getattr(recovery_error, "code", "backend_unavailable"),
+                        "message": str(recovery_error),
+                    },
+                    transition_expected=transition_expected,
+                    receipt=receipt,
+                )
 
         # 6. CAPTURING_AFTER (policy dependent).
         skip_after = (
@@ -549,44 +598,74 @@ class AtomicExecutor:
             evidence_index, evidence_root,
         )
         try:
-            for exp in step.expectations:
-                evaluator = self._expectations.get(exp.type)
-                if evaluator is None:
-                    if exp.type in EVALUATORS_NOT_AVAILABLE:
-                        error_payload = {
-                            "code": "expectation_not_available",
-                            "expectation": exp.type,
-                        }
-                        break
-                    expectation_results.append(ExpectationResult(
-                        expectation_type=exp.type,
-                        status=StepStatus.FAILED,
-                        diagnostic="unknown expectation type",
-                    ))
-                    continue
-                t0 = time.perf_counter()
-                try:
-                    result = evaluator(step, exp, observation, receipt)
-                except Exception as exc:
-                    result = ExpectationResult(
-                        expectation_type=exp.type,
-                        status=StepStatus.FAILED,
-                        diagnostic=f"{type(exc).__name__}: {exc}",
-                        duration_ms=_ms(time.perf_counter() - t0),
-                    )
-                else:
-                    if result.duration_ms == 0:
+            assertion_started = time.monotonic()
+            while True:
+                expectation_results = []
+                for exp in step.expectations:
+                    evaluator = self._expectations.get(exp.type)
+                    if evaluator is None:
+                        if exp.type in EVALUATORS_NOT_AVAILABLE:
+                            error_payload = {
+                                "code": "expectation_not_available",
+                                "expectation": exp.type,
+                            }
+                            break
+                        expectation_results.append(ExpectationResult(
+                            expectation_type=exp.type,
+                            status=StepStatus.FAILED,
+                            diagnostic="unknown expectation type",
+                        ))
+                        continue
+                    t0 = time.perf_counter()
+                    try:
+                        result = evaluator(step, exp, observation, receipt)
+                    except Exception as exc:
                         result = ExpectationResult(
-                            expectation_type=result.expectation_type,
-                            status=result.status,
-                            expected=result.expected,
-                            actual=result.actual,
-                            observation_id=result.observation_id,
+                            expectation_type=exp.type,
+                            status=StepStatus.FAILED,
+                            diagnostic=f"{type(exc).__name__}: {exc}",
                             duration_ms=_ms(time.perf_counter() - t0),
-                            diagnostic=result.diagnostic,
                         )
-                expectation_results.append(result)
-                if error_payload is not None:
+                    else:
+                        if result.duration_ms == 0:
+                            result = ExpectationResult(
+                                expectation_type=result.expectation_type,
+                                status=result.status,
+                                expected=result.expected,
+                                actual=result.actual,
+                                observation_id=result.observation_id,
+                                duration_ms=_ms(time.perf_counter() - t0),
+                                diagnostic=result.diagnostic,
+                            )
+                    expectation_results.append(result)
+                    if error_payload is not None:
+                        break
+                # Post-action assertions are read-only. Re-observe until the
+                # declared deadline; never replay the preceding action.
+                if (receipt is None or not bool(receipt.ok) or error_payload is not None
+                        or not expectation_results
+                        or all(item.status is StepStatus.PASSED for item in expectation_results)):
+                    break
+                elapsed = time.monotonic() - assertion_started
+                remaining = min(
+                    self._config.step_timeout_seconds - elapsed,
+                    *(exp.timeout_seconds - elapsed for exp, item in
+                      zip(step.expectations, expectation_results)
+                      if item.status is StepStatus.FAILED),
+                )
+                if remaining <= 0 or any(
+                    exp.type in {"action_ok", "visual_evidence_captured"}
+                    or self._expectations.get(exp.type) is None
+                    for exp, item in zip(step.expectations, expectation_results)
+                    if item.status is StepStatus.FAILED
+                ):
+                    break
+                time.sleep(min(0.25, remaining))
+                try:
+                    snapshot_id = refresh_after_action()
+                    observation = self._observations.get_snapshot(snapshot_id)
+                except BackendUnavailable as exc:
+                    error_payload = {"code": "backend_unavailable", "message": str(exc)}
                     break
         finally:
             _EvidenceView.reset(evidence_token)

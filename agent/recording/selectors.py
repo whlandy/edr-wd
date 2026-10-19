@@ -14,7 +14,7 @@ from target.recording.models import (
 from .models import ReplaySelector
 
 
-def _window(event: RawCaptureEvent) -> dict[str, Any]:
+def window_for_event(event: RawCaptureEvent) -> dict[str, Any]:
     """The window this step belongs to, not the recording's entry window.
 
     A flow moves between an application's windows; replay has to focus the one
@@ -77,6 +77,29 @@ def _identity(target: ObservedTarget) -> dict[str, Any]:
     }
 
 
+def expectation_match(control: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist an assertion's own stable control identity, not its action's."""
+    strong_id = bool(control.get("automationId") or control.get("identifier"))
+    mapping = {
+        "automationId": "automation_id",
+        "identifier": "identifier",
+        "controlType": "control_type",
+        **({} if strong_id else {"name": "text"}),
+    }
+    return {
+        target: control[source]
+        for source, target in mapping.items()
+        if control.get(source) not in (None, "")
+    }
+
+
+def assertion_match(event: RawCaptureEvent) -> dict[str, Any] | None:
+    selector = synthesize_selector(event)
+    if selector is None or not selector.control:
+        return None
+    return expectation_match(selector.control)
+
+
 def _anchor(point: Any, rect: Any) -> dict[str, Any] | None:
     """Project a recorded screen point onto a relative point inside its control.
 
@@ -130,9 +153,9 @@ def _scroll_container(target: ObservedTarget) -> dict[str, Any] | None:
 
 def synthesize_selector(event: RawCaptureEvent) -> ReplaySelector | None:
     target = event.observed_target
-    window = _window(event)
+    window = window_for_event(event)
     if target is None and event.type == "assertion" and (event.assertion or {}).get("type") in {
-        "window_open", "window_text_contains", "window_text_contains_time",
+        "window_open", "window_text_contains", "window_text_contains_time", "window_text_time_range",
     }:
         # Window-scoped assertions carry no control, by design.
         return ReplaySelector(window=window, control={})
@@ -170,4 +193,4 @@ def synthesize_drag_end_selector(event: RawCaptureEvent) -> ReplaySelector | Non
     if anchor is None:
         return None
     control["anchor"] = anchor
-    return ReplaySelector(window=_window(event), control=control)
+    return ReplaySelector(window=window_for_event(event), control=control)

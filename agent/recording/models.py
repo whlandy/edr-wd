@@ -36,19 +36,50 @@ def _require(data: Mapping[str, Any], required: set[str], path: str) -> None:
 
 
 def _validate_verifier(value: Mapping[str, Any], path: str) -> None:
-    data = _strict(value, {"type", "expected", "timeoutSeconds"}, path)
+    data = _strict(value, {"type", "expected", "timeoutSeconds", "durationSeconds", "match"}, path)
     _require(data, {"type", "expected"}, path)
     kind = data["type"]
     if kind not in {
         "text_equals", "text_contains", "value_equals", "visible", "checked",
         "enabled", "window_open", "text_contains_time",
         "window_text_contains", "window_text_contains_time",
+        "text_time_range", "window_text_time_range",
     }:
         raise RecordingModelError(
             "golden_verifier_unsupported", f"unsupported verifier {kind!r}",
             path=f"{path}.type",
         )
     expected = data["expected"]
+    control_kinds = {
+        "text_equals", "text_contains", "value_equals", "visible", "checked",
+        "enabled", "text_contains_time", "text_time_range",
+    }
+    if "match" in data:
+        if kind not in control_kinds:
+            raise RecordingModelError(
+                "type_error", "match is only valid for control assertions",
+                path=f"{path}.match",
+            )
+        match = _strict(
+            data["match"],
+            {"automation_id", "identifier", "control_type", "text"},
+            f"{path}.match",
+        )
+        if (not all(isinstance(item, str) and item for item in match.values())
+                or not (match.get("automation_id") or match.get("identifier")
+                        or (match.get("control_type") and match.get("text")))):
+            raise RecordingModelError(
+                "type_error", "match requires a stable control identity",
+                path=f"{path}.match",
+            )
+    if kind in {"text_time_range", "window_text_time_range"}:
+        from target.time_assertions import parse_time_range
+        try:
+            parse_time_range(expected, data.get("durationSeconds"))
+        except ValueError as exc:
+            raise RecordingModelError("type_error", str(exc), path=f"{path}.expected") from exc
+    elif "durationSeconds" in data:
+        raise RecordingModelError("type_error", "durationSeconds is only valid for time ranges", path=f"{path}.durationSeconds")
     if kind in {"text_contains_time", "window_text_contains_time"} and (
         not isinstance(expected, str) or not expected
     ):
@@ -61,6 +92,11 @@ def _validate_verifier(value: Mapping[str, Any], path: str) -> None:
         "text_equals", "text_contains", "value_equals", "window_text_contains",
     } and not isinstance(expected, str):
         raise RecordingModelError("type_error", f"{kind} expected must be a string", path=f"{path}.expected")
+    if kind in {"text_contains", "window_text_contains"} and not expected:
+        raise RecordingModelError(
+            "type_error", "contains assertion requires non-empty expected text",
+            path=f"{path}.expected",
+        )
     if kind in {"visible", "checked", "enabled"} and not isinstance(expected, bool):
         raise RecordingModelError("type_error", f"{kind} expected must be boolean", path=f"{path}.expected")
     if kind == "window_open":
@@ -101,7 +137,7 @@ class ReplaySelector:
         }
         allowed_visual = {
             "template", "contextTemplate", "elementSha256", "contextSha256",
-            "relativePoint", "redacted",
+            "relativePoint", "contextOffset", "redacted",
         }
         unknown = (
             {f"window.{key}" for key in set(self.window) - allowed_window}
@@ -166,6 +202,11 @@ class ReplaySelector:
                     path="selector.visual.elementSha256",
                 )
             if self.visual.get("contextTemplate") is not None:
+                if not isinstance(self.visual["contextTemplate"], str) or not self.visual["contextTemplate"]:
+                    raise RecordingModelError(
+                        "visual_template_missing", "context template path is invalid",
+                        path="selector.visual.contextTemplate",
+                    )
                 context_digest = self.visual.get("contextSha256")
                 if not isinstance(context_digest, str) or not re.fullmatch(
                     r"sha256:[0-9a-f]{64}", context_digest
@@ -175,6 +216,18 @@ class ReplaySelector:
                         "context template requires a SHA-256 digest",
                         path="selector.visual.contextSha256",
                     )
+            offset = self.visual.get("contextOffset")
+            if offset is not None and (
+                not self.visual.get("contextTemplate")
+                or not isinstance(offset, (list, tuple)) or len(offset) != 2
+                or any(not isinstance(value, int) or isinstance(value, bool)
+                       or value < 0 for value in offset)
+            ):
+                raise RecordingModelError(
+                    "visual_context_offset_invalid",
+                    "contextOffset requires a context template and two non-negative integers",
+                    path="selector.visual.contextOffset",
+                )
             relative = self.visual.get("relativePoint", [0.5, 0.5])
             if (
                 not isinstance(relative, (list, tuple)) or len(relative) != 2

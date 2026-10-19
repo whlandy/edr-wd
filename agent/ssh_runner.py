@@ -471,7 +471,7 @@ def scp_dir_to(ssh_config: dict, local_dir: str | os.PathLike,
 
         if not rel_paths:
             mode = "fallback files" if used_fallback else "tracked files"
-            return 0, f"No {mode} found under {local_dir}"
+            return -1, f"No {mode} found under {local_dir}; refusing an empty deployment"
     else:
         # Upload everything under local_dir/
         rel_paths = []

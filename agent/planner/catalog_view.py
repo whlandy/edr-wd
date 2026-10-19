@@ -62,6 +62,7 @@ from target.action_catalog import (
     ActionSpec,
     get_action_catalog,
 )
+from target.product_profiles import get_capability
 
 
 __all__ = [
@@ -130,11 +131,11 @@ def enabled_actions_for(
     `BACKEND_NOT_IMPLEMENTED["macos_accessibility"]` flags
     them).
 
-    `profile` is accepted for forward-compatibility with
-    profile-specific overlays (P3.1.x territory); V1
-    currently uses the per-backend filter only.
+    A supplied profile must be registered for this backend; its target-owned
+    action capability set is the final static filter.
     """
     _validate_backend(backend)
+    allowed = get_capability(profile, backend).allowed_action_ids if profile else None
 
     # Layer 1: per-backend filter (existing P0.1 capability
     # layer; excludes actions whose `backends` tuple does not
@@ -150,6 +151,8 @@ def enabled_actions_for(
     gaps = BACKEND_NOT_IMPLEMENTED.get(backend, {})
     out: list[ActionSpec] = []
     for spec in candidates:
+        if allowed is not None and spec.action_id not in allowed:
+            continue
         if spec.tool_name in gaps:
             # Strict-exclude (per FR-P3.1-01 "absent, not just
             # marked").

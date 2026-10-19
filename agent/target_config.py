@@ -235,7 +235,7 @@ SKELETON = {
         "2.29-edr-mac29-macos14": {
             "description": "",
             "platform": "macos",
-            "app_profile": "macos_generic",
+            "app_profile": "macos_hisec",
             "identity": {
                 "hostname": "edr-mac29",
                 "os_version": "macos14",
@@ -361,10 +361,14 @@ def _normalize_target(raw: dict) -> dict:
 # ── Platform validation helpers ─────────────────────────────────────────────
 
 SUPPORTED_PLATFORMS = ("windows", "macos")
-SUPPORTED_PROFILES = {
-    "windows": {"windows_hisec"},
-    "macos": {"macos_hisec", "macos_generic"},
-}
+def supported_profiles(platform: str) -> set[str]:
+    """The installed target-safe descriptors, not a fixed EDR-only enum."""
+    from target.product_profiles import BUILTIN_CAPABILITIES
+
+    backend = {"windows": "windows_pywinauto",
+               "macos": "macos_accessibility"}.get(platform)
+    return {profile_id for profile_id, candidate_backend in BUILTIN_CAPABILITIES
+            if candidate_backend == backend}
 
 
 def _validate_platform_specific(t: dict) -> list[str]:
@@ -525,11 +529,15 @@ class TargetConfig:
 
     def get_target_app_profile(self, name: str | None = None) -> str | None:
         """
-        Return the app_profile for a target, or None if not set.
-        Used to dispatch test suites to the right workflow.
+        Return an explicit profile or the catalog's EDRClient default.
         """
         t = self.get_target(name)
-        return t.get("app_profile")
+        if t.get("app_profile"):
+            return t["app_profile"]
+        from target.product_profiles import default_profile_for_backend
+        backend = {"windows": "windows_pywinauto",
+                   "macos": "macos_accessibility"}[t.get("platform", "windows")]
+        return default_profile_for_backend(backend)
 
     def get_canonical_target_name(self, name: str | None = None) -> str:
         """Return the target name derived from its IPv4 address and identity."""
@@ -817,8 +825,8 @@ class TargetConfig:
 
             platform = t.get("platform", "windows")
             profile = t.get("app_profile")
-            if profile and profile not in SUPPORTED_PROFILES.get(platform, set()):
-                allowed = ", ".join(sorted(SUPPORTED_PROFILES.get(platform, set())))
+            if profile and profile not in supported_profiles(platform):
+                allowed = ", ".join(sorted(supported_profiles(platform)))
                 errors.append(
                     f"[{name}] app_profile='{profile}' is invalid for platform={platform}; "
                     f"expected one of: {allowed or '(none)'}"
@@ -897,7 +905,13 @@ def run_config_command(args: argparse.Namespace) -> int:
                 desc = t.get("description") or "—"
                 host = t.get("ssh", {}).get("host") or "—"
                 platform = t.get("platform", "windows")
-                profile = t.get("app_profile") or "—"
+                profile = t.get("app_profile")
+                if not profile:
+                    from target.product_profiles import default_profile_for_backend
+                    backend = {"windows": "windows_pywinauto",
+                               "macos": "macos_accessibility"}.get(platform)
+                    profile = (default_profile_for_backend(backend) + " (app default)"
+                               if backend else "—")
                 try:
                     canonical = tc.get_canonical_target_name(name)
                 except (KeyError, ValueError):

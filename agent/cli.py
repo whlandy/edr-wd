@@ -23,13 +23,19 @@ from agent.recording.artifacts import write_compilation_artifacts
 from agent.recording.compiler import compile_recording
 from agent.recording.mcp_runtime import MCPActionDispatch, MCPObservationProvider
 from agent.recording.replay import load_golden_trace, replay_golden_trace
-from agent.recording.runtime import build_replay_runtime
+from agent.recording.runtime import build_replay_runtime, build_visual_resolver
 from agent.recording.pillow_matcher import PillowTemplateMatcher
 from agent.recording.visual import SafeVisualResolver
+from agent.products import backend_for_product, get_product_adapter, get_product_profile
+from agent.products.edrclient import EDRClientAdapter
+from agent.products.intent import IntentRequest
+from agent.interaction.runtime import execute_intent
+from agent.trace.events import EventType
 from agent.subagent.target_agent import TargetSubAgent
 from agent.target_config import TargetConfig, add_config_arguments, run_config_command
 from target.recording.models import RawRecording
 from target.action_catalog import ACTIONS_V1, CATALOG_VERSION, catalog_digest, get_spec
+from target.product_profiles import BUILTIN_CAPABILITIES, DEFAULT_APP_ID, INSTALLED_APPS
 
 
 def _print_result(result: object) -> int:
@@ -396,6 +402,8 @@ def build_parser() -> argparse.ArgumentParser:
     config = sub.add_parser("config", help="Create, inspect, validate, or edit target config")
     add_config_arguments(config, include_config_path=False)
 
+    sub.add_parser("products", help="List locally installed product profiles")
+
     for name, help_text in (
         ("status", "Probe target and lifecycle status"),
         ("up", "Ensure the target MCP server is running"),
@@ -419,6 +427,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     open_edr = sub.add_parser("open-edr", help="Open EDRClient, verify it, and save a local screenshot")
     open_edr.add_argument("--timeout", type=float, default=20.0)
+
+    open_app = sub.add_parser("open-app", help="Activate and focus the selected product's main window")
+    open_app.add_argument("--profile", help="Product profile; defaults to the target config")
+    open_app.add_argument("--timeout", type=float, default=30.0)
+
+    intent = sub.add_parser("intent", help="Execute a registered product business intent")
+    intent.add_argument("intent_id", help="Intent registered by the selected product adapter")
+    intent.add_argument("--profile", help="Product profile; defaults to the target config")
+    intent.add_argument("--trace-root", default="result-report/intent-traces")
+    intent.add_argument("--asset-root", default=".", help="Root for reviewed, redacted visual templates")
+    intent.add_argument("--timeout", type=float, default=60.0)
 
     window = sub.add_parser("window", help="List or inspect target windows (P1.1)")
     window.add_argument("action", choices=["list", "inspect"], help="Window action")
@@ -478,7 +497,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     replay = sub.add_parser("replay", help="Replay a ready golden trace through the atomic executor")
     replay.add_argument("golden_trace")
-    replay.add_argument("--profile", default="default")
+    replay.add_argument("--profile", help="Product profile; defaults to the target config")
     replay.add_argument("--confirm-action", action="append", default=[], help="Out-of-band confirmation token scoped to one action ID")
     replay.add_argument("--max-depth", type=int, default=12, help="Fresh control-tree observation depth")
     replay.add_argument("--trace-root", default="result-report/replay-traces", help="Agent-local append-only replay trace root")
@@ -666,9 +685,9 @@ def _cmd_record(
         })
     return _print_result({
         **result,
-        "status": compilation.golden.status,
+        "status": artifacts.compilation.golden.status,
         "directory": str(artifacts.directory),
-        "issues": [issue.to_dict() for issue in compilation.issues],
+        "issues": [issue.to_dict() for issue in artifacts.compilation.issues],
         "captureIssues": capture_issues,
     })
 
@@ -679,6 +698,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "config":
         return run_config_command(args)
+    if args.command == "products":
+        return _print_result({"ok": True, "default_app": DEFAULT_APP_ID,
+                              "apps": [
+            {"app_id": app_id, "name": app["name"], "default": app_id == DEFAULT_APP_ID,
+             "profiles": [
+                 {"profile_id": profile["profile_id"], "backend": profile["backend"],
+                  "application": profile["application"],
+                  "application_path": profile["application"]["path"],
+                  "windows": profile["windows"]}
+                 for profile in app["profiles"]]}
+            for app_id, app in sorted(INSTALLED_APPS.items())],
+                              "products": [
+            {"profile_id": capability.profile_id, "backend": capability.backend,
+             "version": capability.version, "digest": capability.digest}
+            for _, capability in sorted(BUILTIN_CAPABILITIES.items())
+        ]})
 
     if args.command == "record" and args.action == "compile":
         if not args.recording:
@@ -762,15 +797,15 @@ def main(argv: list[str] | None = None) -> int:
         ready = agent.ensure_ready()
         if not ready.get("ok"):
             return _print_result(ready)
-        activated = agent.call_tool(
-            "activate_edr", {"wait": True, "timeout": args.timeout}, timeout=args.timeout + 10,
+        adapter = EDRClientAdapter("windows_pywinauto")
+        activated = adapter.activate(
+            lambda name, params: agent.call_tool(name, params, timeout=args.timeout + 10)
         )
         if not activated.get("ok"):
             return _print_result(activated)
-        edr_window = {
-            "process_name": "EDRClient.exe",
-            "title_re": "^华为HiSec Endpoint$",
-        }
+        main_role = adapter.resolve_window_role("main")
+        edr_window = {"process_name": main_role.process_names[0],
+                      "title_re": adapter.activation_window_title_pattern}
         visible = agent.call_tool("is_window_open", edr_window)
         if not visible.get("ok") or not visible.get("found"):
             return _print_result({
@@ -800,8 +835,136 @@ def main(argv: list[str] | None = None) -> int:
     if not ready.get("ok"):
         return _print_result(ready)
 
+    if args.command == "open-app":
+        target_config = TargetConfig(args.config)
+        profile_id = args.profile or target_config.get_target_app_profile(target)
+        if not profile_id:
+            return _print_result({"ok": False, "code": "product_profile_unknown"})
+        try:
+            backend = backend_for_product(
+                profile_id, backend_kind=getattr(agent.state, "backend_kind", None),
+                platform=target_config.get_target_platform(target),
+            )
+            profile_obj = get_product_profile(profile_id, backend)
+            adapter = get_product_adapter(profile_id, backend)
+            adapter.resolve_window_role("main")
+        except ValueError as exc:
+            return _print_result({"ok": False, "code": "product_profile_unknown", "error": str(exc)})
+        activate = getattr(adapter, "activate", None)
+        if callable(activate):
+            activated = activate(lambda name, params: agent.call_tool(
+                name, params, timeout=args.timeout))
+            if not activated.get("ok"):
+                return _print_result(activated)
+        else:
+            activated = {"ok": True, "code": "activation_not_configured"}
+        started = agent.call_tool("begin_product_run", {
+            "profile_id": profile_id, "digest": profile_obj.digest,
+        }, timeout=args.timeout)
+        if not started.get("ok"):
+            return _print_result(started)
+        run_token = started["run_token"]
+        try:
+            focused = agent.call_tool("focus_window_role", {
+                "role": "main", "run_token": run_token,
+            }, timeout=args.timeout)
+            if not focused.get("ok"):
+                output = focused
+            else:
+                observation = agent.call_tool("observe_window_bundle", {
+                    "run_token": run_token, "capture_image": True,
+                    "include_ocr": False,
+                }, timeout=args.timeout)
+                if observation.get("ok") and observation.get("screenshot_redacted") is True:
+                    artifact = _save_screenshot_result(
+                        {"image_b64": observation.get("screenshot_b64")}, target)
+                    output = {"ok": True, "profile_id": profile_id,
+                              "activated": activated, "focused": focused,
+                              "observation_id": observation.get("observation_id"),
+                              "agent_artifact": artifact}
+                else:
+                    output = {"ok": False, "code": observation.get("code")
+                              or "observation_capture_unredacted"}
+        except (ValueError, KeyError) as exc:
+            output = {"ok": False, "code": "product_capture_failed", "error": str(exc)}
+        finally:
+            ended = agent.call_tool("end_product_run", {"run_token": run_token},
+                                    timeout=args.timeout)
+        if not ended.get("ok"):
+            output = {"ok": False, "code": "product_run_cleanup_failed"}
+        return _print_result(output)
+
     if args.command == "window":
         return _cmd_window(args, agent, parser, target)
+    if args.command == "intent":
+        profile_id = args.profile or TargetConfig(args.config).get_target_app_profile(target)
+        if not profile_id:
+            return _print_result({"ok": False, "code": "product_profile_unknown"})
+        platform = TargetConfig(args.config).get_target_platform(target)
+        try:
+            backend = backend_for_product(
+                profile_id, backend_kind=getattr(agent.state, "backend_kind", None),
+                platform=platform,
+            )
+            profile_obj = get_product_profile(profile_id, backend)
+            adapter = get_product_adapter(profile_id, backend)
+            intent_plan = adapter.resolve_intent(args.intent_id, {})
+        except ValueError as exc:
+            return _print_result({"ok": False, "code": "product_profile_unknown", "error": str(exc)})
+        if callable(getattr(adapter, "activate", None)):
+            activated = adapter.activate(
+                lambda name, params: agent.call_tool(name, params, timeout=args.timeout)
+            )
+            if not activated.get("ok"):
+                return _print_result(activated)
+        started = agent.call_tool("begin_product_run", {
+            "profile_id": profile_id, "digest": profile_obj.digest,
+        }, timeout=args.timeout)
+        if not started.get("ok"):
+            return _print_result(started)
+        run_token = started["run_token"]
+        trace = TraceStore(Path(args.trace_root).expanduser().resolve())
+        trace.open()
+        try:
+            observation = MCPObservationProvider(
+                agent, trace_store=trace, timeout=args.timeout,
+                capture_screenshot=True, use_bundle=True, run_token=run_token,
+                include_ocr=True,
+            )
+            executor = AtomicExecutor(
+                dispatch=MCPActionDispatch(agent, trace_store=trace, timeout=args.timeout,
+                                           run_token=run_token),
+                observation_provider=observation,
+                confirmation_gate=ConfirmationGate(),
+                risk_lookup=lambda action_id: (
+                    (spec.risk, spec.side_effect) if (spec := get_spec(ACTIONS_V1, action_id))
+                    else ("low", "none")
+                ),
+            )
+            result = execute_intent(
+                IntentRequest(profile_id, args.intent_id, {}, {"page": intent_plan.result_role}),
+                adapter=adapter, profile=profile_obj, executor=executor,
+                observation_provider=observation,
+                visual_resolver=(build_visual_resolver(Path(args.asset_root).expanduser().resolve())
+                                 if intent_plan.visual else None),
+            )
+            trace.finalize(EventType.TRACE_COMPLETED if result.passed else EventType.TRACE_ABORTED,
+                           payload={"intent_id": args.intent_id, "passed": result.passed})
+            output = {"ok": result.passed, "intent_id": args.intent_id,
+                      "skipped_click": result.skipped_click,
+                      "action": result.action_result.to_dict() if result.action_result else None,
+                      "assertion": result.assertion_result.to_dict(),
+                      "trace_directory": str(trace.root)}
+        except Exception as exc:
+            output = {"ok": False, "code": getattr(exc, "code", "intent_execution_failed"),
+                      "error": str(exc), "trace_directory": str(trace.root)}
+        finally:
+            ended = agent.call_tool("end_product_run", {"run_token": run_token},
+                                    timeout=args.timeout)
+            if not ended.get("ok"):
+                output = {"ok": False, "code": "product_run_cleanup_failed",
+                          "trace_directory": str(trace.root)}
+        return _print_result(output)
     if args.command == "record":
         profile = args.profile
         if profile is None:
@@ -835,8 +998,16 @@ def main(argv: list[str] | None = None) -> int:
                 "code": "golden_catalog_mismatch",
                 "error": "golden trace catalog binding differs from the replay runtime",
             })
+        replay_profile = args.profile
+        if replay_profile is None:
+            try:
+                replay_profile = TargetConfig(args.config).get_target_app_profile(target)
+            except KeyError:
+                # Keep an unregistered legacy test target usable. A registered
+                # target always takes its app profile from the shared catalog.
+                replay_profile = "default"
         expected_profile = golden.environment.get("profile")
-        if expected_profile and expected_profile != args.profile:
+        if expected_profile and expected_profile != replay_profile:
             return _print_result({
                 "ok": False,
                 "code": "golden_profile_mismatch",
@@ -853,7 +1024,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime = build_replay_runtime(
                 agent,
                 golden,
-                profile=args.profile,
+                profile=replay_profile,
                 trace_root=args.trace_root,
                 asset_root=Path(args.golden_trace).expanduser().resolve().parent,
                 replay_mode=args.replay_mode,
