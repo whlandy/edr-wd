@@ -622,3 +622,20 @@ recovery), so the review found no remaining false-pass gap in this area.
 11.26 re-probed: still `python_not_found` (the install gate is unchanged).
 No code change this round; the recording suite was re-run and stayed
 green.
+
+Seventh 2026-10-20 round: the tree held an uncommitted, complete
+changeset in the live-visual area that was preserved and committed
+rather than reworked. The guard: a selector carrying no semantic
+identity at all (no non-empty automationId/identifier/controlType/name
+and no identifying ancestry) used to let the hybrid locator return the
+window's single unrelated control as a semantic hit, so an image-only
+click whose template was missing or weak could land on the only control
+in the tree — a false pass at replay. `collect_candidates` now returns
+no candidates for such a selector, and the live and replay paths fail
+with `locator_low_confidence` / `visual_match_low_confidence` without
+dispatching a click; an ancestry-only selector with real identifying
+content still qualifies as a semantic candidate. Nine regression cases
+(sole-control inheritance, five non-identifying shapes, the ancestry
+positive control, the live action, and the replay no-click assertion)
+pass, and the selected offline suite reported **2585 passed, 28
+deselected**. `compileall` and `git diff --check` exited 0.
