@@ -718,3 +718,20 @@ and Skill validation exited 0. This hardens inventory only; exact focus
 of same-title macOS windows still requires live validation and may fail
 closed. The 11.26 Windows runtime and authenticated cloud gates remain
 open.
+
+Ninth 2026-10-20 round: the concurrent round's lifecycle preflight
+fix was reviewed against the deployment-integrity area. The probe is
+staged and fail closed (ssh reachability, then the configured Python
+path executing, then the runtime dependency imports) and never raises;
+`WindowsLifecycle.install` and the `repair_target` deploy path both
+run it before any side effect, so a failed probe aborts with the
+staged code instead of leaving a partially uploaded payload or a broken
+task/LaunchAgent definition. On 11.26 this turns the open Python gate
+into a clean, staged `python_not_found` failure with an actionable path
+hint until the interpreter is installed, after which install and repair
+proceed. A transient ssh blip aborting the operation is the intended
+fail-closed trade for a long-running deployment. The focused
+lifecycle/repair suites reported **7 passed** and the selected offline
+suite **2593 passed, 28 deselected**, still green including an
+in-progress, untouched concurrent work-in-progress in the macOS
+accessibility path. 11.26 re-probed: still `python_not_found`.
