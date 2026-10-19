@@ -700,37 +700,51 @@ class MacOSAccessibilityBackend:
                 "enabled": True,
             })
 
-        # Keyed on (pid, window_title) only: System Events and CGWindowList
-        # can disagree on app_name for the same process — CGWindowList's
-        # kCGWindowOwnerName is localized ("文本编辑") while System Events
-        # reports the English process name ("TextEdit") — and including
-        # app_name in the key silently defeated the CG enrichment below for
-        # every such app.
-        by_identity = {
-            (window.get("pid"), window.get("window_title")): window
-            for window in windows
-        }
-        for w in self._list_windows_cg():
-            key = (w.get("pid"), w.get("window_title"))
-            existing = by_identity.get(key)
-            if existing is None:
-                windows.append(w)
-                by_identity[key] = w
-            else:
-                # System Events gives reliable titles but neither bounds nor a
-                # window number.  Preserve its identity and enrich it from the
-                # matching CG entry so recorder_ui and protected-window masks
-                # can be enforced, and so callers get a window identity that
-                # survives the title changes a title-keyed scope cannot follow.
+        # System Events and CGWindowList can disagree on localized app_name,
+        # so correlate by PID/title. That pair is not unique, however: a dict
+        # keyed by it would silently assign one CGWindowID to the wrong one of
+        # two identically titled windows and discard the other ID.
+        by_identity: dict[tuple, list[dict]] = {}
+        for window in windows:
+            by_identity.setdefault((window.get("pid"), window.get("window_title")), []).append(window)
+        cg_by_identity: dict[tuple, list[dict]] = {}
+        for window in self._list_windows_cg():
+            cg_by_identity.setdefault((window.get("pid"), window.get("window_title")), []).append(window)
+        for key, cg_group in cg_by_identity.items():
+            system_group = by_identity.get(key, [])
+            handles = [item.get("handle") for item in cg_group]
+            if (len(cg_group) > 1 and len(system_group) <= len(cg_group)
+                    and all(handle is not None for handle in handles)
+                    and len(set(handles)) == len(handles)
+                    and all(item.get("rectangle") is not None for item in cg_group)):
+                # CG gives distinct native identities. Keep its separate
+                # windows, but retain System Events' reliable app name.
+                windows = [item for item in windows
+                           if (item.get("pid"), item.get("window_title")) != key]
+                for item in cg_group:
+                    merged = dict(item)
+                    if system_group:
+                        merged["app_name"] = system_group[0]["app_name"]
+                        merged["class_name"] = system_group[0]["class_name"]
+                        merged["source"] = "system_events+cgwindowlist"
+                    windows.append(merged)
+            elif len(system_group) == len(cg_group) == 1:
+                # This is the only case where title/PID proves a one-to-one
+                # relationship, so enrichment cannot misbind a native ID.
+                existing, item = system_group[0], cg_group[0]
                 enriched = False
-                if existing.get("rectangle") is None and w.get("rectangle") is not None:
-                    existing["rectangle"] = dict(w["rectangle"])
+                if existing.get("rectangle") is None and item.get("rectangle") is not None:
+                    existing["rectangle"] = dict(item["rectangle"])
                     enriched = True
-                if existing.get("handle") is None and w.get("handle") is not None:
-                    existing["handle"] = w["handle"]
+                if existing.get("handle") is None and item.get("handle") is not None:
+                    existing["handle"] = item["handle"]
                     enriched = True
                 if enriched:
                     existing["source"] = "system_events+cgwindowlist"
+            else:
+                # Unequal counts or missing native IDs are ambiguous. Expose
+                # separate candidates rather than guessing an association.
+                windows.extend(cg_group)
 
         return {"ok": True, "windows": windows, "count": len(windows)}
 

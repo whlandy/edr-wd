@@ -310,6 +310,68 @@ def test_list_windows_enriches_system_events_window_with_cg_rectangle(monkeypatc
     assert result["windows"][0]["source"] == "system_events+cgwindowlist"
 
 
+def test_list_windows_preserves_distinct_cg_ids_for_same_pid_and_title(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    monkeypatch.setattr(
+        macos_accessibility, "_run_osascript",
+        lambda _script, timeout=15: (0, "EDRClient\t321\t日志中心\nEDRClient\t321\t日志中心\n"),
+    )
+    monkeypatch.setattr(backend, "_list_windows_cg", lambda: [
+        {"app_name": "EDRClient", "window_title": "日志中心", "pid": 321,
+         "handle": 101, "rectangle": {"x": 100, "y": 100, "w": 300, "h": 200},
+         "source": "cgwindowlist"},
+        {"app_name": "EDRClient", "window_title": "日志中心", "pid": 321,
+         "handle": 202, "rectangle": {"x": 500, "y": 100, "w": 300, "h": 200},
+         "source": "cgwindowlist"},
+    ])
+
+    result = backend.list_windows()
+
+    assert result["count"] == 2
+    assert {item.get("handle") for item in result["windows"]} == {101, 202}
+    assert {item["rectangle"]["x"] for item in result["windows"]} == {100, 500}
+
+
+def test_list_windows_does_not_guess_id_when_same_title_inventory_counts_disagree(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    monkeypatch.setattr(
+        macos_accessibility, "_run_osascript",
+        lambda _script, timeout=15: (0, "EDRClient\t321\t日志中心\nEDRClient\t321\t日志中心\n"),
+    )
+    monkeypatch.setattr(backend, "_list_windows_cg", lambda: [{
+        "app_name": "EDRClient", "window_title": "日志中心", "pid": 321,
+        "handle": 101, "rectangle": {"x": 100, "y": 100, "w": 300, "h": 200},
+        "source": "cgwindowlist",
+    }])
+
+    result = backend.list_windows()
+
+    assert result["count"] == 3
+    assert sum(item.get("handle") == 101 for item in result["windows"]) == 1
+    assert sum(item.get("handle") is None for item in result["windows"]) == 2
+
+
+def test_list_windows_retains_unmatched_system_window_when_cg_finds_fewer(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    monkeypatch.setattr(
+        macos_accessibility, "_run_osascript",
+        lambda _script, timeout=15: (
+            0, "EDRClient\t321\t日志中心\n" * 3,
+        ),
+    )
+    monkeypatch.setattr(backend, "_list_windows_cg", lambda: [
+        {"app_name": "EDRClient", "window_title": "日志中心", "pid": 321,
+         "handle": handle, "rectangle": {"x": x, "y": 100, "w": 300, "h": 200},
+         "source": "cgwindowlist"}
+        for handle, x in ((101, 100), (202, 500))
+    ])
+
+    result = backend.list_windows()
+
+    assert result["count"] == 5
+    assert sum(item.get("handle") is None for item in result["windows"]) == 3
+
+
 def _lock(pid=1981, process="HiSecEndpointAgent", title="华为智能终端安全系统"):
     return {
         "backend": "macos_accessibility",

@@ -701,3 +701,20 @@ authenticated Browser Use page/API session for the cloud side, which is
 not available offline. 11.26 re-probed: still `python_not_found`. The
 branch's one unpushed concurrent commit was pushed as housekeeping
 (no content change).
+
+Window-inventory follow-up (2026-10-20): macOS `list_windows()` used a
+single `(pid, title)` dictionary entry to merge System Events and
+CGWindowList. Two EDRClient windows with the same title caused one
+CGWindowID to be assigned arbitrarily and the other discarded. The
+inventory now retains distinct CG windows when they have unique native
+numbers and rectangles, while preserving System Events' app name.
+If System Events sees more windows than CG (or the relationship is
+otherwise ambiguous), entries stay separate and unbound rather than
+guessing ownership. Three regression cases cover equal-count duplicates,
+unequal counts, and the no-drop case where CG sees fewer windows. The
+focused macOS suite reports **26 passed**; the selected offline suite
+reports **2593 passed, 28 deselected**. `compileall`, `git diff --check`,
+and Skill validation exited 0. This hardens inventory only; exact focus
+of same-title macOS windows still requires live validation and may fail
+closed. The 11.26 Windows runtime and authenticated cloud gates remain
+open.
