@@ -21,8 +21,9 @@ from __future__ import annotations
 
 
 def test_windows_target_integrity_all_present(monkeypatch):
-    """All five required Windows payload files exist on the target."""
+    """All required Windows payload files exist on the target."""
     from agent.lifecycle.windows import WindowsLifecycle
+    from agent.lifecycle.payload import WINDOWS_REQUIRED_FILES
 
     commands: list[str] = []
 
@@ -44,8 +45,7 @@ def test_windows_target_integrity_all_present(monkeypatch):
     assert result["stage"] == "integrity"
     assert result["data"]["missing"] == []
     assert result["data"]["platform"] == "windows"
-    # 5 required files × 1 SSH call each
-    assert len(commands) == 5
+    assert len(commands) == len(WINDOWS_REQUIRED_FILES)
     # Each command probes one required file
     for fname in (
         "server.py",
@@ -261,8 +261,9 @@ def test_windows_task_integrity_accepts_script_in_powershell_arguments(monkeypat
 
 
 def test_macos_target_integrity_all_present(monkeypatch):
-    """All six macOS payload files exist on the target."""
+    """All required macOS payload files exist on the target."""
     from agent.lifecycle.macos import MacOSLifecycle
+    from agent.lifecycle.payload import MACOS_REQUIRED_FILES
 
     commands: list[str] = []
 
@@ -283,8 +284,7 @@ def test_macos_target_integrity_all_present(monkeypatch):
     assert result["ok"] is True
     assert result["data"]["missing"] == []
     assert result["data"]["platform"] == "macos"
-    # 6 required files × 1 SSH call each
-    assert len(commands) == 6
+    assert len(commands) == len(MACOS_REQUIRED_FILES)
 
 
 def test_macos_target_integrity_partial_missing(monkeypatch):
@@ -501,6 +501,7 @@ def test_macos_launchagent_integrity_valid(monkeypatch):
 def test_windows_target_integrity_ssh_exception(monkeypatch):
     """run_ssh raises → target_integrity_check_failed (NOT target_payload_incomplete)."""
     from agent.lifecycle.windows import WindowsLifecycle
+    from agent.lifecycle.payload import WINDOWS_REQUIRED_FILES
 
     def fake_run_ssh(_ssh_cfg, _command, **_kwargs):
         raise RuntimeError("connection refused: 127.0.0.1:22")
@@ -521,8 +522,7 @@ def test_windows_target_integrity_ssh_exception(monkeypatch):
         "Verify SSH connectivity (auth, network, host) to "
         "the target, then retry."
     )
-    # All 5 files should be reported as ssh failures
-    assert len(result["data"]["ssh_failures"]) == 5
+    assert len(result["data"]["ssh_failures"]) == len(WINDOWS_REQUIRED_FILES)
     assert all("connection refused" in f["error"] for f in result["data"]["ssh_failures"])
 
 
@@ -577,6 +577,7 @@ def test_windows_task_integrity_ssh_exception(monkeypatch):
 def test_macos_target_integrity_ssh_exception(monkeypatch):
     """macOS file integrity check SSH error → target_integrity_check_failed."""
     from agent.lifecycle.macos import MacOSLifecycle
+    from agent.lifecycle.payload import MACOS_REQUIRED_FILES
 
     def fake_run_ssh(_ssh_cfg, _command, **_kwargs):
         raise ConnectionError("host key verification failed")
@@ -593,7 +594,7 @@ def test_macos_target_integrity_ssh_exception(monkeypatch):
 
     assert result["ok"] is False
     assert result["code"] == "target_integrity_check_failed"
-    assert len(result["data"]["ssh_failures"]) == 6
+    assert len(result["data"]["ssh_failures"]) == len(MACOS_REQUIRED_FILES)
 
 
 def test_macos_launchagent_integrity_ssh_exception(monkeypatch):

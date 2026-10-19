@@ -192,6 +192,9 @@ def test_macos_deploy_excludes_untracked_files(monkeypatch, tmp_path):
 
     # Patch LOCAL_TARGET to point at our tmp_path tree
     monkeypatch.setattr(lifecycle.macos, "LOCAL_TARGET", target_root)
+    # This fixture intentionally contains only two files; payload-completeness
+    # preflight has its own tests, while this test isolates upload filtering.
+    monkeypatch.setattr(lifecycle.macos, "validate_local_payload", lambda *_args: None)
 
     result = lifecycle_obj.deploy(cfg)
 

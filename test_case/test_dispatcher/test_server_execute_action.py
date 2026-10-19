@@ -93,8 +93,7 @@ def test_execute_action_signature_has_canonical_params():
 
 
 def test_execute_action_returns_action_receipt_json():
-    """Without a backend resolver, the receipt is
-    dispatch_target_missing — wrapped as a JSON string."""
+    """A disconnected server returns a stable error receipt as JSON."""
     tool = server.execute_action
     result = tool(
         action_id="gui.click",
@@ -111,7 +110,9 @@ def test_execute_action_returns_action_receipt_json():
         ad.CODE_DISPATCH_TARGET_MISSING,
         ad.CODE_MISSING_SELECTOR_HINT,
         ad.CODE_PRECONDITION_FAILED,
+        ad.CODE_BACKEND_ERROR,  # live backend exists but is not connected
     }
+    assert parsed["ok"] is False
     assert parsed["server_instance_id"].startswith("inst-")
 
 
@@ -121,6 +122,87 @@ def test_execute_action_unknown_action_id():
     parsed = json.loads(result)
     assert parsed["code"] == ad.CODE_UNKNOWN_ACTION_ID
     assert parsed["ok"] is False
+
+
+def test_product_run_rechecks_native_window_before_pointer_dispatch(monkeypatch):
+    from product_profiles import get_capability
+
+    backend = server._backend_kind
+    profile_id = "windows_hisec" if backend == "windows_pywinauto" else "macos_generic"
+    capability = get_capability(profile_id, backend)
+
+    class StaleWindowSession:
+        def verify_locked(self):
+            raise ValueError("window_identity_stale")
+
+    monkeypatch.setattr(server, "_window_session", StaleWindowSession())
+    run = server._product_policy.begin_product_run(profile_id, capability.digest,
+                                                   backend_kind=backend)
+    try:
+        receipt = json.loads(server.execute_action(
+            action_id="pointer.click_window", args={"x": 1, "y": 1},
+            run_token=run.run_token,
+        ))
+        assert receipt["code"] == "window_identity_stale"
+        assert receipt["ok"] is False
+    finally:
+        server._product_policy.end_product_run(run.run_token)
+
+
+def test_product_run_rejects_control_that_moved_after_observation(monkeypatch):
+    from product_profiles import get_capability
+    from windowing.models import WindowIdentity
+    from windowing.observation import normalize_observed_control
+
+    backend_kind = server._backend_kind
+    profile_id = "windows_hisec" if backend_kind == "windows_pywinauto" else "macos_generic"
+    capability = get_capability(profile_id, backend_kind)
+    server._product_policy.reset_for_tests()
+    run = server._product_policy.begin_product_run(profile_id, capability.digest,
+                                                   backend_kind=backend_kind)
+    identity = WindowIdentity.from_native(
+        {"handle": 7, "pid": 4, "process_name": "Demo", "title": "Main",
+         "rect": [0, 0, 100, 100]}, session_id=run.run_id, backend=backend_kind,
+    )
+
+    class Session:
+        def verify_locked(self):
+            return identity
+
+    class Backend:
+        calls = 0
+        rect = [10, 10, 30, 30]
+        def dump_tree(self, max_depth=15):
+            return {"ok": True, "controls": [{"text": "Open", "rect": self.rect}]}
+        def click(self, **kwargs):
+            self.calls += 1
+            return {"ok": True}
+
+    backend = Backend()
+    saved = normalize_observed_control({"text": "Open", "rect": [10, 10, 30, 30]},
+                                        identity.__dict__, 1)
+    monkeypatch.setattr(server, "_window_session", Session())
+    monkeypatch.setattr(server, "_backend", backend)
+    monkeypatch.setattr(server, "_product_observation", {
+        "run_id": run.run_id, "observation_id": "OBS-1",
+        "window_binding": identity.binding, "window_rect": identity.rect,
+        "controls": {"T0001": saved},
+    })
+    try:
+        target_ref = {"snapshot_id": "OBS-1", "target_id": "T0001",
+                      "fingerprint": saved["fingerprint"],
+                      "selector_hint": {"text": "Open"}}
+        server._verify_product_target_ref(run, target_ref)
+        backend.rect = [50, 50, 80, 80]
+        receipt = json.loads(server.execute_action(
+            action_id="gui.click", args={"text": "Open"},
+            target_ref=target_ref,
+            run_token=run.run_token,
+        ))
+        assert receipt["code"] == "observation_stale"
+        assert backend.calls == 0
+    finally:
+        server._product_policy.end_product_run(run.run_token)
 
 
 def test_execute_action_disabled_action():

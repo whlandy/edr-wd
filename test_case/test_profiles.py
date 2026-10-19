@@ -32,6 +32,8 @@ from typing import Callable
 from .run_windows_hisec import run_windows_hisec_tests  # noqa: F401
 from .run_macos_generic import run_macos_generic_tests  # noqa: F401
 from .run_macos_hisec import run_macos_hisec_tests  # noqa: F401
+from .run_registered_product import run_registered_product_tests
+from target.product_profiles import BUILTIN_CAPABILITIES
 
 
 # Registry: profile name -> runner function.
@@ -51,9 +53,17 @@ PROFILE_RUNNERS: dict[str, Callable] = {
 
 def resolve_runner(profile: str | None):
     """
-    Resolve a profile name to a runner function. Returns None if the
-    profile is not registered.
+    Resolve a profile-specific suite or the installed product smoke test.
+    Unknown profiles return None.
     """
     if not profile:
         return None
-    return PROFILE_RUNNERS.get(profile)
+    dedicated = PROFILE_RUNNERS.get(profile)
+    if dedicated is not None:
+        return dedicated
+    if not any(candidate_id == profile for candidate_id, _ in BUILTIN_CAPABILITIES):
+        return None
+    def registered_runner(client, verbose=False):
+        return run_registered_product_tests(client, profile=profile, verbose=verbose)
+    registered_runner.__name__ = "run_registered_product_tests"
+    return registered_runner

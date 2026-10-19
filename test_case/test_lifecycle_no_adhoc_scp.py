@@ -77,8 +77,8 @@ def test_windows_ensure_refuses_when_payload_incomplete(monkeypatch):
 
     assert result["ok"] is False
     assert result["code"] == "target_payload_incomplete"
-    # All 5 files should be reported as missing
-    assert len(result["data"]["missing"]) == 5
+    from agent.lifecycle.payload import WINDOWS_REQUIRED_FILES
+    assert len(result["data"]["missing"]) == len(WINDOWS_REQUIRED_FILES)
     # CRITICAL: zero scp_to / scp_dir_to calls
     assert scp_calls == [], (
         f"Phase 2 no-write contract violated: scp_to was called. "
@@ -266,7 +266,8 @@ def test_macos_ensure_refuses_when_payload_incomplete(monkeypatch):
 
     assert result["ok"] is False
     assert result["code"] == "target_payload_incomplete"
-    assert len(result["data"]["missing"]) == 6
+    from agent.lifecycle.payload import MACOS_REQUIRED_FILES
+    assert len(result["data"]["missing"]) == len(MACOS_REQUIRED_FILES)
     # CRITICAL: zero scp_to / scp_dir_to
     assert scp_calls == [], (
         f"Phase 2 no-write contract violated: {scp_calls}"

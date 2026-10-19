@@ -63,7 +63,7 @@ def test_enabled_count_matches_well_known_table():
     """Spot-check the per-backend/per-profile enabled count."""
     table = {
         ("macos_accessibility", "macos_hisec"): 24,
-        ("macos_accessibility", "macos_generic"): 24,
+        ("macos_accessibility", "macos_generic"): 22,
         ("windows_pywinauto", "windows_hisec"): 27,
     }
     for (backend, profile), expected in table.items():

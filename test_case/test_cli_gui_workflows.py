@@ -1,6 +1,7 @@
 """CLI contracts that replace ad-hoc MCP helper scripts."""
 
 import json
+from types import SimpleNamespace
 
 from agent import cli
 
@@ -46,6 +47,41 @@ def test_open_edr_uses_exact_main_window_and_persists_screenshot(monkeypatch, ca
     assert connect[1]["process_name"] == "EDRClient.exe"
     assert connect[1]["title_re"] == "^华为HiSec Endpoint$"
     assert output["agent_artifact"]["screenshot"]["path"] == "main.png"
+
+
+def test_open_app_selects_non_edr_profile_and_redacted_observation(monkeypatch, capsys):
+    class Config:
+        def __init__(self, _path=None):
+            pass
+        def get_target_platform(self, _target):
+            return "windows"
+        def get_target_app_profile(self, _target):
+            return "windows_notepad"
+    class Agent(_FakeAgent):
+        state = SimpleNamespace(backend_kind="uia")
+        def call_tool(self, name, arguments=None, timeout=None):
+            self.calls.append((name, arguments or {}, timeout))
+            if name == "begin_product_run":
+                return {"ok": True, "run_token": "token"}
+            if name == "observe_window_bundle":
+                return {"ok": True, "screenshot_redacted": True,
+                        "screenshot_b64": "redacted-png", "observation_id": "obs"}
+            return {"ok": True}
+    agent = Agent()
+    monkeypatch.setattr(cli, "TargetConfig", Config)
+    monkeypatch.setattr(cli, "_target_agent", lambda *_args: agent)
+    monkeypatch.setattr(cli, "_save_screenshot_result", lambda result, target: {
+        "target": target, "redacted_payload": result["image_b64"],
+    })
+    exit_code = cli.main(["--target", "win-dev", "open-app"])
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["profile_id"] == "windows_notepad"
+    assert output["agent_artifact"]["redacted_payload"] == "redacted-png"
+    assert [call[0] for call in agent.calls] == [
+        "activate_product_app", "begin_product_run", "focus_window_role",
+        "observe_window_bundle", "end_product_run",
+    ]
 
 
 def test_tools_command_returns_normalized_tool_array(monkeypatch, capsys):

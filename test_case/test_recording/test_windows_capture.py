@@ -868,6 +868,42 @@ def test_a_gesture_still_running_at_stop_is_flushed():
     assert events[0].input["notches"] == 2
 
 
+def test_a_gesture_in_an_opened_window_is_flushed_at_stop():
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+    _record_click(correlator, resolver, "EDRClient", 100)
+    correlator.correlate(_transition("opened", 300, title="日志中心"), SCOPE, 2)
+    resolver.window_title = "日志中心"
+    assert correlator.correlate(_wheel(500), SCOPE, 3) is None
+
+    flushed = correlator.flush(SCOPE, 3)
+
+    assert flushed is not None
+    assert flushed.type == "scroll_commit"
+    assert flushed.input["notches"] == 1
+
+
+def test_final_text_in_an_opened_window_is_flushed_at_stop():
+    resolver = _log_center_resolver()
+    correlator = WindowsUIACorrelator(resolver)
+    _record_click(correlator, resolver, "EDRClient", 100)
+    correlator.correlate(_transition("opened", 300, title="日志中心"), SCOPE, 2)
+    resolver.window_title = "日志中心"
+    resolver.element = {"controlType": "Edit", "automationId": "filter",
+                        "text": "筛选", "value": "告警", "rect": [10, 20, 210, 60],
+                        "protected": False}
+    assert correlator.correlate(HookPacket(
+        kind="text_activity", monotonic_ms=500,
+        wall_time="2026-08-17T00:00:00.000Z",
+    ), SCOPE, 3) is None
+
+    flushed = correlator.flush(SCOPE, 3)
+
+    assert flushed is not None
+    assert flushed.type == "text_commit"
+    assert flushed.input == {"value": "告警"}
+
+
 def test_reversing_direction_records_the_first_gesture_and_starts_another():
     correlator = WindowsUIACorrelator(_Resolver())
     produced, _ = _feed(correlator, [

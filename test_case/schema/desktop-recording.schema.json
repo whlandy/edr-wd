@@ -504,7 +504,9 @@
             "window_open",
             "text_contains_time",
             "window_text_contains",
-            "window_text_contains_time"
+            "window_text_contains_time",
+            "text_time_range",
+            "window_text_time_range"
           ]
         },
         "expected": {},
@@ -512,6 +514,11 @@
           "type": "number",
           "exclusiveMinimum": 0,
           "maximum": 300
+        },
+        "durationSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
         }
       },
       "allOf": [
@@ -522,7 +529,9 @@
                 "enum": [
                   "text_equals",
                   "text_contains",
-                  "value_equals"
+                  "value_equals",
+                  "text_time_range",
+                  "window_text_time_range"
                 ]
               }
             }
@@ -534,6 +543,10 @@
               }
             }
           }
+        },
+        {
+          "if": {"properties": {"type": {"enum": ["text_contains", "window_text_contains"]}}},
+          "then": {"properties": {"expected": {"type": "string", "minLength": 1}}}
         },
         {
           "if": {

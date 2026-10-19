@@ -230,12 +230,25 @@ def test_a_window_assertion_is_accepted_without_any_control_identity(assertion_t
     assert event.observed_target is None
 
 
-def test_a_control_assertion_still_requires_an_identity():
+@pytest.mark.parametrize("identity", [{}, {"controlType": "Text"}, {"name": "事件时间"}])
+def test_a_control_assertion_still_requires_an_identity(identity):
     session = RecordingSession("REC", "flow", _scope())
     session.start()
     with pytest.raises(RecordingModelError) as exc:
-        session.add_assertion({"assertion": "text_equals", "expected": "管理员"})
+        session.add_assertion({"assertion": "text_equals", "expected": "管理员", **identity})
     assert exc.value.code == "recording_target_unresolved"
+
+
+@pytest.mark.parametrize("assertion_type", ["text_contains", "window_text_contains"])
+def test_recording_refuses_vacuous_contains_assertions(assertion_type):
+    session = RecordingSession("REC", "flow", _scope())
+    session.start()
+    with pytest.raises(RecordingModelError) as exc:
+        session.add_assertion({
+            "assertion": assertion_type, "expected": "",
+            "automationId": "logRow",
+        })
+    assert exc.value.code == "recording_assertion_invalid"
 
 
 def test_a_window_assertion_compiles_to_a_window_only_selector():

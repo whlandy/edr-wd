@@ -119,6 +119,12 @@
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
         },
+        "contextOffset": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"type": "integer", "minimum": 0}
+        },
         "relativePoint": {
           "type": "array",
           "minItems": 2,
@@ -201,7 +207,9 @@
             "window_open",
             "text_contains_time",
             "window_text_contains",
-            "window_text_contains_time"
+            "window_text_contains_time",
+            "text_time_range",
+            "window_text_time_range"
           ]
         },
         "expected": {},
@@ -209,6 +217,27 @@
           "type": "number",
           "exclusiveMinimum": 0,
           "maximum": 300
+        },
+        "durationSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "match": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "automation_id": {"type": "string", "minLength": 1},
+            "identifier": {"type": "string", "minLength": 1},
+            "control_type": {"type": "string", "minLength": 1},
+            "text": {"type": "string", "minLength": 1}
+          },
+          "anyOf": [
+            {"required": ["automation_id"]},
+            {"required": ["identifier"]},
+            {"required": ["control_type", "text"]}
+          ]
         }
       },
       "allOf": [
@@ -219,7 +248,9 @@
                 "enum": [
                   "text_equals",
                   "text_contains",
-                  "value_equals"
+                  "value_equals",
+                  "text_time_range",
+                  "window_text_time_range"
                 ]
               }
             }
@@ -231,6 +262,10 @@
               }
             }
           }
+        },
+        {
+          "if": {"properties": {"type": {"enum": ["text_contains", "window_text_contains"]}}},
+          "then": {"properties": {"expected": {"type": "string", "minLength": 1}}}
         },
         {
           "if": {

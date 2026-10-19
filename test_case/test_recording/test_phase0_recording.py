@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import ast
 import json
+from pathlib import Path
 
 import pytest
 import jsonschema
 
-from agent.recording.compiler import coalesce_events, compile_recording
+from agent.recording.compiler import coalesce_events, compile_recording, events_for_compiled_steps
 from agent.recording.artifacts import write_compilation_artifacts
 from agent.recording.generate_pytest import (
     render_conftest,
@@ -14,6 +15,9 @@ from agent.recording.generate_pytest import (
     render_pytest_ini,
 )
 from agent.recording.models import GoldenTrace, RecordedTestCase, ReplayEvaluation, ReplaySelector
+from agent.recording.replay import _verifier_expectation
+from agent.execution.expectations import evaluate_control_text_time_range
+from agent.execution.models import StepStatus
 from agent.cli import main as cli_main
 from target.recording.models import RawRecording, RecordingModelError
 
@@ -331,7 +335,153 @@ def test_a_causally_bound_assertion_becomes_the_action_result_verifier(kind, inp
     assert len(result.case.steps) == 1
     step = result.case.steps[0]
     assert step.action_id == action_id
-    assert step.verifiers == ({"type": "visible", "expected": True, "timeoutSeconds": 5.0},)
+    assert step.verifiers == ({
+        "type": "visible", "expected": True, "timeoutSeconds": 5.0,
+        "match": {"automation_id": "btnApply", "control_type": "Button"},
+    },)
+
+
+def test_bound_assertion_uses_its_own_control_not_the_clicked_control():
+    assertion_target = {
+        "snapshotId": "OBS-2", "targetId": "T0002",
+        "fingerprint": "sha256:log", "controlType": "Text",
+        "automationId": "logTime", "text": "事件时间", "protected": False,
+    }
+    recording = _recording(
+        _event(1, causal_id="cause-open-log"),
+        _event(2, "assertion", target=assertion_target,
+               assertion={"type": "text_time_range", "expected": "10:10"},
+               causal_id="cause-open-log"),
+    )
+    result = compile_recording(recording)
+    step = result.golden.steps[0]
+    verifier = step.verifiers[0]
+    assert result.golden.status == "ready"
+    assert verifier["match"] == {
+        "automation_id": "logTime", "control_type": "Text",
+    }
+    schema_dir = Path(__file__).resolve().parents[1] / "schema"
+    for document, schema_name in (
+        (result.case.to_dict(), "desktop-recorded-case.schema.json"),
+        (result.golden.to_dict(), "desktop-golden-trace.schema.json"),
+    ):
+        jsonschema.validate(document, json.loads((schema_dir / schema_name).read_text()))
+    expectation = _verifier_expectation(step, verifier)
+    observation = {"snapshot_id": "OBS-REPLAY", "controls": [
+        {"automation_id": "btnApply", "control_type": "Button", "text": "10:10:59"},
+        {"automation_id": "logTime", "control_type": "Text", "text": "10:11:00"},
+    ]}
+    assert evaluate_control_text_time_range(None, expectation, observation, None).status is StepStatus.FAILED
+    observation["controls"][1]["text"] = "10:10:59"
+    assert evaluate_control_text_time_range(None, expectation, observation, None).status is StepStatus.PASSED
+
+
+@pytest.mark.parametrize("assertion_type", ["text_time_range", "window_text_time_range"])
+def test_cross_window_bound_assertion_gets_its_own_focused_replay_step(assertion_type):
+    action = _event(1, causal_id="cause-open-log")
+    action["evidence"] = {"window": {"title": "EDRClient", "processName": "EDRClient.exe"}}
+    assertion = _event(
+        2, "assertion", causal_id="cause-open-log",
+        assertion={"type": assertion_type, "expected": "10:10"},
+    )
+    assertion["evidence"] = {"window": {"title": "日志中心", "processName": "EDRClient.exe"}}
+    if assertion_type == "text_time_range":
+        assertion["observedTarget"] = {
+            "snapshotId": "OBS-2", "targetId": "T0002",
+            "fingerprint": "sha256:log", "controlType": "Text",
+            "automationId": "logTime", "text": "事件时间", "protected": False,
+        }
+    else:
+        assertion["observedTarget"] = None
+    recording = _recording(action, assertion)
+
+    result = compile_recording(recording)
+
+    assert result.golden.status == "ready"
+    assert [step.action_id for step in result.golden.steps] == ["gui.click", None]
+    assert result.golden.steps[0].selector.window["titleRegex"] == "^EDRClient$"
+    assert result.golden.steps[1].selector.window["titleRegex"] == "^日志中心$"
+    assert result.golden.steps[1].verifiers[0]["type"] == assertion_type
+    if assertion_type == "window_text_time_range":
+        assert result.golden.steps[1].selector.control == {}
+    assert [event.sequence for event in events_for_compiled_steps(recording.events)] == [1, 2]
+
+
+def test_cross_window_causal_assertion_proves_recorded_scroll_result():
+    scroll = _event(
+        1, "scroll_commit", input_={"delta": -120}, causal_id="cause-scroll",
+    )
+    scroll["evidence"] = {"window": {"title": "EDRClient", "processName": "EDRClient.exe"}}
+    assertion = _event(
+        2, "assertion", causal_id="cause-scroll",
+        assertion={"type": "window_text_time_range", "expected": "10:10"},
+    )
+    assertion["evidence"] = {"window": {"title": "日志中心", "processName": "EDRClient.exe"}}
+
+    result = compile_recording(_recording(scroll, assertion))
+
+    assert result.golden.status == "ready"
+    assert [step.action_id for step in result.golden.steps] == ["pointer.scroll", None]
+    assert not result.issues
+
+
+@pytest.mark.parametrize("has_roots", [True, False])
+def test_same_title_cross_window_assertion_needs_replay_stable_window_identity(has_roots):
+    action = _event(1, causal_id="cause-open-log")
+    assertion = _event(
+        2, "assertion", causal_id="cause-open-log",
+        assertion={"type": "window_text_time_range", "expected": "10:10"},
+    )
+    assertion["observedTarget"] = None
+    action_window = {"title": "logo1", "processName": "EDRClient.exe", "handle": 101}
+    assertion_window = {"title": "logo1", "processName": "EDRClient.exe", "handle": 202}
+    if has_roots:
+        action_window["rootAutomationId"] = "MainRoot"
+        assertion_window["rootAutomationId"] = "LogRoot"
+    action["evidence"] = {"window": action_window}
+    assertion["evidence"] = {"window": assertion_window}
+    recording = _recording(action, assertion)
+
+    result = compile_recording(recording)
+
+    assert len(result.golden.steps) == 2
+    assert [event.sequence for event in events_for_compiled_steps(recording.events)] == [1, 2]
+    if has_roots:
+        assert result.golden.status == "ready"
+        assert result.golden.steps[0].selector.window["rootAutomationId"] == "MainRoot"
+        assert result.golden.steps[1].selector.window["rootAutomationId"] == "LogRoot"
+    else:
+        assert result.golden.status == "incomplete"
+        assert "compile_window_identity_ambiguous" in result.golden.steps[1].issues
+    assert all("handle" not in step.selector.window for step in result.golden.steps)
+
+
+def test_bound_control_assertion_without_own_identity_stays_incomplete():
+    weak_target = {
+        "snapshotId": "OBS-2", "targetId": "T0002",
+        "fingerprint": "sha256:weak", "controlType": "Pane",
+        "protected": False,
+    }
+    result = compile_recording(_recording(
+        _event(1, causal_id="cause-click"),
+        _event(2, "assertion", target=weak_target,
+               assertion={"type": "visible", "expected": True},
+               causal_id="cause-click"),
+    ))
+    assert result.golden.status == "incomplete"
+    assert "compile_assertion_selector_ambiguous" in result.case.steps[0].issues
+
+
+@pytest.mark.parametrize("match", [{}, {"control_type": "Text"}, {"automation_id": ""},
+                                   {"pid": "1234"}])
+def test_golden_loader_rejects_unsafe_assertion_match(match):
+    result = compile_recording(_recording(
+        _event(1, "assertion", assertion={"type": "visible", "expected": True}),
+    ))
+    payload = result.golden.to_dict()
+    payload["steps"]["step-0001"]["verifiers"][0]["match"] = match
+    with pytest.raises(RecordingModelError):
+        GoldenTrace.from_dict(payload)
 
 
 def test_an_unbound_assertion_keeps_its_own_step_and_does_not_verify_the_scroll():

@@ -7,6 +7,8 @@ import pytest
 from action_dispatcher import ActionReceipt
 from agent.execution import AtomicExecutor
 from agent.recording.artifacts import write_compilation_artifacts
+from agent.recording.generate_pytest import render_conftest
+from agent.recording.models import GoldenTrace, RecordedStep, ReplaySelector
 from agent.recording.replay import load_golden_trace
 from agent.recording.compiler import compile_recording
 from agent.recording.replay import ReplayRuntime
@@ -124,3 +126,64 @@ def test_generated_pytest_executes_twice_in_distinct_fresh_sessions(tmp_path):
     assert all_snapshot_ids[0].startswith("OBS-A-")
     assert all_snapshot_ids[1].startswith("OBS-B-")
     assert all_snapshot_ids[0] != all_snapshot_ids[1]
+
+
+@pytest.mark.parametrize("image_only,expected_mode", [
+    (False, "semantic_only"), (True, "semantic_first"),
+])
+def test_generated_fixture_selects_a_replay_mode_that_can_run_its_trace(
+    tmp_path, monkeypatch, image_only, expected_mode,
+):
+    import agent.recording.runtime as replay_runtime
+    import agent.subagent.target_agent as target_agent_module
+    import agent.target_config as target_config_module
+
+    class FakeConfig:
+        def __init__(self, _path):
+            pass
+
+        def get_default_target(self):
+            return "win-dev"
+
+        def get_target_app_profile(self, target):
+            assert target == "win-dev"
+            return "windows_hisec"
+
+    class FakeAgent:
+        def __init__(self, _target, config):
+            pass
+
+        def ensure_ready(self):
+            return {"ok": True}
+
+    called = []
+
+    def fake_build(_agent, _golden, **kwargs):
+        called.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(target_config_module, "TargetConfig", FakeConfig)
+    monkeypatch.setattr(target_agent_module, "TargetSubAgent", FakeAgent)
+    monkeypatch.setattr(replay_runtime, "build_replay_runtime", fake_build)
+    monkeypatch.delenv("EDR_WD_REPLAY_MODE", raising=False)
+    fixture_file = tmp_path / "conftest.py"
+    fixture_file.write_text(render_conftest(), encoding="utf-8")
+    fixture = runpy.run_path(str(fixture_file))["edr_wd_target"].__wrapped__
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={} if image_only else {"automationId": "btnApply"},
+        visual={"template": "assets/apply.png", "redacted": True,
+                "elementSha256": "sha256:" + "a" * 64} if image_only else None,
+    )
+    golden = GoldenTrace(
+        name="generated fixture", source_recording={"schema": "edr.desktop-recording/v1",
+                                                    "sha256": "sha256:raw"},
+        catalog={"version": "1.0.0", "digest": "sha256:catalog"},
+        environment={"backend": "windows_pywinauto", "target": "win-dev"},
+        steps=(RecordedStep("step-0001", "gui.click", {}, selector),), status="ready",
+    )
+
+    fixture(golden)
+
+    assert called[0]["replay_mode"] == expected_mode
+    assert called[0]["profile"] == "windows_hisec"

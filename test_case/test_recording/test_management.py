@@ -237,11 +237,18 @@ def test_record_stop_persists_and_compiles_agent_side_artifacts(monkeypatch, tmp
     assert golden["environment"]["profile"] == "windows_hisec"
 
 
-def test_record_stop_fetches_redacted_captures_and_builds_visual_assets(monkeypatch, tmp_path, capsys):
-    output = io.BytesIO()
-    Image.new("RGB", (120, 80), "blue").save(output, format="PNG")
-    payload = output.getvalue()
-    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+@pytest.mark.parametrize("semantic_identity", [True, False])
+def test_record_stop_fetches_redacted_captures_and_builds_visual_assets(
+    monkeypatch, tmp_path, capsys, semantic_identity,
+):
+    def png(color):
+        output = io.BytesIO()
+        Image.new("RGB", (120, 80), color).save(output, format="PNG")
+        return output.getvalue()
+
+    before_payload, after_payload = png("blue"), png("red")
+    before_digest = "sha256:" + hashlib.sha256(before_payload).hexdigest()
+    after_digest = "sha256:" + hashlib.sha256(after_payload).hexdigest()
     capture_id = "CAP-" + "1" * 32
     before_capture_id = "CAP-" + "0" * 32
     raw = {
@@ -266,21 +273,29 @@ def test_record_stop_fetches_redacted_captures_and_builds_visual_assets(monkeypa
                 "rect": [10, 10, 60, 50], "protected": False,
             },
             "evidence": {"beforeCapture": {
-                "id": before_capture_id, "sha256": digest,
+                "id": before_capture_id, "sha256": before_digest,
                 "width": 120, "height": 80, "origin": [0, 0],
                 "redacted": True, "redactions": [],
             }, "capture": {
-                "id": capture_id, "sha256": digest, "width": 120, "height": 80,
+                "id": capture_id, "sha256": after_digest, "width": 120, "height": 80,
                 "origin": [0, 0], "redacted": True, "redactions": [],
             }},
         }],
     }
+    if not semantic_identity:
+        target = raw["events"][0]["observedTarget"]
+        target.pop("automationId")
+        target.pop("text")
+        target["controlType"] = "Pane"
     agent = _FakeAgent(
         stop_recording={"ok": True, "state": "stopped", "recording": raw},
         captures={item: {
-            "ok": True, "captureId": item, "sha256": digest,
+            "ok": True, "captureId": item,
+            "sha256": "sha256:" + hashlib.sha256(payload).hexdigest(),
             "image_b64": base64.b64encode(payload).decode("ascii"),
-        } for item in (before_capture_id, capture_id)},
+        } for item, payload in (
+            (before_capture_id, before_payload), (capture_id, after_payload),
+        )},
     )
     monkeypatch.setattr(cli, "_target_agent", lambda *_args: agent)
 
@@ -291,13 +306,20 @@ def test_record_stop_fetches_redacted_captures_and_builds_visual_assets(monkeypa
 
     assert exit_code == 0
     assert result["captureIssues"] == []
+    assert result["status"] == "ready"
+    assert result["issues"] == []
     capture_calls = [call for call in agent.calls if call[0] == "get_recording_capture"]
     assert [call[1]["capture_id"] for call in capture_calls] == [
         before_capture_id, capture_id,
     ]
     assert len(list((tmp_path / "visual_flow/assets/observations").glob("*.png"))) == 2
     golden = json.loads((tmp_path / "visual_flow/golden-trace.json").read_text())
-    assert golden["steps"]["step-0001"]["selector"]["visual"]["redacted"] is True
+    visual = golden["steps"]["step-0001"]["selector"]["visual"]
+    assert visual["redacted"] is True
+    if not semantic_identity:
+        assert golden["steps"]["step-0001"]["selector"]["control"] == {}
+    template = tmp_path / "visual_flow" / visual["template"]
+    assert Image.open(template).getpixel((0, 0)) == (0, 0, 255)
 
 
 def test_record_stop_persists_capture_transfer_failures_in_compile_report(

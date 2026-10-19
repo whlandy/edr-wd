@@ -140,6 +140,88 @@ def test_activate_app_uses_exact_window_owner_pid(monkeypatch):
     assert any("unix id is 89316" in script for script in scripts)
 
 
+def test_activate_app_does_not_report_success_for_windowless_process(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    monkeypatch.setattr(backend, "_pid_for_bundle", lambda _bundle: 66251)
+    monkeypatch.setattr(backend, "list_windows", lambda: {"ok": True, "windows": []})
+    monkeypatch.setattr(backend, "_frontmost_window_state", lambda: {
+        "ok": True, "process_name": "ChatGPT", "pid": 40329, "title": "",
+    })
+    monkeypatch.setattr(macos_accessibility, "_run_osascript", lambda _script, timeout=10: (0, ""))
+
+    result = backend.activate_app(bundle_id="com.apple.calculator", window_timeout=0)
+
+    assert result["ok"] is False
+    assert result["code"] == "product_window_missing"
+    assert result["pid"] == 66251
+
+
+def test_connect_by_pid_keeps_observed_title_and_native_window(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    monkeypatch.setattr(backend, "list_windows", lambda: {"ok": True, "windows": [{
+        "app_name": "计算器", "pid": 42, "window_title": "计算器",
+        "handle": 12719, "rectangle": {"x": 315, "y": 426, "w": 207, "h": 368},
+    }]})
+    result = backend.connect(pid=42, process_name="Calculator", title_re="^计算器$")
+    assert result["ok"] is True
+    assert backend._connected_window_snapshot == {
+        "pid": 42, "title": "计算器", "owner": "Calculator",
+        "handle": 12719, "rectangle": {"x": 315, "y": 426, "w": 207, "h": 368},
+    }
+
+
+@pytest.mark.parametrize("selector", ["bundle_id", "app_name"])
+def test_connect_after_activation_uses_real_window_not_fabricated_bounds(
+        monkeypatch, selector):
+    backend = MacOSAccessibilityBackend()
+    monkeypatch.setattr(backend, "activate_app", lambda **_kwargs: {"ok": True, "pid": 42})
+    monkeypatch.setattr(backend, "list_windows", lambda: {"ok": True, "windows": [{
+        "app_name": "计算器", "pid": 42, "window_title": "计算器",
+        "handle": 12719, "rectangle": {"x": 315, "y": 426, "w": 207, "h": 368},
+    }]})
+    result = backend.connect(**{selector: (
+        "com.apple.calculator" if selector == "bundle_id" else "Calculator")})
+    assert result == {"ok": True, "matched": selector, "pid": 42}
+    assert backend._connected_window_snapshot["rectangle"] == {
+        "x": 315, "y": 426, "w": 207, "h": 368}
+    assert backend._connected_window_snapshot["handle"] == 12719
+
+
+def test_connect_after_activation_rejects_missing_window(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    monkeypatch.setattr(backend, "activate_app", lambda **_kwargs: {"ok": True, "pid": 42})
+    monkeypatch.setattr(backend, "list_windows", lambda: {"ok": True, "windows": []})
+    assert backend.connect(bundle_id="com.apple.calculator")["code"] == \
+        "window_identity_unavailable"
+
+
+def test_connected_window_cache_uses_live_bounds_and_does_not_resurrect_closed_window(
+        monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    visible = [{"app_name": "Calculator", "pid": 42,
+                "window_title": "Calculator", "handle": 99,
+                "rectangle": {"x": 10, "y": 20, "w": 207, "h": 368}}]
+    monkeypatch.setattr(backend, "list_windows",
+                        lambda: {"ok": True, "windows": visible})
+    assert backend.connect(pid=42, process_name="Calculator")["ok"] is True
+    opened = backend.is_window_open(process_name="Calculator")
+    assert opened["windows"][0]["rectangle"] == {
+        "x": 10, "y": 20, "w": 207, "h": 368}
+    visible.clear()
+    assert backend.is_window_open(process_name="Calculator")["found"] is False
+
+
+def test_connect_by_pid_refuses_missing_or_duplicate_windows(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    monkeypatch.setattr(backend, "list_windows", lambda: {"ok": True, "windows": []})
+    assert backend.connect(pid=42)["code"] == "window_identity_unavailable"
+    monkeypatch.setattr(backend, "list_windows", lambda: {"ok": True, "windows": [
+        {"pid": 42, "window_title": "计算器"},
+        {"pid": 42, "window_title": "计算器"},
+    ]})
+    assert backend.connect(pid=42, title_re="^计算器$")["code"] == "window_identity_ambiguous"
+
+
 def test_window_lock_uses_pid_as_canonical_process_identity():
     backend = MacOSAccessibilityBackend()
 

@@ -13,9 +13,9 @@ Usage:
 The runner now dispatches to a per-profile test suite:
   - profile=windows_hisec  → test_case.run_windows_hisec (legacy 16/16 E2E)
   - profile=macos_generic  → test_case.run_macos_generic (v1 minimal capability set)
+  - other installed profiles → read-only product window/observation smoke test
 
-For platforms/profiles without a registered runner, the runner aborts
-with a clear error rather than silently running the wrong tests.
+Unknown profiles abort rather than silently running a different product's tests.
 """
 
 import sys
@@ -34,25 +34,11 @@ from test_case.test_profiles import resolve_runner, PROFILE_RUNNERS
 from agent import target_manager
 from agent.target_config import TargetConfig
 from agent.subagent import TargetSubAgent
+from target.product_profiles import default_profile_for_backend
 
 
-# Per-platform default profile. Legacy targets may have no app_profile
-# in its config; defaulting it to windows_hisec keeps the 16/16
-# behaviour bit-identical to the pre-M6 run_tests.py.
-#
-# The critical safety rule: a macos target without an app_profile
-# MUST NOT fall through to windows_hisec. Doing so would route the
-# macOS target into activate_edr / HisecEndpointAgent / EDRClient —
-# a Windows-only workflow that has no meaning on macOS and would
-# produce misleading "test ran but everything failed" output.
-#
-# The macos default is macos_generic, which runs the v1 capability
-# set (screenshot / list_windows / activate_app / is_window_open /
-# click_at plumbing / connect) and never touches HiSec EDR.
-DEFAULT_PROFILE_BY_PLATFORM: dict[str, str] = {
-    "windows": "windows_hisec",
-    "macos":   "macos_generic",
-}
+# The application catalog owns the per-platform default. Both platforms
+# currently select EDRClient; a configured app_profile always wins.
 
 def _resolve_profile(target_name: str, override: str | None) -> str:
     """
@@ -61,11 +47,11 @@ def _resolve_profile(target_name: str, override: str | None) -> str:
     Priority:
       1. --profile CLI override
       2. target.app_profile (explicit in config)
-      3. per-platform default (windows -> windows_hisec, macos -> macos_generic)
+      3. the catalog's default EDRClient profile for the target platform
       4. fail with a clear error (no silent fallback to a wrong-platform runner)
 
-    A target with platform=macos and no app_profile resolves to
-    macos_generic, NEVER to windows_hisec.
+    A macOS target without app_profile resolves to macos_hisec, never to the
+    Windows EDR profile.
     """
     if override:
         return override
@@ -88,15 +74,16 @@ def _resolve_profile(target_name: str, override: str | None) -> str:
     explicit = target_cfg.get("app_profile")
     if explicit:
         return explicit
-    default = DEFAULT_PROFILE_BY_PLATFORM.get(platform)
-    if default is None:
+    backend = {"windows": "windows_pywinauto",
+               "macos": "macos_accessibility"}.get(platform)
+    if backend is None:
         raise SystemExit(
             f"[FATAL] target '{target_name}' has platform='{platform}' but no app_profile "
             f"and no default profile for that platform. Set target.app_profile in "
             f"config/targets.local.json (e.g. 'macos_generic' or 'windows_hisec') "
             f"or pass --profile explicitly."
         )
-    return default
+    return default_profile_for_backend(backend)
 
 
 def run_tests(verbose: bool = False, target: str | None = None,
@@ -123,7 +110,7 @@ def run_tests(verbose: bool = False, target: str | None = None,
     except Exception:
         platform = "?"
     try:
-        app_profile = tc.get_target_app_profile(target_name) or "(default by platform)"
+        app_profile = tc.get_target(target_name).get("app_profile") or "(default by platform)"
     except Exception:
         app_profile = "?"
 
@@ -235,7 +222,8 @@ if __name__ == "__main__":
     parser.add_argument("--target", help="Target name (overrides EDR_WD_TARGET and default_target)")
     parser.add_argument("--profile",
                         help="Force a test profile (overrides target.app_profile). "
-                             f"Choices: {sorted(PROFILE_RUNNERS)}")
+                             "Use an installed product ID; dedicated suites: "
+                             f"{sorted(PROFILE_RUNNERS)}")
     parser.add_argument("--legacy", action="store_true",
                         help="Shorthand for --profile windows_hisec")
     args = parser.parse_args()

@@ -82,3 +82,14 @@ def test_schema_is_valid_json():
     schema = json.loads(open(schema_path, encoding="utf-8").read())
     assert schema["$schema"].endswith("2020-12/schema")
     assert "target" in schema["$defs"]
+
+
+def test_unknown_product_profile_is_rejected_by_runtime_registry(tmp_path):
+    path = tmp_path / "targets.local.json"
+    config_data = _config()
+    target = next(iter(config_data["targets"].values()))
+    target["app_profile"] = "not_installed_product"
+    path.write_text(json.dumps(config_data), encoding="utf-8")
+    errors = TargetConfig(path).validate()
+    assert any("app_profile='not_installed_product' is invalid" in error
+               for error in errors)

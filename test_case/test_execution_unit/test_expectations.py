@@ -74,6 +74,8 @@ def test_registry_has_every_documented_evaluator():
         "window_text_contains",
         "control_text_contains_time",
         "window_text_contains_time",
+            "control_text_time_range",
+            "window_text_time_range",
         "visual_evidence_captured",
     }
     assert set(EXPECTATION_REGISTRY.keys()) == expected
@@ -210,6 +212,14 @@ def test_window_closed_passes_when_absent():
     assert r.status is StepStatus.PASSED
 
 
+@pytest.mark.parametrize("observation", [None, {}, {"windows": None}, {"windows": "bad"}])
+def test_window_closed_requires_a_valid_inventory(observation):
+    result = EXPECTATION_REGISTRY["window_closed"](
+        None, _exp("window_closed", {"process": "notepad"}), observation, None,
+    )
+    assert result.status is StepStatus.FAILED
+
+
 # -------- active_window_owner --------
 
 
@@ -256,6 +266,14 @@ def test_control_absent_passes():
     assert r.status is StepStatus.PASSED
 
 
+@pytest.mark.parametrize("observation", [None, {}, {"controls": None}, {"controls": "bad"}])
+def test_control_absent_requires_a_valid_tree(observation):
+    result = EXPECTATION_REGISTRY["control_absent"](
+        None, _exp("control_absent", {"automation_id": "btn-ok"}), observation, None,
+    )
+    assert result.status is StepStatus.FAILED
+
+
 # -------- control_text_* --------
 
 
@@ -277,6 +295,76 @@ def test_control_text_equals_fails_on_mismatch():
         obs, None,
     )
     assert r.status is StepStatus.FAILED
+
+
+@pytest.mark.parametrize("kind,value", [
+    ("control_text_equals", {"match": {"automation_id": "missing"}, "text": ""}),
+    ("control_text_contains", {"match": {"automation_id": "missing"}, "text": "needle"}),
+    ("control_value_equals", {"match": {"automation_id": "missing"}, "expected": None}),
+    ("control_checked_equals", {"match": {"automation_id": "missing"}, "expected": None}),
+    ("control_enabled_equals", {"match": {"automation_id": "missing"}, "expected": None}),
+])
+def test_control_assertions_never_pass_when_the_named_control_is_absent(kind, value):
+    result = EXPECTATION_REGISTRY[kind](
+        None, _exp(kind, value), {"snapshot_id": "OBS-1", "controls": []}, None,
+    )
+    assert result.status is StepStatus.FAILED
+    assert result.actual is None
+    assert "not uniquely found" in result.diagnostic
+
+
+@pytest.mark.parametrize("kind,value", [
+    ("control_exists", {"automation_id": "shared"}),
+    ("control_text_equals", {"match": {"automation_id": "shared"}, "text": "OK"}),
+    ("control_text_contains", {"match": {"automation_id": "shared"}, "text": "OK"}),
+    ("control_value_equals", {"match": {"automation_id": "shared"}, "expected": "on"}),
+])
+def test_positive_control_assertions_reject_duplicate_identity(kind, value):
+    observation = {"snapshot_id": "OBS-1", "controls": [
+        {"automation_id": "shared", "text": "OK", "value": "on"},
+        {"automation_id": "shared", "text": "OK", "value": "on"},
+    ]}
+    result = EXPECTATION_REGISTRY[kind](None, _exp(kind, value), observation, None)
+    assert result.status is StepStatus.FAILED
+
+
+def test_control_absent_rejects_duplicate_matches():
+    observation = {"snapshot_id": "OBS-1", "controls": [
+        {"automation_id": "shared"}, {"automation_id": "shared"},
+    ]}
+    result = EXPECTATION_REGISTRY["control_absent"](
+        None, _exp("control_absent", {"automation_id": "shared"}), observation, None,
+    )
+    assert result.status is StepStatus.FAILED
+
+
+@pytest.mark.parametrize("kind,value,controls", [
+    ("control_exists", None, [{"automation_id": "clock", "text": "10:10:59"}]),
+    ("control_text_equals", {"text": "10:10:59"},
+     [{"automation_id": "clock", "text": "10:10:59"}]),
+    ("control_text_time_range", {"prefix": "10:10"},
+     [{"automation_id": "clock", "text": "10:10:59"}]),
+    ("control_text_time_range", {"match": {"automation_id": None}, "prefix": "10:10"},
+     [{"text": "10:10:59"}]),
+    ("control_exists", {"checked": False}, [{"checked": False}]),
+    ("control_absent", {}, []),
+])
+def test_control_assertion_without_a_real_selector_never_passes(kind, value, controls):
+    result = EXPECTATION_REGISTRY[kind](
+        None, _exp(kind, value), {"snapshot_id": "OBS-1", "controls": controls}, None,
+    )
+    assert result.status is StepStatus.FAILED
+
+
+@pytest.mark.parametrize("kind,value", [
+    ("control_text_contains", {"match": {"automation_id": "btn-ok"}, "text": ""}),
+    ("window_text_contains", ""),
+])
+def test_contains_assertion_cannot_succeed_vacuously_on_empty_expected_text(kind, value):
+    observation = {"snapshot_id": "OBS-1", "windows": [{"title": ""}],
+                   "controls": [{"automation_id": "btn-ok", "text": "OK"}]}
+    result = EXPECTATION_REGISTRY[kind](None, _exp(kind, value), observation, None)
+    assert result.status is StepStatus.FAILED
 
 
 def test_control_text_contains_passes():

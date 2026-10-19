@@ -213,6 +213,13 @@ class TestScrollWindowBackend:
         impl = WindowsPywinautoBackend.__new__(WindowsPywinautoBackend)
         impl._enumerate_top_windows_windows = lambda: windows
         impl._hit_test_top_window_windows = lambda sx, sy: hit_handle
+        impl._window_lock = {
+            "handle": TARGET["handle"], "pid": TARGET["pid"],
+            "generation": 1, "snapshot": TARGET,
+        }
+        impl.verify_window_lock = lambda **kwargs: {
+            "ok": True, "locked": True, "foreground_verified": True,
+        }
         return impl
 
     def test_dispatches_to_target_window(self, monkeypatch):

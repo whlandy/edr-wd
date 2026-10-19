@@ -11,6 +11,9 @@ from PIL import Image, ImageDraw
 
 from agent.recording.artifacts import write_compilation_artifacts
 from agent.recording.compiler import compile_recording
+from agent.recording.pillow_matcher import PillowTemplateMatcher
+from agent.recording.replay import GoldenStepMaterializer, golden_to_test_case, load_golden_trace
+from agent.recording.visual import SafeVisualResolver
 from target.recording.evidence import (
     RecordingEvidenceStore,
     capture_redacted_window_frame,
@@ -177,18 +180,76 @@ def test_recording_refuses_a_window_frame_without_a_trustworthy_origin():
     assert "origin is invalid" in initialized["error"]
 
 
+def test_recording_refuses_frame_if_locked_window_changes_during_capture():
+    class _ChangingWindowBackend(_ScreenshotBackend):
+        def __init__(self):
+            super().__init__()
+            self.handle = 101
+
+        def get_window_lock(self):
+            return {"ok": True, "locked": True, "lock": {
+                "pid": 42, "handle": self.handle,
+                "snapshot": {"pid": 42, "handle": self.handle, "title": "logo1"},
+            }}
+
+        def screenshot(self, path=None):
+            frame = super().screenshot(path)
+            self.handle += 1
+            return frame
+
+    with pytest.raises(ValueError, match="window changed during capture"):
+        capture_redacted_window_frame(_ChangingWindowBackend())
+
+
+def test_recording_reenumerates_redactions_after_one_window_replacement():
+    class _OnceChangingBackend(_ScreenshotBackend):
+        def __init__(self):
+            super().__init__()
+            self.handle = 101
+            self.tree_calls = 0
+            self.screenshot_calls = 0
+
+        def get_window_lock(self):
+            return {"ok": True, "locked": True, "lock": {
+                "pid": 42, "handle": self.handle,
+                "snapshot": {"pid": 42, "handle": self.handle, "title": "logo1"},
+            }}
+
+        def dump_tree(self, max_depth=15):
+            self.tree_calls += 1
+            return super().dump_tree(max_depth=max_depth)
+
+        def screenshot(self, path=None):
+            self.screenshot_calls += 1
+            frame = super().screenshot(path)
+            if self.screenshot_calls == 1:
+                self.handle = 102
+            return frame
+
+    backend = _OnceChangingBackend()
+    png, metadata = capture_redacted_window_frame(backend)
+
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert metadata["redacted"] is True
+    assert backend.tree_calls == 2
+    assert backend.screenshot_calls == 2
+
+
 def test_agent_artifact_pipeline_attaches_redacted_visual_templates(tmp_path):
     store = RecordingEvidenceStore(_ScreenshotBackend())
+    assert store.initialize()["ok"] is True
     attached = store.attach(_event())
     capture_id = attached.evidence["capture"]["id"]
     payload = base64.b64decode(store.get(capture_id)["image_b64"])
+    before_id = attached.evidence["beforeCapture"]["id"]
+    before_payload = base64.b64decode(store.get(before_id)["image_b64"])
     recording = RawRecording("REC-1", "policy flow", (attached,))
 
     artifacts = write_compilation_artifacts(
         tmp_path,
         recording,
         compile_recording(recording),
-        captures={capture_id: payload},
+        captures={before_id: before_payload, capture_id: payload},
     )
     golden = json.loads(artifacts.golden_trace.read_text(encoding="utf-8"))
     visual = golden["steps"]["step-0001"]["selector"]["visual"]
@@ -208,29 +269,127 @@ def test_agent_artifact_pipeline_attaches_redacted_visual_templates(tmp_path):
         jsonschema.validate(document, schema)
 
 
-def test_protected_target_never_gets_a_visual_click_template(tmp_path):
+def test_click_without_semantic_identity_is_promoted_only_by_safe_visual_artifact(tmp_path):
     store = RecordingEvidenceStore(_ScreenshotBackend())
-    attached = store.attach(_event(protected=True))
+    assert store.initialize()["ok"] is True
+    weak_target = replace(
+        _event().observed_target, automation_id=None, identifier=None,
+        control_type="Pane", text=None,
+    )
+    attached = store.attach(replace(_event(), observed_target=weak_target))
+    recording = RawRecording("REC-1", "image only flow", (attached,))
+    compiled = compile_recording(recording)
+    assert compiled.golden.status == "incomplete"
+    assert compiled.case.steps[0].selector is None
+
+    before_id = attached.evidence["beforeCapture"]["id"]
+    after_id = attached.evidence["capture"]["id"]
+    captures = {
+        capture_id: base64.b64decode(store.get(capture_id)["image_b64"])
+        for capture_id in (before_id, after_id)
+    }
+    artifacts = write_compilation_artifacts(tmp_path, recording, compiled, captures=captures)
+    golden = json.loads(artifacts.golden_trace.read_text(encoding="utf-8"))
+    report = json.loads(artifacts.compile_report.read_text(encoding="utf-8"))
+    assert artifacts.compilation.golden.status == golden["status"] == report["status"] == "ready"
+    assert artifacts.compilation.issues == ()
+    selector = golden["steps"]["step-0001"]["selector"]
+    assert selector["control"] == {}
+    assert selector["visual"]["redacted"] is True
+    assert (artifacts.directory / selector["visual"]["template"]).is_file()
+
+    # Exercise the actual generated PNGs and matcher, not a supplied hit.
+    trace = load_golden_trace(artifacts.golden_trace)
+    matcher = PillowTemplateMatcher(scales=(1.0,))
+    materialize = GoldenStepMaterializer(
+        trace, replay_mode="visual_only",
+        visual_resolver=SafeVisualResolver(
+            lambda path, observation: matcher(str(artifacts.directory / path), observation),
+        ),
+    )
+    step = golden_to_test_case(trace).steps[0]
+    for index, origin in enumerate(((100, 200), (300, 400)), start=1):
+        observation = {
+            "snapshot_id": f"OBS-REPLAY-{index}", "controls": [],
+            "active_window": {
+                "process_name": "EDRClient.exe", "title": "EDRClient",
+                "rect": [origin[0], origin[1], origin[0] + 300, origin[1] + 200],
+            },
+            "screenshot_scope": "window", "screenshot_redacted": True,
+            "screenshot_path": str(artifacts.directory / "assets" / "observations" / f"{before_id}.png"),
+            "screenshot_origin": list(origin),
+        }
+        action = materialize(step, observation)
+        assert action.action_id == "pointer.click_window"
+        assert action.target_ref is None
+        assert action.args["x"] == 50
+        assert action.args["y"] == 50
+
+
+def test_click_without_semantic_identity_stays_incomplete_without_safe_template(tmp_path):
+    store = RecordingEvidenceStore(_ScreenshotBackend())
+    assert store.initialize()["ok"] is True
+    weak_target = replace(
+        _event().observed_target, automation_id=None, identifier=None,
+        control_type="Pane", text=None,
+    )
+    attached = store.attach(replace(_event(), observed_target=weak_target))
+    recording = RawRecording("REC-1", "image only flow", (attached,))
+    compiled = compile_recording(recording)
+    before_id = attached.evidence["beforeCapture"]["id"]
+    before_payload = base64.b64decode(store.get(before_id)["image_b64"])
+    for label, captures in (("missing", {}), ("tampered", {before_id: before_payload[:-1]})):
+        artifacts = write_compilation_artifacts(tmp_path / label, recording, compiled,
+                                                captures=captures)
+        assert artifacts.compilation.golden.status == "incomplete"
+        assert any(issue.code == "compile_selector_ambiguous"
+                   for issue in artifacts.compilation.issues)
+
+
+@pytest.mark.parametrize("protected", [True, None])
+@pytest.mark.parametrize("weak_identity", [False, True])
+def test_protected_or_unknown_target_never_gets_a_visual_click_template(
+    tmp_path, protected, weak_identity,
+):
+    store = RecordingEvidenceStore(_ScreenshotBackend())
+    assert store.initialize()["ok"] is True
+    event = _event(protected=protected)
+    if weak_identity:
+        event = replace(event, observed_target=replace(
+            event.observed_target, automation_id=None, identifier=None,
+            control_type="Pane", text=None,
+        ))
+    attached = store.attach(event)
     capture_id = attached.evidence["capture"]["id"]
     payload = base64.b64decode(store.get(capture_id)["image_b64"])
+    before_id = attached.evidence["beforeCapture"]["id"]
+    before_payload = base64.b64decode(store.get(before_id)["image_b64"])
     recording = RawRecording("REC-1", "secret flow", (attached,))
 
     artifacts = write_compilation_artifacts(
         tmp_path,
         recording,
         compile_recording(recording),
-        captures={capture_id: payload},
+        captures={before_id: before_payload, capture_id: payload},
     )
     golden = json.loads(artifacts.golden_trace.read_text(encoding="utf-8"))
 
-    assert golden["steps"]["step-0001"]["selector"]["visual"] is None
+    selector = golden["steps"]["step-0001"]["selector"]
+    if weak_identity:
+        assert golden["status"] == "incomplete"
+        assert selector is None
+    else:
+        assert selector["visual"] is None
 
 
 def test_unbound_window_transition_does_not_shift_later_visual_evidence(tmp_path):
     store = RecordingEvidenceStore(_ScreenshotBackend())
+    assert store.initialize()["ok"] is True
     attached = replace(store.attach(_event()), sequence=2, monotonic_ms=20)
     capture_id = attached.evidence["capture"]["id"]
     payload = base64.b64decode(store.get(capture_id)["image_b64"])
+    before_id = attached.evidence["beforeCapture"]["id"]
+    before_payload = base64.b64decode(store.get(before_id)["image_b64"])
     transition = RawCaptureEvent(
         1, "2026-08-17T00:00:00Z", 10, "window_transition",
         attached.scope, input={"kind": "opened"}, causal_id="orphan",
@@ -241,7 +400,7 @@ def test_unbound_window_transition_does_not_shift_later_visual_evidence(tmp_path
         tmp_path,
         recording,
         compile_recording(recording),
-        captures={capture_id: payload},
+        captures={before_id: before_payload, capture_id: payload},
     )
     golden = json.loads(artifacts.golden_trace.read_text(encoding="utf-8"))
 
@@ -446,7 +605,9 @@ def test_a_refused_enumeration_is_not_retried_for_every_step():
     class _Backend:
         def __init__(self):
             self.calls = 0
-            self._connected_pid = 42
+            self._connected_window_snapshot = {
+                "pid": 42, "title": "logo1", "handle": 101,
+            }
 
         def dump_tree(self, max_depth=15):
             self.calls += 1
@@ -466,7 +627,9 @@ def test_a_successful_enumeration_is_reused_for_the_same_window():
     class _Backend:
         def __init__(self):
             self.calls = 0
-            self._connected_pid = 42
+            self._connected_window_snapshot = {
+                "pid": 42, "title": "logo1", "handle": 101,
+            }
 
         def dump_tree(self, max_depth=15):
             self.calls += 1
@@ -501,6 +664,61 @@ def test_a_different_window_is_enumerated_again():
     backend._connected_window_snapshot = {"pid": 42, "title": "升级日志"}
     _cached_protected_controls(backend)
 
+    assert backend.calls == 2
+
+
+def test_protected_cache_rechecks_same_title_when_native_window_changes():
+    """A replaced HWND must not inherit another window's secret rectangles."""
+    from target.recording.evidence import _cached_protected_controls
+
+    class _Backend:
+        def __init__(self):
+            self.handle = 101
+            self.calls = 0
+
+        def get_window_lock(self):
+            return {"ok": True, "locked": True, "lock": {
+                "pid": 42, "handle": self.handle,
+                "snapshot": {"pid": 42, "handle": self.handle, "title": "logo1"},
+            }}
+
+        def dump_tree(self, max_depth=15):
+            self.calls += 1
+            return {"ok": True, "controls": [{
+                "protected": True,
+                "rectangle": {"x": self.handle, "y": 2, "w": 10, "h": 20},
+            }]}
+
+    backend = _Backend()
+    first = _cached_protected_controls(backend)
+    again = _cached_protected_controls(backend)
+    backend.handle = 102
+    replacement = _cached_protected_controls(backend)
+
+    assert first == again
+    assert first != replacement
+    assert backend.calls == 2
+
+
+def test_protected_cache_does_not_reuse_a_lock_without_native_identity():
+    from target.recording.evidence import _cached_protected_controls
+
+    class _Backend:
+        def __init__(self):
+            self.calls = 0
+
+        def get_window_lock(self):
+            return {"ok": True, "locked": True, "lock": {
+                "pid": 42, "snapshot": {"pid": 42, "title": "logo1"},
+            }}
+
+        def dump_tree(self, max_depth=15):
+            self.calls += 1
+            return {"ok": True, "controls": []}
+
+    backend = _Backend()
+    _cached_protected_controls(backend)
+    _cached_protected_controls(backend)
     assert backend.calls == 2
 
 

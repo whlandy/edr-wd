@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,7 +18,10 @@ from agent.execution import (
 )
 from agent.recording.models import GoldenTrace, RecordedStep, ReplaySelector
 from agent.recording.models import canonical_json
-from agent.recording.replay import ReplayRuntime, golden_to_test_case, replay_golden_trace
+from agent.recording.replay import (_anchor_point, GoldenStepMaterializer, ReplayRuntime,
+                                    golden_to_test_case, replay_golden_trace)
+from agent.recording.runtime import build_replay_runtime
+from agent.recording.runtime import golden_entry_scope
 from agent.recording.mcp_runtime import MCPActionDispatch, MCPObservationProvider
 from agent.recording.visual import SafeVisualResolver, VisualCandidate
 from agent.trace import EventType, TraceStore
@@ -49,6 +55,7 @@ class _Observations:
                 "rect": [0, 0, 800, 600],
             },
             "screenshot_scope": "window",
+            "screenshot_redacted": True,
         }
         return snapshot_id
 
@@ -76,6 +83,19 @@ def _golden(*steps, status="ready", digest="sha256:catalog", cleanup=()):
         status=status,
         cleanup=tuple(cleanup),
     )
+
+
+def test_replay_entry_scope_uses_first_recorded_window_not_application_label():
+    selector = ReplaySelector(
+        window={"processName": "HiSecEndpointAgent.exe", "titleRegex": "^logo1$"},
+        control={"automationId": "entryButton"},
+    )
+    golden = _golden(RecordedStep("step-0001", "gui.click", {}, selector))
+    golden = replace(golden, environment={**golden.environment,
+                                          "application": "EDRClient.exe"})
+
+    scope = golden_entry_scope(golden)
+    assert (scope.process_name, scope.title_regex) == ("HiSecEndpointAgent.exe", "^logo1$")
 
 
 def _runtime(controls):
@@ -120,6 +140,175 @@ def test_replay_materializes_a_fresh_target_ref_for_every_step():
     assert result.evaluation.task_success is True
     assert result.task_success is True
     assert result.summary["outcome"] == "passed"
+
+
+def test_missing_visual_asset_root_is_rejected_before_target_window_lock(tmp_path):
+    class NoRemoteCalls:
+        def call_tool(self, *args, **kwargs):
+            pytest.fail("invalid local assets must not touch the target")
+
+    golden = _golden(RecordedStep("step-0001", "gui.click", {}, _selector()))
+    with pytest.raises(RecordingModelError, match="visual replay asset directory does not exist"):
+        build_replay_runtime(NoRemoteCalls(), golden, replay_mode="visual_only",
+                             asset_root=tmp_path / "missing")
+
+
+@pytest.mark.parametrize("asset_bytes", [None, b"tampered"])
+def test_missing_or_tampered_visual_template_is_rejected_before_target_lock(
+    tmp_path, asset_bytes,
+):
+    class NoRemoteCalls:
+        def call_tool(self, *args, **kwargs):
+            pytest.fail("invalid local template must not touch the target")
+
+    if asset_bytes is not None:
+        (tmp_path / "template.png").write_bytes(asset_bytes)
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"automationId": "btnApply"},
+        visual={"template": "template.png", "elementSha256": VISUAL_DIGEST,
+                "redacted": True},
+    )
+    golden = _golden(RecordedStep("step-0001", "gui.click", {}, selector))
+    with pytest.raises(RecordingModelError, match="template"):
+        build_replay_runtime(NoRemoteCalls(), golden, replay_mode="visual_only",
+                             asset_root=tmp_path)
+
+
+def test_digest_matching_non_png_template_is_rejected_before_target_lock(tmp_path):
+    class NoRemoteCalls:
+        def call_tool(self, *args, **kwargs):
+            pytest.fail("invalid image must not touch the target")
+
+    content = b"not-a-png"
+    (tmp_path / "template.png").write_bytes(content)
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"automationId": "btnApply"},
+        visual={"template": "template.png",
+                "elementSha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+                "redacted": True},
+    )
+    golden = _golden(RecordedStep("step-0001", "gui.click", {}, selector))
+    with pytest.raises(RecordingModelError, match="valid PNG"):
+        build_replay_runtime(NoRemoteCalls(), golden, replay_mode="visual_only",
+                             asset_root=tmp_path)
+
+
+def test_stable_control_id_replays_when_recorded_label_has_changed():
+    runtime, _, calls = _runtime([{
+        "process_name": "EDRClient.exe", "window_title": "EDRClient",
+        "automation_id": "btnApply", "control_type": "Button", "text": "立即应用",
+    }])
+    result = replay_golden_trace(
+        runtime, _golden(RecordedStep("step-0001", "gui.click", {}, _selector())),
+    )
+    assert result.task_success is True
+    assert calls[0]["args"]["automation_id"] == "btnApply"
+    assert "text" not in calls[0]["args"]
+
+
+def test_assertion_replays_against_changed_time_text_without_click_materialization():
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"automationId": "logRow", "controlType": "Text", "name": "10:10:10"},
+    )
+    assertion = RecordedStep(
+        "step-0001", None, {}, selector,
+        verifiers=({"type": "text_time_range", "expected": "10:10"},),
+    )
+    runtime, _, calls = _runtime([{
+        "process_name": "EDRClient.exe", "window_title": "EDRClient",
+        "automation_id": "logRow", "control_type": "Text", "text": "10:10:59 用户登录",
+    }])
+    result = replay_golden_trace(runtime, _golden(assertion))
+    assert result.task_success is True
+    assert calls == []
+
+
+def test_assertion_reobserves_until_async_log_appears_without_replaying_actions():
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"automationId": "logRow", "controlType": "Text", "name": "事件时间"},
+    )
+    assertion = RecordedStep(
+        "step-0001", None, {}, selector,
+        verifiers=({"type": "text_time_range", "expected": "10:10",
+                    "timeoutSeconds": 1},),
+    )
+
+    class DelayedObservations(_Observations):
+        def refresh(self):
+            self.controls = [{
+                "process_name": "EDRClient.exe", "window_title": "EDRClient",
+                "automation_id": "logRow", "control_type": "Text",
+                "text": "事件时间", "value": "10:10:42" if self.counter >= 3 else "等待同步",
+            }]
+            return super().refresh()
+
+    observations = DelayedObservations([])
+    calls = []
+    executor = AtomicExecutor(dispatch=lambda **kwargs: calls.append(kwargs),
+                              observation_provider=observations)
+    runtime = ReplayRuntime(executor, "1.0.0", "sha256:catalog")
+    result = replay_golden_trace(runtime, _golden(assertion))
+    assert result.task_success is True
+    assert observations.counter >= 4
+    assert calls == []
+
+
+def test_assertion_deadline_stops_polling_without_repeating_action():
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"automationId": "logRow", "controlType": "Text"},
+    )
+    assertion = RecordedStep(
+        "step-0001", None, {}, selector,
+        verifiers=({"type": "text_time_range", "expected": "10:10",
+                    "timeoutSeconds": 0.05},),
+    )
+    runtime, observations, calls = _runtime([{
+        "process_name": "EDRClient.exe", "window_title": "EDRClient",
+        "automation_id": "logRow", "control_type": "Text", "text": "10:11:00",
+    }])
+    result = replay_golden_trace(runtime, _golden(assertion))
+    assert result.task_success is False
+    assert 3 <= observations.counter <= 5
+    assert calls == []
+
+
+def test_bound_assertion_polls_state_without_reclicking():
+    step = RecordedStep(
+        "step-0001", "gui.click", {}, _selector(),
+        verifiers=({"type": "text_equals", "expected": "已应用",
+                    "timeoutSeconds": 1},),
+    )
+
+    class DelayedObservations(_Observations):
+        def refresh(self):
+            self.controls = [{
+                "process_name": "EDRClient.exe", "window_title": "EDRClient",
+                "automation_id": "btnApply", "control_type": "Button",
+                "text": "已应用" if self.counter >= 3 else "应用",
+            }]
+            return super().refresh()
+
+    observations = DelayedObservations([])
+    calls = []
+
+    def dispatch(**kwargs):
+        calls.append(kwargs)
+        return ActionReceipt.from_ok(action_id=kwargs["action_id"],
+                                     action_code=kwargs["action_code"],
+                                     request_id=kwargs["request_id"], result={})
+
+    runtime = ReplayRuntime(AtomicExecutor(dispatch=dispatch,
+                                           observation_provider=observations),
+                            "1.0.0", "sha256:catalog")
+    result = replay_golden_trace(runtime, _golden(step))
+    assert result.task_success is True
+    assert observations.counter >= 4
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("action_id", ["pointer.right_click", "pointer.middle_click"])
@@ -199,6 +388,23 @@ def test_window_assertion_object_preserves_existence_match_and_timeout():
         "process_name": "EDRClient.exe", "title_regex": "^Policy Dialog$",
     }
     assert expectation.timeout_seconds == 15
+
+
+def test_window_assertion_requires_scoped_inventory_before_target_lock():
+    class OldTarget:
+        def tools_list(self):
+            return {"tools": [{"name": "begin_product_run"}]}
+
+        def call_tool(self, *args, **kwargs):
+            pytest.fail("unsupported window assertion must not lock a target")
+
+    golden = _golden(RecordedStep(
+        "step-0001", "gui.click", {}, _selector(),
+        verifiers=({"type": "window_open", "expected": True},),
+    ))
+
+    with pytest.raises(RecordingModelError, match="product-scoped window inventory"):
+        build_replay_runtime(OldTarget(), golden)
 
 
 def test_replay_rejects_incomplete_and_catalog_mismatch_before_execution():
@@ -319,6 +525,49 @@ def test_semantic_first_visual_fallback_is_window_bounded_and_reported():
     assert result.evaluation.semantic_resolution_rate == 0.0
 
 
+def test_semantic_first_rejects_conflicting_visual_evidence():
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"automationId": "btnApply"},
+        visual={"template": "assets/apply.png", "redacted": True,
+                "elementSha256": VISUAL_DIGEST},
+    )
+    runtime, _, calls = _runtime([{
+        "process_name": "EDRClient.exe", "window_title": "EDRClient",
+        "automation_id": "btnApply", "rect": [100, 100, 150, 150],
+    }])
+    object.__setattr__(runtime, "replay_mode", "semantic_first")
+    object.__setattr__(runtime, "visual_resolver", SafeVisualResolver(
+        lambda _template, _observation: [VisualCandidate((300, 300, 350, 350), 0.99)]
+    ))
+    result = replay_golden_trace(runtime, _golden(RecordedStep("step-0001", "gui.click", {}, selector)))
+    assert calls == []
+    assert result.case_result.step_results[0].error["code"] == "locator_evidence_conflict"
+
+
+def test_semantic_first_uses_visual_to_disambiguate_two_controls():
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"controlType": "Button", "name": "应用"},
+        visual={"template": "assets/apply.png", "redacted": True,
+                "elementSha256": VISUAL_DIGEST},
+    )
+    runtime, _, calls = _runtime([
+        {"process_name": "EDRClient.exe", "window_title": "EDRClient",
+         "control_type": "Button", "text": "应用", "rect": [100, 100, 150, 150]},
+        {"process_name": "EDRClient.exe", "window_title": "EDRClient",
+         "control_type": "Button", "text": "应用", "rect": [300, 100, 350, 150]},
+    ])
+    object.__setattr__(runtime, "replay_mode", "semantic_first")
+    object.__setattr__(runtime, "visual_resolver", SafeVisualResolver(
+        lambda _template, _observation: [VisualCandidate((300, 100, 350, 150), 0.99)]
+    ))
+    result = replay_golden_trace(runtime, _golden(RecordedStep("step-0001", "gui.click", {}, selector)))
+    assert result.task_success is True
+    assert len(calls) == 1
+    assert calls[0]["target_ref"]["target_id"].endswith("02")
+
+
 def test_visual_fallback_refuses_ambiguous_candidates_without_clicking():
     selector = ReplaySelector(
         window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
@@ -390,6 +639,113 @@ def test_visual_only_mode_does_not_disguise_visual_hit_as_semantic_resolution():
     assert calls[0]["action_id"] == "pointer.click_window"
     assert result.evaluation.visual_fallback_count == 1
     assert result.evaluation.semantic_resolution_rate == 0.0
+
+
+@pytest.mark.parametrize("mode", ["semantic_first", "visual_only"])
+def test_visual_only_selector_without_control_identity_replays_in_visual_modes(mode):
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={},
+        visual={"template": "assets/unlabeled.png", "redacted": True,
+                "elementSha256": VISUAL_DIGEST},
+    )
+    runtime, _, calls = _runtime([])
+    object.__setattr__(runtime, "replay_mode", mode)
+    object.__setattr__(runtime, "visual_resolver", SafeVisualResolver(
+        lambda _template, _observation: [VisualCandidate((20, 30, 120, 70), 0.99)],
+    ))
+    result = replay_golden_trace(
+        runtime, _golden(RecordedStep("step-0001", "gui.click", {}, selector)),
+    )
+    assert result.task_success is True
+    assert calls[0]["action_id"] == "pointer.click_window"
+    assert result.evaluation.visual_fallback_count == 1
+
+
+def test_visual_only_selector_does_not_silently_run_in_semantic_only_mode():
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={},
+        visual={"template": "assets/unlabeled.png", "redacted": True,
+                "elementSha256": VISUAL_DIGEST},
+    )
+    runtime, _, calls = _runtime([])
+    result = replay_golden_trace(
+        runtime, _golden(RecordedStep("step-0001", "gui.click", {}, selector)),
+    )
+    assert calls == []
+    assert result.case_result.step_results[0].error["code"] == "replay_selector_semantic_missing"
+
+
+def test_image_only_trace_semantic_mode_is_rejected_before_target_lock():
+    class NoRemoteCalls:
+        def call_tool(self, *args, **kwargs):
+            pytest.fail("incompatible replay mode must not touch the target")
+
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={},
+        visual={"template": "assets/unlabeled.png", "redacted": True,
+                "elementSha256": VISUAL_DIGEST},
+    )
+    golden = _golden(RecordedStep("step-0001", "gui.click", {}, selector))
+    with pytest.raises(RecordingModelError) as exc:
+        build_replay_runtime(NoRemoteCalls(), golden, replay_mode="semantic_only")
+    assert exc.value.code == "replay_selector_semantic_missing"
+
+
+@pytest.mark.parametrize("mode", ["semantic_only", "visual_only"])
+def test_two_fresh_replays_use_new_observations_in_both_locator_modes(mode):
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"automationId": "btnApply", "controlType": "Button", "name": "应用"},
+        visual={"template": "assets/apply.png", "redacted": True,
+                "elementSha256": VISUAL_DIGEST},
+    )
+    golden = _golden(RecordedStep("step-0001", "gui.click", {}, selector))
+    for label in ("应用", "立即应用"):
+        runtime, observations, calls = _runtime([{
+            "process_name": "EDRClient.exe", "window_title": "EDRClient",
+            "automation_id": "btnApply", "control_type": "Button", "text": label,
+        }])
+        object.__setattr__(runtime, "replay_mode", mode)
+        if mode == "visual_only":
+            object.__setattr__(runtime, "visual_resolver", SafeVisualResolver(
+                lambda _template, _observation: [VisualCandidate((20, 30, 120, 70), 0.99)],
+                template_verifier=lambda _template, _visual: True,
+            ))
+        result = replay_golden_trace(runtime, golden)
+        assert result.task_success is True
+        assert observations.counter >= 1
+        assert calls[0]["action_id"] == (
+            "pointer.click_window" if mode == "visual_only" else "gui.click"
+        )
+
+
+def test_visual_only_replay_uses_context_to_choose_one_of_repeated_icons():
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"name": "重复图标"},
+        visual={"template": "element.png", "elementSha256": VISUAL_DIGEST,
+                "contextTemplate": "context.png", "contextSha256": VISUAL_DIGEST,
+                "contextOffset": [10, 10], "redacted": True},
+    )
+    runtime, _, calls = _runtime([])
+    def match(template, _observation):
+        if template == "element.png":
+            return [VisualCandidate((20, 30, 40, 50), 0.99),
+                    VisualCandidate((120, 30, 140, 50), 0.99)]
+        return [VisualCandidate((110, 20, 160, 70), 0.98)]
+    object.__setattr__(runtime, "replay_mode", "visual_only")
+    object.__setattr__(runtime, "visual_resolver", SafeVisualResolver(
+        match, template_verifier=lambda _template, _visual: True,
+    ))
+    result = replay_golden_trace(
+        runtime, _golden(RecordedStep("step-0001", "gui.click", {}, selector)),
+    )
+    assert result.task_success is True
+    assert calls[0]["action_id"] == "pointer.click_window"
+    assert calls[0]["args"]["x"] == 130
 
 
 def test_replay_missing_secret_blocks_without_dispatch_or_plaintext(monkeypatch):
@@ -472,6 +828,17 @@ def test_fresh_observation_refuses_a_lost_window_lock_before_dumping_tree():
     assert [name for name, _ in agent.calls] == ["verify_window_lock"]
 
 
+def test_fresh_observation_rejects_malformed_control_entries():
+    class _MalformedTreeAgent(_MCPAgent):
+        def call_tool(self, name, arguments, timeout=None):
+            if name == "dump_tree":
+                return {"ok": True, "controls": [{"automation_id": "btn-ok"}, None]}
+            return super().call_tool(name, arguments, timeout=timeout)
+
+    with pytest.raises(BackendUnavailable, match="invalid control entry"):
+        MCPObservationProvider(_MalformedTreeAgent()).refresh()
+
+
 def test_visual_observation_refuses_a_full_screen_capture():
     class _FullScreenAgent(_MCPAgent):
         def call_tool(self, name, arguments, timeout=None):
@@ -514,6 +881,23 @@ def test_visual_resolver_refuses_observation_without_window_capture_scope():
             "screenshot_scope": "screen",
         })
 
+    assert exc_info.value.code == "visual_window_unverified"
+
+
+def test_visual_resolver_refuses_unredacted_window_capture():
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe"}, control={"automationId": "missing"},
+        visual={"template": "assets/apply.png", "elementSha256": VISUAL_DIGEST,
+                "redacted": True},
+    )
+    resolver = SafeVisualResolver(
+        lambda _template, _observation: [VisualCandidate((20, 30, 120, 70), 0.99)]
+    )
+    with pytest.raises(StepMaterializationError) as exc_info:
+        resolver.resolve("gui.click", selector, {
+            "active_window": {"rect": [0, 0, 800, 600]},
+            "screenshot_scope": "window", "screenshot_redacted": False,
+        })
     assert exc_info.value.code == "visual_window_unverified"
 
 
@@ -564,6 +948,55 @@ def test_replay_cli_wires_confirmation_and_mcp_runtime(monkeypatch, tmp_path, ca
     assert __import__("pathlib").Path(output["evaluation_path"]).exists()
     assert (tmp_path / "traces" / output["trace_directory"].split("/")[-1] / "events.jsonl").exists()
     assert any(name == "execute_action" for name, _ in agent.calls)
+
+
+def test_replay_cli_uses_target_app_profile_for_bound_trace(monkeypatch, tmp_path, capsys):
+    agent = _MCPAgent()
+    monkeypatch.setattr(cli, "_target_agent", lambda *_args: agent)
+
+    class _TargetConfig:
+        def __init__(self, _path=None):
+            pass
+
+        def get_target_app_profile(self, name):
+            assert name == "win-dev"
+            return "windows_hisec"
+
+    monkeypatch.setattr(cli, "TargetConfig", _TargetConfig)
+    golden = GoldenTrace(
+        name="policy flow",
+        source_recording={"schema": "edr.desktop-recording/v1", "sha256": "sha256:raw"},
+        catalog={"version": CATALOG_VERSION, "digest": catalog_digest()},
+        environment={"backend": "windows_pywinauto", "target": "win-dev",
+                     "profile": "windows_hisec"},
+        steps=(RecordedStep("step-0001", "gui.click", {}, _selector()),),
+        status="ready",
+    )
+    path = tmp_path / "golden-trace.json"
+    path.write_text(canonical_json(golden.to_dict()), encoding="utf-8")
+
+    exit_code = cli.main(["--target", "win-dev", "replay", str(path),
+                          "--confirm-action", "gui.click",
+                          "--trace-root", str(tmp_path / "traces")])
+    output = __import__("json").loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["evaluation"]["taskSuccess"] is True
+    assert any(name == "execute_action" for name, _ in agent.calls)
+
+
+def test_runtime_rejects_bound_profile_mismatch_before_target_calls():
+    golden = _golden(RecordedStep("step-0001", "gui.click", {}, _selector()))
+    golden = replace(golden, environment={**golden.environment,
+                                          "profile": "windows_hisec"})
+
+    class NoRemoteCalls:
+        def __getattr__(self, name):
+            raise AssertionError(f"unexpected target access: {name}")
+
+    with pytest.raises(RecordingModelError, match="golden trace profile") as exc:
+        build_replay_runtime(NoRemoteCalls(), golden, profile="windows_notepad")
+    assert exc.value.code == "golden_profile_mismatch"
 
 
 @pytest.mark.parametrize(
@@ -678,6 +1111,26 @@ def test_drag_replays_anchors_against_the_current_rectangles_not_recorded_pixels
     assert calls[0]["args"] == {
         "duration": 0.4, "x1": 610, "y1": 130, "x2": 805, "y2": 210,
     }
+
+
+def test_drag_100_percent_anchors_stay_inside_both_current_controls():
+    start, end = _drag_selectors()
+    start.control["anchor"] = {"relativePoint": [1.0, 1.0]}
+    end.control["anchor"] = {"relativePoint": [1.0, 1.0]}
+    step = RecordedStep("step-0001", "pointer.drag", {}, start, end_selector=end)
+    runtime, _, calls = _runtime(_drag_controls([600, 100, 640, 140], [800, 200, 900, 240]))
+
+    result = replay_golden_trace(runtime, _golden(step))
+
+    assert result.task_success is True
+    assert calls[0]["args"] == {"x1": 639, "y1": 139, "x2": 899, "y2": 239}
+
+
+@pytest.mark.parametrize("rect", ([10, 10, 10, 20], [20, 10, 10, 20]))
+def test_drag_anchor_rejects_empty_or_inverted_current_control(rect):
+    with pytest.raises(StepMaterializationError) as exc:
+        _anchor_point({"rect": rect}, {"anchor": {"relativePoint": [0.5, 0.5]}})
+    assert exc.value.code == "replay_observation_invalid"
 
 
 def test_a_drag_without_a_release_selector_blocks_before_dispatch():
@@ -1021,6 +1474,291 @@ def test_replay_focuses_the_window_each_step_was_recorded_in(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("assertion_type", ["text_time_range", "window_text_time_range"])
+def test_cross_window_assertion_observes_log_window_without_repeating_action(assertion_type):
+    observations = _WindowedObservations({
+        "^EDRClient$": [{
+            "process_name": "EDRClient.exe", "window_title": "EDRClient",
+            "automation_id": "btnApply", "control_type": "Button", "text": "10:11:00",
+        }],
+        "^日志中心$": [{
+            "process_name": "EDRClient.exe", "window_title": "日志中心",
+            "automation_id": "logTime", "control_type": "Text", "text": "10:10:59",
+        }],
+    })
+    calls = []
+
+    def dispatch(**kwargs):
+        calls.append(kwargs)
+        return ActionReceipt.from_ok(
+            action_id=kwargs["action_id"], action_code=kwargs["action_code"],
+            request_id=kwargs["request_id"], result={"ok": True},
+        )
+
+    runtime = ReplayRuntime(
+        AtomicExecutor(dispatch=dispatch, observation_provider=observations),
+        "1.0.0", "sha256:catalog", window_focus=observations.focus,
+    )
+    log_selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^日志中心$"},
+        control=({"automationId": "logTime", "controlType": "Text"}
+                 if assertion_type == "text_time_range" else {}),
+    )
+    verifier = {"type": assertion_type, "expected": "10:10"}
+    if assertion_type == "text_time_range":
+        verifier["match"] = {"automation_id": "logTime", "control_type": "Text"}
+    golden = _golden(
+        RecordedStep("step-0001", "gui.click", {}, _selector()),
+        RecordedStep("step-0002", None, {}, log_selector, verifiers=(verifier,)),
+    )
+
+    result = replay_golden_trace(runtime, golden)
+
+    assert result.task_success is True
+    assert len(calls) == 1
+    assert observations.focus_calls == [
+        ("EDRClient.exe", "^EDRClient$"), ("EDRClient.exe", "^日志中心$"),
+    ]
+
+
+def test_replay_relocks_new_window_when_click_steals_old_window_foreground():
+    class ForegroundObservations(_WindowedObservations):
+        def __init__(self, windows):
+            super().__init__(windows)
+            self.locked = None
+            self.foreground = None
+
+        def focus(self, process_name, title_regex, root=""):
+            self.locked = title_regex
+            self.foreground = title_regex
+            return super().focus(process_name, title_regex, root)
+
+        def refresh(self):
+            if not self.locked or self.foreground != self.locked:
+                raise BackendUnavailable("old window lost foreground")
+            return super().refresh()
+
+    observations = ForegroundObservations({
+        "^logo1$": [_control("logo1", "logCenterBtn")],
+        "^日志中心$": [_control("日志中心", "operationLogBtn")],
+    })
+    calls = []
+
+    def dispatch(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            observations.foreground = "^日志中心$"
+        return ActionReceipt.from_ok(
+            action_id=kwargs["action_id"], action_code=kwargs["action_code"],
+            request_id=kwargs["request_id"], result={"ok": True},
+        )
+
+    runtime = ReplayRuntime(
+        AtomicExecutor(dispatch=dispatch, observation_provider=observations),
+        "1.0.0", "sha256:catalog", window_focus=observations.focus,
+    )
+    golden = _golden(
+        RecordedStep("step-0001", "gui.click", {}, _window_selector("^logo1$", "logCenterBtn")),
+        RecordedStep("step-0002", "gui.click", {}, _window_selector("^日志中心$", "operationLogBtn")),
+    )
+
+    result = replay_golden_trace(runtime, golden)
+
+    assert result.task_success is True, [step.error for step in result.case_result.step_results]
+    assert len(calls) == 2
+    assert observations.focus_calls == [
+        ("EDRClient.exe", "^logo1$"), ("EDRClient.exe", "^日志中心$"),
+    ]
+
+
+def test_terminal_window_open_assertion_polls_product_inventory_without_old_lock():
+    class InventoryObservations(_WindowedObservations):
+        def __init__(self):
+            super().__init__({"^logo1$": [_control("logo1", "logCenterBtn")]})
+            self.old_lock_lost = False
+            self.inventory_reads = 0
+
+        def refresh(self):
+            if self.old_lock_lost:
+                raise BackendUnavailable("old window lost foreground")
+            return super().refresh()
+
+        def refresh_window_inventory(self):
+            self.inventory_reads += 1
+            self.counter += 1
+            snapshot_id = f"OBS-INVENTORY-{self.counter}"
+            self.snapshots[snapshot_id] = {
+                "snapshot_id": snapshot_id, "controls": [],
+                "windows": ([{"process_name": "EDRClient.exe", "title": "日志中心"}]
+                            if self.inventory_reads >= 2 else []),
+            }
+            return snapshot_id
+
+    observations = InventoryObservations()
+    calls = []
+
+    def dispatch(**kwargs):
+        calls.append(kwargs)
+        observations.old_lock_lost = True
+        return ActionReceipt.from_ok(
+            action_id=kwargs["action_id"], action_code=kwargs["action_code"],
+            request_id=kwargs["request_id"], result={"ok": True},
+        )
+
+    runtime = ReplayRuntime(
+        AtomicExecutor(dispatch=dispatch, observation_provider=observations),
+        "1.0.0", "sha256:catalog", window_focus=observations.focus,
+    )
+    golden = _golden(RecordedStep(
+        "step-0001", "gui.click", {}, _window_selector("^logo1$", "logCenterBtn"),
+        verifiers=({"type": "window_open", "expected": {
+            "exists": True, "processName": "EDRClient.exe",
+            "titleRegex": "^日志中心$",
+        }, "timeoutSeconds": 1},),
+    ))
+
+    result = replay_golden_trace(runtime, golden)
+
+    assert result.task_success is True
+    assert len(calls) == 1
+    assert observations.inventory_reads >= 2
+    assert observations.focus_calls == [("EDRClient.exe", "^logo1$")]
+
+
+def test_window_inventory_provider_requires_product_scope_and_native_identity():
+    class Agent:
+        def call_tool(self, name, args, timeout=None):
+            assert name == "observe_product_windows"
+            assert args == {"run_token": "run-token"}
+            return {"ok": True, "windows": [{
+                "native_id": "42", "process_id": 101, "generation": 2,
+                "role": "log_center", "process_name": "EDRClient.exe",
+                "title": "日志中心",
+            }]}
+
+    provider = MCPObservationProvider(Agent(), run_token="run-token")
+    snapshot = provider.get_snapshot(provider.refresh_window_inventory())
+    assert snapshot["windows"] == [{
+        "native_id": "42", "process_id": 101, "generation": 2,
+        "role": "log_center", "process_name": "EDRClient.exe",
+        "title": "日志中心",
+    }]
+    with pytest.raises(BackendUnavailable, match="product_run_required"):
+        MCPObservationProvider(Agent()).refresh_window_inventory()
+
+
+def test_window_closed_assertion_cannot_pass_while_registered_window_remains():
+    class InventoryObservations(_Observations):
+        def refresh_window_inventory(self):
+            snapshot_id = super().refresh()
+            self.snapshots[snapshot_id]["windows"] = [
+                {"process_name": "EDRClient.exe", "title": "日志中心"},
+            ]
+            return snapshot_id
+
+    observations = InventoryObservations([{
+        "process_name": "EDRClient.exe", "window_title": "EDRClient",
+        "automation_id": "btnApply", "control_type": "Button", "text": "应用",
+    }])
+    calls = []
+
+    def dispatch(**kwargs):
+        calls.append(kwargs)
+        return ActionReceipt.from_ok(
+            action_id=kwargs["action_id"], action_code=kwargs["action_code"],
+            request_id=kwargs["request_id"], result={"ok": True},
+        )
+
+    runtime = ReplayRuntime(
+        AtomicExecutor(dispatch=dispatch, observation_provider=observations),
+        "1.0.0", "sha256:catalog",
+    )
+    golden = _golden(RecordedStep(
+        "step-0001", "gui.click", {}, _selector(),
+        verifiers=({"type": "window_open", "expected": {
+            "exists": False, "processName": "EDRClient.exe",
+            "titleRegex": "^日志中心$",
+        }, "timeoutSeconds": 0.01},),
+    ))
+
+    result = replay_golden_trace(runtime, golden)
+
+    assert result.task_success is False
+    assert len(calls) == 1
+    assert result.case_result.step_results[0].expectation_results[-1].status is StepStatus.FAILED
+
+
+def test_terminal_window_closed_passes_from_inventory_after_old_lock_disappears():
+    class ClosingObservations(_Observations):
+        def __init__(self):
+            super().__init__([{
+                "process_name": "EDRClient.exe", "window_title": "EDRClient",
+                "automation_id": "btnApply", "control_type": "Button", "text": "应用",
+            }])
+            self.closed = False
+
+        def refresh(self):
+            if self.closed:
+                raise BackendUnavailable("locked window closed")
+            return super().refresh()
+
+        def refresh_window_inventory(self):
+            self.counter += 1
+            snapshot_id = f"OBS-INVENTORY-{self.counter}"
+            self.snapshots[snapshot_id] = {
+                "snapshot_id": snapshot_id, "controls": [], "windows": [],
+            }
+            return snapshot_id
+
+    observations = ClosingObservations()
+    calls = []
+
+    def dispatch(**kwargs):
+        calls.append(kwargs)
+        observations.closed = True
+        return ActionReceipt.from_ok(
+            action_id=kwargs["action_id"], action_code=kwargs["action_code"],
+            request_id=kwargs["request_id"], result={"ok": True},
+        )
+
+    runtime = ReplayRuntime(
+        AtomicExecutor(dispatch=dispatch, observation_provider=observations),
+        "1.0.0", "sha256:catalog",
+    )
+    golden = _golden(RecordedStep(
+        "step-0001", "gui.click", {}, _selector(),
+        verifiers=({"type": "window_open", "expected": {
+            "exists": False, "processName": "EDRClient.exe",
+            "titleRegex": "^EDRClient$",
+        }},),
+    ))
+
+    result = replay_golden_trace(runtime, golden)
+
+    assert result.task_success is True
+    assert len(calls) == 1
+
+
+def test_replay_does_not_retarget_old_window_control_assertion_to_next_window():
+    golden = _golden(
+        RecordedStep(
+            "step-0001", "gui.click", {}, _window_selector("^logo1$", "logCenterBtn"),
+            verifiers=({"type": "text_equals", "expected": "ready"},),
+        ),
+        RecordedStep("step-0002", "gui.click", {},
+                     _window_selector("^日志中心$", "operationLogBtn")),
+    )
+    focused = []
+    materializer = GoldenStepMaterializer(
+        golden, window_focus=lambda *args: focused.append(args),
+    )
+
+    assert materializer.recover_post_action_observation(
+        golden_to_test_case(golden).steps[0]
+    ) is False
+    assert focused == []
+
+
 def test_consecutive_steps_in_one_window_focus_it_only_once():
     observations = _WindowedObservations({
         "^日志中心$": [_control("日志中心", "operationLogBtn")],
@@ -1046,6 +1784,59 @@ def test_consecutive_steps_in_one_window_focus_it_only_once():
 
     assert result.task_success is True
     assert observations.focus_calls == [("EDRClient.exe", "^日志中心$")]
+
+
+def test_same_window_rebuild_relocks_before_next_action_without_repeating_previous_action():
+    class RebuiltWindowObservations(_WindowedObservations):
+        def __init__(self):
+            super().__init__({"^日志中心$": [_control("日志中心", "operationLogBtn")]})
+            self.stale = False
+            self.stale_after_post = False
+
+        def focus(self, process_name, title_regex, root=""):
+            self.stale = False
+            return super().focus(process_name, title_regex, root)
+
+        def refresh(self):
+            if self.stale:
+                raise BackendUnavailable("cached window lock is stale")
+            return super().refresh()
+
+        def get_snapshot(self, snapshot_id):
+            snapshot = super().get_snapshot(snapshot_id)
+            if self.stale_after_post:
+                self.stale_after_post = False
+                self.stale = True
+            return snapshot
+
+    observations = RebuiltWindowObservations()
+    calls = []
+
+    def dispatch(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            observations.stale_after_post = True
+        return ActionReceipt.from_ok(
+            action_id=kwargs["action_id"], action_code=kwargs["action_code"],
+            request_id=kwargs["request_id"], result={"ok": True},
+        )
+
+    runtime = ReplayRuntime(
+        AtomicExecutor(dispatch=dispatch, observation_provider=observations),
+        "1.0.0", "sha256:catalog", window_focus=observations.focus,
+    )
+    golden = _golden(
+        RecordedStep("step-0001", "gui.click", {}, _window_selector("^日志中心$", "operationLogBtn")),
+        RecordedStep("step-0002", "gui.click", {}, _window_selector("^日志中心$", "operationLogBtn")),
+    )
+
+    result = replay_golden_trace(runtime, golden)
+
+    assert result.task_success is True
+    assert len(calls) == 2
+    assert observations.focus_calls == [
+        ("EDRClient.exe", "^日志中心$"), ("EDRClient.exe", "^日志中心$"),
+    ]
 
 
 def test_the_window_root_distinguishes_two_windows_that_share_a_title():
@@ -1106,3 +1897,60 @@ def test_focusing_reports_when_the_title_matched_the_wrong_window():
 
     with pytest.raises(BackendUnavailable, match="EdrMainWindow"):
         provider.focus_window("EDRClient.exe", "^logo1$", "EdrMainWindow")
+
+
+def test_rooted_replay_rejects_target_without_exact_focus_before_gui_calls(tmp_path):
+    class OldTarget:
+        def tools_list(self):
+            return {"tools": [{"name": "begin_product_run"}]}
+
+        def call_tool(self, *args, **kwargs):
+            pytest.fail("missing exact-focus capability must fail before GUI calls")
+
+    rooted = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^logo1$",
+                "rootAutomationId": "LogRoot"},
+        control={"automationId": "logTime"},
+    )
+    golden = _golden(RecordedStep("step-0001", None, {}, rooted,
+                                  verifiers=({"type": "text_time_range", "expected": "10:10"},)))
+
+    with pytest.raises(RecordingModelError, match="exact product-window focus"):
+        build_replay_runtime(OldTarget(), golden, trace_root=tmp_path)
+
+
+def test_rooted_entry_replay_defers_lock_to_exact_product_focus(tmp_path):
+    calls = []
+
+    class Target:
+        state = SimpleNamespace(backend_kind="windows_pywinauto")
+
+        def tools_list(self):
+            return {"tools": [{"name": name} for name in (
+                "begin_product_run", "end_product_run", "observe_window_bundle",
+                "focus_window_role", "focus_window_selector",
+            )]}
+
+        def call_tool(self, name, args, timeout=None):
+            calls.append(name)
+            if name == "begin_product_run":
+                return {"ok": True, "run_token": "TOKEN"}
+            if name == "end_product_run":
+                return {"ok": True}
+            pytest.fail(f"entry focus should not use legacy {name}")
+
+    rooted = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^logo1$",
+                "rootAutomationId": "LogRoot"},
+        control={},
+    )
+    golden = _golden(RecordedStep("step-0001", None, {}, rooted,
+                                  verifiers=({"type": "window_text_time_range",
+                                              "expected": "10:10"},)))
+
+    runtime = build_replay_runtime(Target(), golden, profile="windows_hisec",
+                                   trace_root=tmp_path)
+
+    assert calls == ["begin_product_run"]
+    assert runtime.window_focus is not None
+    runtime.end_product_run()
