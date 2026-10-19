@@ -475,3 +475,19 @@ expectations/time/replay suite reported **164 passed**, the selected offline
 suite **2554 passed, 28 deselected**, and `compileall`, `git diff --check`,
 and Skill validation exited 0. This is offline evaluator evidence, not an
 11.26 live assertion pass.
+
+On 2026-10-20, the first scheduled 20-minute round ran on a clean tree
+(all prior work committed as six commits and pushed to
+`hermes-remote`). The selected offline suite now reports **2562 passed,
+28 deselected** — 8 more tests than the previous entry, all passing;
+per-test attribution against the previous count is not tracked.
+`compileall` and `git diff --check` exited 0. The 11.26 status probe
+reached the host over SSH (`DESKTOP-S917L7S`, `desktop-s917l7s\admin`)
+but still returned `python_not_found` at the configured Python 3.11
+path; no remote file or service was changed, so live deployment and
+replay remain gated on an operator-provided Python path or
+installation. The cloud endpoint again answered read-only probes
+(`HTTP 200` on the HTTP root, `HTTP 302` on the HTTPS root with
+certificate verification disabled for the probe); no authenticated
+page/API session was available, so no end–cloud comparison is claimed.
+This round produced no new offline verification.
