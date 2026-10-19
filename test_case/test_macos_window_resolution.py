@@ -354,6 +354,53 @@ def test_recording_screenshot_rectangle_uses_exact_native_identity(monkeypatch):
     assert backend._connected_window_snapshot["rectangle"]["x"] == 300
 
 
+def test_ax_tree_and_control_lookup_are_scoped_to_connected_native_window(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    backend._connected_pid = 42
+    backend._connected_app = "EDRClient"
+    backend._connected_window_snapshot = {
+        "pid": 42, "handle": 202, "title": "日志中心", "rectangle_verified": True,
+        "rectangle": {"x": 300, "y": 0, "w": 100, "h": 100},
+    }
+    controls = [
+        {"depth": 0, "path": "w1", "window_title": "日志中心",
+         "rectangle": {"x": 0, "y": 0, "w": 100, "h": 100}},
+        {"depth": 1, "path": "w1.1", "window_title": "日志中心",
+         "automation_id": "wrongWindow", "rectangle": {"x": 10, "y": 10, "w": 20, "h": 20}},
+        {"depth": 0, "path": "w2", "window_title": "日志中心",
+         "rectangle": {"x": 302, "y": 1, "w": 98, "h": 99}},
+        {"depth": 1, "path": "w2.1", "window_title": "日志中心",
+         "automation_id": "rightWindow", "rectangle": {"x": 310, "y": 10, "w": 20, "h": 20}},
+    ]
+    monkeypatch.setattr(macos_accessibility, "_run_osascript",
+                        lambda _script, timeout=20: (0, "tree"))
+    monkeypatch.setattr(backend, "_parse_ax_tree_lines", lambda _out: controls)
+
+    tree = backend.dump_tree(max_depth=2)
+    assert tree["ok"] is True
+    assert [item["path"] for item in tree["controls"]] == ["w2", "w2.1"]
+    assert backend._find_ax_control(automation_id="wrongWindow")[1] is None
+    assert backend._find_ax_control(automation_id="rightWindow")[1]["path"] == "w2.1"
+
+
+def test_ax_tree_refuses_ambiguous_same_geometry_window_roots(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    backend._connected_app = "EDRClient"
+    backend._connected_window_snapshot = {
+        "pid": 42, "handle": 202, "rectangle_verified": True,
+        "rectangle": {"x": 300, "y": 0, "w": 100, "h": 100},
+    }
+    controls = [
+        {"depth": 0, "path": path,
+         "rectangle": {"x": 300, "y": 0, "w": 100, "h": 100}}
+        for path in ("w1", "w2")
+    ]
+    monkeypatch.setattr(macos_accessibility, "_run_osascript",
+                        lambda _script, timeout=20: (0, "tree"))
+    monkeypatch.setattr(backend, "_parse_ax_tree_lines", lambda _out: controls)
+    assert backend.dump_tree()["code"] == "window_control_scope_ambiguous"
+
+
 def test_list_windows_enriches_system_events_window_with_cg_rectangle(monkeypatch):
     backend = MacOSAccessibilityBackend()
     monkeypatch.setattr(

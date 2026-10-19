@@ -2382,6 +2382,53 @@ return outText
             })
         return controls
 
+    def _scope_ax_controls_to_connected_window(
+        self, controls: list[dict],
+    ) -> tuple[Optional[dict], list[dict]]:
+        """Bind AX's per-process tree to one verified CG window by geometry."""
+        snapshot = getattr(self, "_connected_window_snapshot", None)
+        if not isinstance(snapshot, dict):
+            return None, controls
+        if not self._refresh_connected_window_rectangle():
+            return {"ok": False, "code": "window_control_scope_unavailable",
+                    "error": "connected window has no verified CG rectangle"}, []
+        rect = snapshot.get("rectangle")
+        if not isinstance(rect, dict):
+            return {"ok": False, "code": "window_control_scope_unavailable",
+                    "error": "connected window has no CG rectangle"}, []
+        expected = (int(rect["x"]), int(rect["y"]),
+                    int(rect["x"]) + int(rect["w"]),
+                    int(rect["y"]) + int(rect["h"]))
+        matches = []
+        for root in controls:
+            if root.get("depth") != 0 or not re.fullmatch(r"w\d+", str(root.get("path") or "")):
+                continue
+            ax_rect = root.get("rectangle")
+            if not isinstance(ax_rect, dict):
+                continue
+            actual = (int(ax_rect["x"]), int(ax_rect["y"]),
+                      int(ax_rect["x"]) + int(ax_rect["w"]),
+                      int(ax_rect["y"]) + int(ax_rect["h"]))
+            overlap_w = max(0, min(expected[2], actual[2]) - max(expected[0], actual[0]))
+            overlap_h = max(0, min(expected[3], actual[3]) - max(expected[1], actual[1]))
+            overlap = overlap_w * overlap_h
+            expected_area = (expected[2] - expected[0]) * (expected[3] - expected[1])
+            actual_area = (actual[2] - actual[0]) * (actual[3] - actual[1])
+            union = expected_area + actual_area - overlap
+            if (expected_area > 0 and actual_area > 0 and union > 0
+                    and overlap / union >= 0.85
+                    and all(abs(a - b) <= 32 for a, b in zip(expected, actual))):
+                matches.append(str(root["path"]))
+        if len(matches) != 1:
+            return {"ok": False, "code": "window_control_scope_ambiguous" if matches
+                    else "window_control_scope_unavailable",
+                    "error": "AX tree cannot be bound to exactly one connected CG window"}, []
+        prefix = matches[0] + "."
+        scoped = [control for control in controls
+                  if control.get("path") == matches[0]
+                  or str(control.get("path") or "").startswith(prefix)]
+        return None, scoped
+
     def _load_ax_controls(
         self,
         window_title_re: Optional[str] = None,
@@ -2401,7 +2448,11 @@ return outText
                 ),
             }, []
 
-        controls = self._parse_ax_tree_lines(out)
+        err, controls = self._scope_ax_controls_to_connected_window(
+            self._parse_ax_tree_lines(out)
+        )
+        if err:
+            return err, []
         if window_title_re:
             try:
                 rx = re.compile(window_title_re)

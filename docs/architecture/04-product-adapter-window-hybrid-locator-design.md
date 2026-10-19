@@ -170,6 +170,8 @@ intents: intent_id → preconditions + action sequence template + result verifie
 
 现有 `MCPObservationProvider.refresh()` 顺序调用 `verify_window_lock`、`dump_tree`、`replay_capture`，两次观察之间窗口可能变化。新增 target 原子观察接口 `observe_window_bundle(run_token, capture_image, include_ocr)`：在一个窗口锁下依次核对 identity → 控件树 → 脱敏截图/OCR → identity；前后 `native_id/generation/rect` 不一致时丢弃整包并返回 `observation_window_changed`。bundle 有唯一 `observation_id`、采集起止时间、截图摘要与坐标变换；超过策略规定的采集时长则标为过期。相同窗口身份仍不能证明动态内容完全不变，因此定位完成到注入前还要复核目标矩形/可见性；内容持续变化时返回 `observation_stale`。Agent 只在校验整包后建立 `TargetRef`；旧 `refresh()` 在迁移期仅走语义兼容路径，不把不同调用所得树和图像强行合并。
 
+macOS AX 枚举天然返回同进程所有窗口，不能直接把整个树贴上锁定窗口身份。`MacOSAccessibilityBackend._scope_ax_controls_to_connected_window(controls)` 以已验证的 CG 窗口矩形匹配唯一 AX 根节点，再按根路径保留子树；零个或多个几何匹配都拒绝观察与控件动作。同名窗口不能仅凭标题合并，根矩形允许小幅系统边框偏差（每边 ≤32 像素、IoU ≥0.85），但歧义不能靠分数强选。
+
 语义候选来自 automation ID、role/type、名称、稳定祖先与状态；视觉候选来自模板匹配；OCR 产生文字框及识别置信度。候选按窗口、页面区域和矩形相交关系对齐，证据必须属于同一窗口与同一快照。坐标转换显式记录窗口原点、DPI/缩放和截图尺寸，不以录制时绝对坐标回放。
 
 ### 6.2 决策规则

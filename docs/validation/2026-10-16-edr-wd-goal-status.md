@@ -766,3 +766,18 @@ clicking a window. The selected offline suite reports **2600 passed, 28
 deselected**. This proves the generic macOS foreground evidence path,
 not EDRClient activation or repeated replay. 11.26 SSH still reaches
 `DESKTOP-S917L7S`, but the configured Python path remains `python_not_found`.
+
+Twelfth 2026-10-20 round: reviewing the record→bundle→replay chain found
+that macOS `dump_tree()` enumerated every window of a connected process,
+while `observe_window_bundle()` assigned the locked window identity to all
+returned controls. That could make a time assertion or stable-control
+selector pass on a same-process sibling window. The backend now scopes the
+AX tree to exactly one root whose geometry matches the connected, verified
+CG window and includes only that root's descendants; missing or ambiguous
+roots fail closed. Two regression tests show that a same-title sibling's
+control cannot enter the tree or be selected, and two equal-geometry roots
+are rejected. The focused macOS/window-session suite reports **47 passed**;
+the selected offline suite reports **2602 passed, 28 deselected**. A
+read-only local macOS probe could connect a native window but returned no
+AX roots for sampled Chrome/ChatGPT windows, so this fix has synthetic
+scope evidence only; live EDRClient AX-tree behavior remains unverified.
