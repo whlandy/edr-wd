@@ -751,3 +751,18 @@ passed**; selected offline suite **2599 passed, 28 deselected**.
 offline fail-closed evidence, not proof that macOS activation can raise a
 specific same-title sibling or that live EDRClient replay succeeds. The
 11.26 Python runtime and authenticated cloud gates remain open.
+
+Eleventh 2026-10-20 round: a read-only local macOS probe exercised the
+new exact-window path against a real foreground window. System Events
+reported the foreground PID but an empty window title, while CGWindowList
+reported the native ID and title; the first exact-lock probe therefore
+failed. `_frontmost_window_state` now takes the foremost visible CG window
+for that PID, keeps its native ID, and fills only a missing System Events
+title. A higher same-process sibling still cannot satisfy the target's
+native ID. A regression test covers the empty-title case; the focused
+macOS/window-session suite reports **45 passed**. The same read-only live
+probe then verified the exact native lock and matching ID without moving or
+clicking a window. The selected offline suite reports **2600 passed, 28
+deselected**. This proves the generic macOS foreground evidence path,
+not EDRClient activation or repeated replay. 11.26 SSH still reaches
+`DESKTOP-S917L7S`, but the configured Python path remains `python_not_found`.

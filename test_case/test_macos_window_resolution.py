@@ -273,12 +273,27 @@ def test_frontmost_resolves_native_identity_from_cg_zorder(monkeypatch):
     monkeypatch.setattr(macos_accessibility, "_run_osascript",
                         lambda _script, timeout=5: (0, "EDRClient\t42\t日志中心"))
     monkeypatch.setattr(backend, "_cg_window_zorder", lambda: [
-        {"pid": 42, "title": "日志中心", "number": 101},
-        {"pid": 42, "title": "日志中心", "number": 202},
+        {"pid": 42, "title": "日志中心", "number": 101,
+         "rect": (0.0, 0.0, 100.0, 100.0)},
+        {"pid": 42, "title": "日志中心", "number": 202,
+         "rect": (0.0, 0.0, 100.0, 100.0)},
     ])
     monkeypatch.setattr(backend, "_locked_window_visible_state", lambda _lock: None)
     assert backend._frontmost_window_state()["handle"] == 101
     assert backend.verify_window_lock(activate=False)["ok"] is False
+
+
+def test_frontmost_exact_lock_uses_cg_title_when_system_events_title_is_empty(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    backend._window_lock = {"pid": 42, "title_re": "^日志中心$", "handle": 202,
+                            "process_name": "EDRClient"}
+    monkeypatch.setattr(macos_accessibility, "_run_osascript",
+                        lambda _script, timeout=5: (0, "EDRClient\t42\t"))
+    monkeypatch.setattr(backend, "_cg_window_zorder", lambda: [
+        {"pid": 42, "title": "日志中心", "number": 202,
+         "rect": (0.0, 0.0, 100.0, 100.0)},
+    ])
+    assert backend.verify_window_lock(activate=False)["ok"] is True
 
 
 def test_recording_screenshot_rectangle_must_come_from_matching_cg_window(monkeypatch):

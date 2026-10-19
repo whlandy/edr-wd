@@ -222,13 +222,17 @@ class MacOSAccessibilityBackend:
         }
         lock = getattr(self, "_window_lock", None)
         if isinstance(lock, dict) and lock.get("handle") is not None:
-            # System Events exposes only a title. Resolve the frontmost native
-            # window from CG z-order so equal-title siblings cannot satisfy
-            # one another's exact lock. Missing CG evidence fails closed.
+            # System Events may expose an empty title even for a foreground
+            # window with a CG title. CG z-order provides the frontmost native
+            # window of this process; its ID, not a title, must satisfy the
+            # exact lock. A sibling stacked above the target fails closed.
             for window in self._cg_window_zorder():
+                rect = window.get("rect") or ()
                 if (window.get("pid") == state["pid"]
-                        and window.get("title") == state["title"]):
+                        and len(rect) == 4 and rect[2] > 0 and rect[3] > 0):
                     state["handle"] = window.get("number")
+                    if not state["title"]:
+                        state["title"] = window.get("title") or ""
                     break
         if isinstance(lock, dict) and not self._state_matches_lock(state, lock):
             # System Events' "frontmost process" tracks which app owns the
