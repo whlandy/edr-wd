@@ -103,54 +103,24 @@ class _MacOSConnectedApp:
     """
     Provides the minimal pywinauto-like interface that restore_edr (server.py)
     expects: .windows(), .is_minimized(), .restore(), .wait_for_not_minimized().
-    Works via CGWindowList and pgrep — no pywinauto dependency.
+    Uses live window enumeration — no pywinauto dependency.
     """
 
     def __init__(self, backend: "MacOSAccessibilityBackend"):
         self._backend = backend
 
     def _cg_windows_for_app(self) -> list[dict]:
-        """Return CGWindowList entries for the connected app."""
-        snapshot = getattr(self._backend, "_connected_window_snapshot", None)
-        if isinstance(snapshot, dict):
-            return [snapshot]
-
-        app_name = getattr(self._backend, "_connected_app", None) or ""
-        opts = 17  # kCGWindowListOptionAll + excludeDesktopElements
-        try:
-            import subprocess
-            script = (
-                'use framework "CoreGraphics"\n'
-                'set wList to CGWindowListCopyWindowInfo(' + str(opts) + ', 0)\n'
-                'set out to ""\n'
-                'repeat with w in wList\n'
-                '    try\n'
-                '        set owner to "" & (kCGWindowOwnerName of w as string)\n'
-                '        if owner contains ' + _applescript_string(app_name) + ' then\n'
-                '            try\n'
-                '                set wName to "" & (kCGWindowName of w as string)\n'
-                '            on error\n'
-                '                set wName to ""\n'
-                '            end try\n'
-                '            set wPID to kCGWindowOwnerPID of w as string\n'
-                '            set out to out & wPID & "|" & wName & "\n"\n'
-                '        end if\n'
-                '    end try\n'
-                'end repeat\n'
-                'return out\n'
-            )
-            rc, out = subprocess.run(
-                ["osascript", "-e", script], capture_output=True, text=True, timeout=5
-            )
-            wins = []
-            if rc == 0:
-                for line in out.strip().split("\n"):
-                    if "|" in line:
-                        parts = line.split("|", 1)
-                        wins.append({"pid": int(parts[0]), "title": parts[1]})
-            return wins
-        except Exception:
+        """Return currently enumerated windows, never the cached connection."""
+        pid = getattr(self._backend, "_connected_pid", None)
+        if pid is None:
             return []
+        listed = self._backend.list_windows()
+        windows = (listed.get("windows", ()) if listed.get("ok")
+                   else self._backend._list_windows_cg())
+        return [
+            {**window, "title": window.get("window_title") or window.get("title") or ""}
+            for window in windows if window.get("pid") == pid
+        ]
 
     def windows(self) -> list:
         """Return list of proxy window objects (minimal interface)."""
@@ -183,19 +153,19 @@ class _MacOSWindowProxy:
 
     @property
     def rectangle(self):
+        bounds = self._win_info.get("rectangle")
+        if (not isinstance(bounds, dict) or int(bounds.get("w") or 0) <= 0
+                or int(bounds.get("h") or 0) <= 0):
+            raise ValueError("window_rectangle_unavailable")
         class _Rect:
-            def __init__(self):
-                self.left = 0
-                self.top = 0
-                self._w = 800
-                self._h = 600
-            def width(self): return getattr(self, "_w", 800)
-            def height(self): return getattr(self, "_h", 600)
-            def set(self, x, y, w, h):
-                self.left, self.top, self._w, self._h = x, y, w, h
-        r = _Rect()
-        r.set(0, 0, 800, 600)
-        return r
+            def __init__(self, rect):
+                self.left = int(rect["x"])
+                self.top = int(rect["y"])
+                self._w = int(rect["w"])
+                self._h = int(rect["h"])
+            def width(self): return self._w
+            def height(self): return self._h
+        return _Rect(bounds)
 
     def is_minimized(self) -> bool:
         return False
@@ -387,6 +357,7 @@ class MacOSAccessibilityBackend:
                 "pid": snapshot.get("pid") or getattr(self, "_connected_pid", None),
                 "title": snapshot.get("title") or snapshot.get("window_title") or "",
                 "rectangle": snapshot.get("rectangle"),
+                "handle": snapshot.get("handle"),
             }
         app_name = getattr(self, "_connected_app", None)
         pid = getattr(self, "_connected_pid", None)
@@ -425,15 +396,11 @@ class MacOSAccessibilityBackend:
             ]
             if titled:
                 candidates = titled
-        if not candidates:
+        if len(candidates) != 1:
             return False
-        selected = max(
-            candidates,
-            key=lambda window: (
-                int(window["rectangle"]["w"]) * int(window["rectangle"]["h"])
-            ),
-        )
+        selected = candidates[0]
         snapshot["rectangle"] = dict(selected["rectangle"])
+        snapshot["handle"] = selected.get("handle")
         snapshot["rectangle_verified"] = True
         return True
 
@@ -473,6 +440,7 @@ class MacOSAccessibilityBackend:
         strict: bool = True,
         activate: bool = True,
     ) -> dict:
+        self._refresh_connected_window_rectangle()
         state = self._connected_window_state()
         if not state.get("ok"):
             state = self._frontmost_window_state()
@@ -506,6 +474,7 @@ class MacOSAccessibilityBackend:
             "title_re": title_re or (re.escape(state.get("title") or "") if state.get("title") else None),
             "process_name": state.get("process_name") or process_name,
             "pid": state.get("pid") if state.get("pid") is not None else pid,
+            "handle": state.get("handle"),
             "strict": bool(strict),
             "snapshot": state,
         }
@@ -682,19 +651,14 @@ class MacOSAccessibilityBackend:
             '  repeat with p in (every process whose visible is true)\n'
             '    set pname to name of p\n'
             '    set pidStr to unix id of p as string\n'
-            '    set wCount to count of windows of p\n'
-            '    if wCount is 0 then\n'
-            '      set out to out & pname & "\\t" & pidStr & "\\t\\n"\n'
-            '    else\n'
-            '      repeat with w in windows of p\n'
-            '        try\n'
-            '          set wname to name of w\n'
-            '        on error\n'
-            '          set wname to ""\n'
-            '        end try\n'
-            '        set out to out & pname & "\\t" & pidStr & "\\t" & wname & "\\n"\n'
-            '      end repeat\n'
-            '    end if\n'
+            '    repeat with w in windows of p\n'
+            '      try\n'
+            '        set wname to name of w\n'
+            '      on error\n'
+            '        set wname to ""\n'
+            '      end try\n'
+            '      set out to out & pname & "\\t" & pidStr & "\\t" & wname & "\\n"\n'
+            '    end repeat\n'
             '  end repeat\n'
             '  return out\n'
             'end tell\n'
@@ -770,7 +734,7 @@ class MacOSAccessibilityBackend:
 
         return {"ok": True, "windows": windows, "count": len(windows)}
 
-    def _list_windows_cg(self) -> list[dict]:
+    def _list_windows_cg(self, *, strict: bool = False) -> list[dict]:
         """Best-effort visible window enumeration through CGWindowList.
 
         System Events can miss Qt windows from HiSecEndpoint/EDRClient even when
@@ -815,14 +779,20 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 text=True,
                 timeout=10,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            if strict:
+                raise ValueError("window_inventory_unavailable") from exc
             return []
         if cp.returncode != 0:
+            if strict:
+                raise ValueError("window_inventory_unavailable")
             return []
 
         try:
             raw_windows = json.loads(cp.stdout or "[]")
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            if strict:
+                raise ValueError("window_inventory_unavailable") from exc
             return []
 
         windows: list[dict] = []
@@ -860,7 +830,9 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                     "enabled": True,
                     "source": "cgwindowlist",
                 })
-            except Exception:
+            except Exception as exc:
+                if strict:
+                    raise ValueError("window_inventory_unavailable") from exc
                 continue
         return windows
 
@@ -903,6 +875,7 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                                 "title": win_info.get("title", ""),
                                 "class_name": getattr(self, "_connected_app", process_name) or process_name,
                                 "process_id": win_info.get("pid"),
+                                "handle": win_info.get("handle"),
                                 "rectangle": {
                                     "x": rect.left,
                                     "y": rect.top,
@@ -913,18 +886,7 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                                 "enabled": True,
                             })
                         except Exception:
-                            normalized.append({
-                                "app_name": getattr(self, "_connected_app", process_name) or process_name,
-                                "bundle_id": None,
-                                "window_title": "",
-                                "pid": None,
-                                "title": "",
-                                "class_name": getattr(self, "_connected_app", process_name) or process_name,
-                                "process_id": None,
-                                "rectangle": None,
-                                "visible": True,
-                                "enabled": True,
-                            })
+                            continue
                     if pat := (re.compile(title_re) if title_re else None):
                         normalized = [
                             window for window in normalized
@@ -1032,6 +994,7 @@ print(String(data: data, encoding: .utf8) ?? "[]")
         self,
         app_name: Optional[str] = None,
         bundle_id: Optional[str] = None,
+        window_timeout: float = 5.0,
     ) -> dict:
         """
         Bring an app to the foreground. Provide either app_name ("Finder")
@@ -1102,6 +1065,35 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                     f"pid rc={pid_rc}: {pid_out.strip()}"
                 ),
             }
+        # The AppleScript `activate` call may succeed while the process has
+        # no GUI window (or while launch is still in progress). A product run
+        # cannot lock or observe that state, so require a real enumerated
+        # window instead of reporting a false activation success.
+        deadline = time.monotonic() + max(0.0, window_timeout)
+        visible_windows = []
+        while True:
+            if target_pid is None:
+                target_pid = (self._pid_for_bundle(bundle_id) if bundle_id else None)
+                if target_pid is None and app_name:
+                    target_pid = self._pid_for_app(app_name)
+            listed = self.list_windows()
+            if listed.get("ok") and target_pid is not None:
+                visible_windows = [
+                    window for window in listed.get("windows", ())
+                    if window.get("pid") == target_pid
+                ]
+            if visible_windows or time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+        if not visible_windows:
+            return {
+                "ok": False,
+                "code": "product_window_missing",
+                "error": "application started but no owned window became visible",
+                "app_name": app_name,
+                "bundle_id": bundle_id,
+                "pid": target_pid,
+            }
         return {
             "ok": True,
             "app_name": app_name,
@@ -1109,6 +1101,7 @@ print(String(data: data, encoding: .utf8) ?? "[]")
             "pid": target_pid,
             "method": method,
             "active": active,
+            "window_found": True,
         }
 
     def activate_edr(
@@ -1181,14 +1174,16 @@ print(String(data: data, encoding: .utf8) ?? "[]")
         import subprocess as _subprocess
         import os as _os
 
-        HISEC_AGENT_BIN = (
-            exe_path
-            or "/Applications/HiSecEndpoint.app/Contents/MacOS/safra/HiSecEndpointAgent"
-        )
-        HISEC_APP_BUNDLE = "/Applications/HiSecEndpoint.app"
-        ROOT_START_CLIENT = (
-            "/Applications/HiSecEndpoint.app/Contents/script/root_start_client.sh"
-        )
+        try:
+            from ..product_profiles import INSTALLED_PRODUCT_SPECS
+        except ImportError:  # target-local deployment
+            from product_profiles import INSTALLED_PRODUCT_SPECS
+        application = INSTALLED_PRODUCT_SPECS[("macos_hisec", "macos_accessibility")][
+            "application"]
+
+        HISEC_AGENT_BIN = exe_path or application["entry_path"]
+        HISEC_APP_BUNDLE = application["path"]
+        ROOT_START_CLIENT = str(Path(HISEC_APP_BUNDLE) / "Contents/script/root_start_client.sh")
         CLICK_HELPER = (
             Path(__file__).resolve().parents[1]
             / "scripts" / "macos" / "click_security_center.swift"
@@ -1501,7 +1496,7 @@ print(String(data: data, encoding: .utf8) ?? "[]")
 
             bundle_launch = _launch_hisec_bundle()
             if bundle_launch.get("ok"):
-                activated_by = "open /Applications/HiSecEndpoint.app"
+                activated_by = f"open {HISEC_APP_BUNDLE}"
                 deadline = time.time() + min(timeout, 3.0)
                 while time.time() < deadline:
                     if _hisec_window_visible():
@@ -1518,7 +1513,7 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 # IMPORTANT: do not redirect stdout/stderr; the GUI can go offscreen.
                 _subprocess.Popen(
                     [HISEC_AGENT_BIN, "cmd", "ui"],
-                    cwd="/Applications/HiSecEndpoint.app/Contents/MacOS/safra",
+                    cwd=str(Path(HISEC_AGENT_BIN).parent),
                     env=_os.environ.copy(),
                 )
                 hisec_process_found = True
@@ -1722,6 +1717,39 @@ print(String(data: data, encoding: .utf8) ?? "[]")
             ret["diagnostics"] = diagnostics
         return ret
 
+    def _guarded_pointer(self, action: str, points: tuple[tuple[int, int], ...]) -> dict | None:
+        """Require a unique CGWindowID and front-to-back point ownership."""
+        verified = self.verify_window_lock(activate=False)
+        if not verified.get("ok"):
+            return {"ok": False, "code": "input_desktop_unavailable",
+                    "error": "window foreground is not verifiable"}
+        lock = self.get_window_lock().get("lock") or {}
+        snapshot = lock.get("snapshot") or {}
+        handle = lock.get("handle") or snapshot.get("handle")
+        pid = lock.get("pid") or snapshot.get("pid")
+        rectangle = snapshot.get("rectangle")
+        if handle is None or pid is None or not isinstance(rectangle, dict):
+            return {"ok": False, "code": "pointer_capability_unavailable",
+                    "error": "locked window has no unique CGWindowID/rectangle"}
+        windows = self._list_windows_cg()
+        target = [w for w in windows if w.get("handle") == handle and w.get("pid") == pid]
+        if len(target) != 1 or target[0].get("rectangle") != rectangle:
+            return {"ok": False, "code": "observation_stale",
+                    "error": "locked CG window changed"}
+        for x, y in points:
+            owners = []
+            for window in windows:
+                rect = window.get("rectangle")
+                if not isinstance(rect, dict):
+                    continue
+                if (rect["x"] <= x < rect["x"] + rect["w"] and
+                    rect["y"] <= y < rect["y"] + rect["h"]):
+                    owners.append(window)
+            if not owners or owners[0].get("handle") != handle:
+                return {"ok": False, "code": "pointer_target_occluded",
+                        "error": "pointer point is outside or covered by another CG window"}
+        return None
+
     def click_at(self, x: int, y: int, expected_process_name: Optional[str] = None) -> dict:
         """
         Click at absolute screen coordinates (x, y).
@@ -1767,6 +1795,8 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                     "SKILL.md / macos_accessibility docs for the rationale."
                 ),
             }
+        if (guard_error := self._guarded_pointer("click", ((int(x), int(y)),))) is not None:
+            return guard_error
         # Try cliclick
         rc, out = _run(["cliclick", f"c:{x},{y}"], timeout=5)
         if rc == 0:
@@ -1806,6 +1836,8 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 "y": int(y),
                 "note": "double_click_at is in dry-run mode; set EDR_WD_ALLOW_REAL_CLICKS=1 to enable real clicks.",
             }
+        if (guard_error := self._guarded_pointer("double_click", ((int(x), int(y)),))) is not None:
+            return guard_error
         try:
             pyautogui.doubleClick(int(x), int(y), button="left")
             return {"ok": True, "method": "pyautogui.doubleClick", "x": int(x), "y": int(y)}
@@ -1825,6 +1857,8 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 "y": int(y),
                 "note": "right_click_at is in dry-run mode; set EDR_WD_ALLOW_REAL_CLICKS=1 to enable real clicks.",
             }
+        if (guard_error := self._guarded_pointer("right_click", ((int(x), int(y)),))) is not None:
+            return guard_error
         try:
             pyautogui.rightClick(int(x), int(y))
             return {"ok": True, "method": "pyautogui.rightClick", "x": int(x), "y": int(y)}
@@ -1844,6 +1878,8 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 "y": int(y),
                 "note": "middle_click_at is in dry-run mode; set EDR_WD_ALLOW_REAL_CLICKS=1 to enable real clicks.",
             }
+        if (guard_error := self._guarded_pointer("middle_click", ((int(x), int(y)),))) is not None:
+            return guard_error
         try:
             pyautogui.middleClick(int(x), int(y))
             return {"ok": True, "method": "pyautogui.middleClick", "x": int(x), "y": int(y)}
@@ -1861,6 +1897,8 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 "y": int(y),
                 "note": "hover_at is in dry-run mode; set EDR_WD_ALLOW_REAL_CLICKS=1 to enable real mouse movement.",
             }
+        if (guard_error := self._guarded_pointer("hover", ((int(x), int(y)),))) is not None:
+            return guard_error
         try:
             pyautogui.moveTo(int(x), int(y))
             return {"ok": True, "method": "pyautogui.moveTo", "x": int(x), "y": int(y)}
@@ -1879,6 +1917,10 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 "duration": float(duration),
                 "note": "drag is in dry-run mode; set EDR_WD_ALLOW_REAL_CLICKS=1 to enable real drags.",
             }
+        path = tuple((round(x1 + (x2 - x1) * i / 4),
+                      round(y1 + (y2 - y1) * i / 4)) for i in range(5))
+        if (guard_error := self._guarded_pointer("drag", path)) is not None:
+            return guard_error
         try:
             pyautogui.moveTo(int(x1), int(y1))
             pyautogui.dragTo(int(x2), int(y2), duration=float(duration), button="left")
@@ -1905,6 +1947,11 @@ print(String(data: data, encoding: .utf8) ?? "[]")
             if x is not None and y is not None:
                 payload["point"] = {"x": int(x), "y": int(y)}
             return payload
+        if x is None or y is None:
+            return {"ok": False, "code": "pointer_target_mismatch",
+                    "error": "scroll requires an explicit point"}
+        if (guard_error := self._guarded_pointer("scroll", ((int(x), int(y)),))) is not None:
+            return guard_error
         try:
             if x is not None and y is not None:
                 pyautogui.moveTo(int(x), int(y))
@@ -1937,13 +1984,30 @@ print(String(data: data, encoding: .utf8) ?? "[]")
           pid, bundle_id, process_name, app_name, title_re
         """
         if pid:
+            listed = self.list_windows()
+            if not listed.get("ok"):
+                return {"ok": False, "code": "window_identity_unavailable",
+                        "error": listed.get("error") or "window enumeration failed"}
+            matches = [window for window in listed.get("windows", ())
+                       if window.get("pid") == pid]
+            if title_re:
+                try:
+                    matches = [window for window in matches if re.search(
+                        title_re, str(window.get("window_title") or ""))]
+                except re.error:
+                    return {"ok": False, "code": "window_selector_invalid"}
+            if len(matches) != 1:
+                return {"ok": False,
+                        "code": "window_identity_ambiguous" if matches else "window_identity_unavailable"}
+            matched = matches[0]
             self._connected_pid = pid
-            self._connected_app = app_name or process_name
+            self._connected_app = app_name or process_name or matched.get("app_name")
             self._connected_window_snapshot = {
                 "pid": pid,
-                "title": title_re or app_name or process_name or "",
-                "owner": app_name or process_name or "",
-                "rectangle": {"x": 0, "y": 0, "w": 800, "h": 600},
+                "title": matched.get("window_title") or "",
+                "owner": process_name or app_name or matched.get("app_name") or "",
+                "rectangle": matched.get("rectangle"),
+                "handle": matched.get("handle"),
             }
             self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "pid", "pid": pid}
@@ -1952,17 +2016,14 @@ print(String(data: data, encoding: .utf8) ?? "[]")
             r = self.activate_app(bundle_id=bundle_id)
             if not r["ok"]:
                 return r
-            # Resolve pid via osascript
-            self._connected_pid = self._pid_for_bundle(bundle_id)
-            self._connected_app = app_name or bundle_id
-            self._connected_window_snapshot = {
-                "pid": self._connected_pid,
-                "title": app_name or bundle_id or "",
-                "owner": app_name or bundle_id or "",
-                "rectangle": {"x": 0, "y": 0, "w": 800, "h": 600},
-            }
-            self._connected_app_instance = _MacOSConnectedApp(self)
-            return {"ok": True, "matched": "bundle_id", "pid": self._connected_pid}
+            resolved_pid = r.get("pid") or self._pid_for_bundle(bundle_id)
+            if not resolved_pid:
+                return {"ok": False, "code": "window_identity_unavailable"}
+            connected = self.connect(pid=resolved_pid, title_re=title_re,
+                                     app_name=app_name)
+            if connected.get("ok"):
+                connected["matched"] = "bundle_id"
+            return connected
 
         if process_name:
             r = self.is_window_open(
@@ -1970,16 +2031,6 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 title_re=title_re,
             )
             if not r.get("found"):
-                norm_proc = process_name.lower()
-                if any(tag in norm_proc for tag in ("edrclient", "hisecendpoint", "hisecendpointagent")):
-                    act = self.activate_edr(wait=True, timeout=timeout)
-                    if act.get("ok"):
-                        connected = getattr(self, "_connected_pid", None)
-                        if connected:
-                            self._connected_app = "EDRClient"
-                            self._connected_app_instance = _MacOSConnectedApp(self)
-                            return {"ok": True, "matched": "process_name", "pid": connected}
-                    # Fall through to the generic auto-activate path below if activate_edr didn't help.
                 if auto_activate:
                     act = self.activate_app(app_name=process_name)
                     if not act["ok"]:
@@ -1987,12 +2038,12 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                     # Re-check after activate
                     r = self.is_window_open(process_name=process_name)
                     if not r.get("found"):
-                        # Fallback: use _connected_pid if we already connected to this process via activate_edr
+                        # A product adapter may have activated and connected this process already.
                         if hasattr(self, "_connected_pid") and self._connected_pid and                            self._connected_app and process_name.lower() in self._connected_app.lower():
                             return {"ok": True, "matched": "process_name", "pid": self._connected_pid}
                         return {"ok": False, "error": f"connect: no visible window for {process_name} after activate"}
                 else:
-                    # Fallback: use _connected_pid if we already connected to this process via activate_edr
+                    # A product adapter may have activated and connected this process already.
                     if hasattr(self, "_connected_pid") and self._connected_pid and                        self._connected_app and process_name.lower() in self._connected_app.lower():
                         return {"ok": True, "matched": "process_name", "pid": self._connected_pid}
                     return {"ok": False, "error": f"connect: no visible window for {process_name}"}
@@ -2008,7 +2059,8 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 "pid": self._connected_pid,
                 "title": first_window.get("window_title", ""),
                 "owner": first_window.get("app_name", process_name),
-                "rectangle": first_window.get("rectangle", {"x": 0, "y": 0, "w": 800, "h": 600}),
+                "rectangle": first_window.get("rectangle"),
+                "handle": first_window.get("handle"),
             }
             self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "process_name", "pid": self._connected_pid}
@@ -2017,16 +2069,14 @@ print(String(data: data, encoding: .utf8) ?? "[]")
             r = self.activate_app(app_name=app_name)
             if not r["ok"]:
                 return r
-            self._connected_pid = self._pid_for_app(app_name)
-            self._connected_app = app_name
-            self._connected_window_snapshot = {
-                "pid": self._connected_pid,
-                "title": app_name,
-                "owner": app_name,
-                "rectangle": {"x": 0, "y": 0, "w": 800, "h": 600},
-            }
-            self._connected_app_instance = _MacOSConnectedApp(self)
-            return {"ok": True, "matched": "app_name", "pid": self._connected_pid}
+            resolved_pid = r.get("pid") or self._pid_for_app(app_name)
+            if not resolved_pid:
+                return {"ok": False, "code": "window_identity_unavailable"}
+            connected = self.connect(pid=resolved_pid, title_re=title_re,
+                                     app_name=app_name)
+            if connected.get("ok"):
+                connected["matched"] = "app_name"
+            return connected
 
         if title_re:
             r = self.is_window_open(title_re=title_re)
@@ -2039,7 +2089,8 @@ print(String(data: data, encoding: .utf8) ?? "[]")
                 "pid": w["pid"],
                 "title": w.get("window_title", title_re or ""),
                 "owner": w.get("app_name", ""),
-                "rectangle": w.get("rectangle", {"x": 0, "y": 0, "w": 800, "h": 600}),
+                "rectangle": w.get("rectangle"),
+                "handle": w.get("handle"),
             }
             self._connected_app_instance = _MacOSConnectedApp(self)
             return {"ok": True, "matched": "title_re", "pid": self._connected_pid}
@@ -2673,9 +2724,16 @@ return outText
         window_title_re: Optional[str] = None,
         expected_process_name: Optional[str] = None,
     ) -> dict:
-        # No window-relative coordinates on macOS without a fuller AX bridge.
-        # Forward to click_at as best-effort.
-        return self.click_at(x, y, expected_process_name)
+        snapshot = getattr(self, "_connected_window_snapshot", None)
+        if not isinstance(snapshot, dict) or not self._refresh_connected_window_rectangle():
+            return {"ok": False, "code": "pointer_capability_unavailable",
+                    "error": "window-relative coordinates require one verified CG window"}
+        rect = snapshot["rectangle"]
+        if not (0 <= int(x) < int(rect["w"]) and 0 <= int(y) < int(rect["h"])):
+            return {"ok": False, "code": "point_outside_window",
+                    "error": "window-relative point is outside the locked window"}
+        return self.click_at(int(rect["x"]) + int(x), int(rect["y"]) + int(y),
+                             expected_process_name)
 
     def type_text(
         self,

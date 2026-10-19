@@ -44,6 +44,11 @@ _inflight: dict[str, threading.Lock] = {}
 DEFAULT_MAX_ENTRIES = 1024
 
 
+def scoped_request_key(run_id: str | None, request_id: str) -> str:
+    """Keep a caller's idempotency key private to one leased run."""
+    return f"{run_id or 'legacy'}:{request_id}"
+
+
 # ---------------------------------------------------------------------------
 # Idempotency cache (FR-P1.1-02, -08)
 # ---------------------------------------------------------------------------
@@ -174,4 +179,5 @@ __all__ = [
     "lru_capacity_remaining",
     "inflight_lock",
     "inflight_count",
+    "scoped_request_key",
 ]

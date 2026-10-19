@@ -190,12 +190,13 @@ def _validate_evidence(value: Mapping[str, Any]) -> None:
 
 
 def _validate_assertion(value: Mapping[str, Any]) -> None:
-    data = _strict(value, {"type", "expected", "timeoutSeconds"}, "event.assertion")
+    data = _strict(value, {"type", "expected", "timeoutSeconds", "durationSeconds"}, "event.assertion")
     kind = data.get("type")
     if kind not in {
         "text_equals", "text_contains", "value_equals", "visible", "checked",
         "enabled", "window_open", "text_contains_time",
         "window_text_contains", "window_text_contains_time",
+        "text_time_range", "window_text_time_range",
     }:
         raise RecordingModelError(
             "recording_assertion_invalid", f"unsupported assertion {kind!r}",
@@ -207,6 +208,17 @@ def _validate_assertion(value: Mapping[str, Any]) -> None:
             path="event.assertion.expected",
         )
     expected = data["expected"]
+    if kind in {"text_time_range", "window_text_time_range"}:
+        try:
+            try:
+                from ..time_assertions import parse_time_range
+            except ImportError:  # target-local deployment
+                from time_assertions import parse_time_range
+            parse_time_range(expected, data.get("durationSeconds"))
+        except ValueError as exc:
+            raise RecordingModelError("recording_assertion_invalid", str(exc), path="event.assertion.expected") from exc
+    elif "durationSeconds" in data:
+        raise RecordingModelError("recording_assertion_invalid", "durationSeconds is only valid for time ranges", path="event.assertion.durationSeconds")
     if kind in {"text_contains_time", "window_text_contains_time"}:
         # `expected` is a strftime pattern, rendered at replay time rather than
         # the literal timestamp the recorder happened to see.

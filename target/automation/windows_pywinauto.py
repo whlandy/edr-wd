@@ -44,6 +44,9 @@ class WindowsPywinautoBackend:
             from pywinauto_client import WindowsGUI
         self._gui = WindowsGUI()
         self._window_lock: dict | None = None
+        self._gui.pointer_guard = lambda x, y: self._guarded_pointer(
+            "semantic_pointer", ((int(x), int(y)),)
+        )
 
     # ── Identity ──────────────────────────────────────────────────────────────
 
@@ -655,32 +658,102 @@ class WindowsPywinautoBackend:
         app_name: Optional[str] = None,
         bundle_id: Optional[str] = None,
     ) -> dict:
-        """
-        On Windows, app_name maps to a process start.
-        bundle_id is not applicable; we ignore it.
-        """
-        if not app_name:
-            return {"ok": False, "error": "activate_app requires app_name on Windows"}
-        # pywinauto's start() takes the path of the executable. We don't have
-        # a path — for now, just bring any existing window of that name to
-        # the foreground via a low-level Windows call. This is a best-effort
-        # path; the Windows HiSec EDR workflow uses activate_edr() instead.
-        return {
-            "ok": False,
-            "error": (
-                "Windows activate_app(app_name=...) is best-effort only; "
-                "use activate_edr() for the HiSec EDR workflow."
-            ),
-        }
+        """Activate an App Paths-registered Windows application only."""
+        if bundle_id or not app_name:
+            return {"ok": False, "code": "registered_app_invalid",
+                    "error": "Windows activate_app requires a registered app_name"}
+        return self.activate_registered_app(app_name)
+
+    def activate_registered_app(self, application_id: str,
+                                *, _resolve=None, _launch=None) -> dict:
+        import os
+        import re
+        import subprocess
+        if not isinstance(application_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+\.exe", application_id):
+            return {"ok": False, "code": "registered_app_invalid",
+                    "error": "application_id must be an executable basename"}
+
+        def resolve(name):
+            try:
+                import winreg
+                for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                    try:
+                        with winreg.OpenKey(hive, rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{name}") as key:
+                            value, _ = winreg.QueryValueEx(key, None)
+                            if isinstance(value, str) and os.path.isfile(value):
+                                return value
+                    except OSError:
+                        continue
+            except ImportError:
+                pass
+            return None
+
+        path = (_resolve or resolve)(application_id)
+        if not isinstance(path, str) or not os.path.isabs(path) or not path.lower().endswith(application_id.lower()):
+            return {"ok": False, "code": "registered_app_not_found",
+                    "error": "application is not installed in App Paths"}
+        running = [window for window in self._enumerate_top_windows_windows()
+                   if str(window.get("process_name") or "").lower() == application_id.lower()]
+        if len(running) == 1:
+            try:
+                from pywinauto import Desktop
+                Desktop(backend="uia").window(handle=running[0]["handle"]).set_focus()
+            except Exception as exc:
+                return {"ok": False, "code": "registered_app_focus_failed", "error": str(exc)}
+            return {"ok": True, "method": "focus_registered", "application_id": application_id}
+        if len(running) > 1:
+            return {"ok": False, "code": "window_role_ambiguous",
+                    "error": "registered application has multiple windows"}
+        try:
+            (_launch or (lambda value: subprocess.Popen([value])))(path)
+        except OSError as exc:
+            return {"ok": False, "code": "registered_app_launch_failed", "error": str(exc)}
+        return {"ok": True, "method": "launch_registered", "application_id": application_id}
 
     def screenshot(self, path: Optional[str] = None) -> dict:
         return self._gui.screenshot(path)  # type: ignore[arg-type]
+
+    def _guarded_pointer(self, action: str, points: tuple[tuple[int, int], ...],
+                         *, coordinate_space: str = "screen") -> tuple[tuple[int, int], ...] | dict:
+        """Authorize at the backend injection boundary, including legacy MCP calls."""
+        try:
+            from ..windowing.models import WindowIdentity
+            from ..windowing.guard import WindowGuard
+            from .window_scope import WindowScopeError
+        except ImportError:  # target-local deployment
+            from windowing.models import WindowIdentity
+            from windowing.guard import WindowGuard
+            from automation.window_scope import WindowScopeError
+        lock = (self.get_window_lock().get("lock") or {})
+        snapshot = dict(lock.get("snapshot") or {})
+        snapshot.setdefault("handle", lock.get("handle"))
+        snapshot.setdefault("pid", lock.get("pid"))
+        snapshot.setdefault("process_name", lock.get("process_name"))
+        try:
+            identity = WindowIdentity.from_native(
+                snapshot, session_id="legacy", backend="windows_pywinauto",
+                generation=int(lock.get("generation") or 1),
+            )
+            guard = WindowGuard(
+                verify_lock=self.verify_window_lock, get_lock=self.get_window_lock,
+                enumerate_windows=self._enumerate_top_windows_windows,
+                hit_test=self._hit_test_top_window_windows,
+            )
+            if action == "drag":
+                return guard.authorize_drag_path(identity, points[0], points[-1],
+                                                 coordinate_space=coordinate_space)
+            return guard.authorize_pointer(identity, points, coordinate_space, action)
+        except (ValueError, WindowScopeError) as exc:
+            return {"ok": False, "code": getattr(exc, "code", "pointer_target_mismatch"),
+                    "error": str(exc)}
 
     def click_at(self, x: int, y: int, expected_process_name: Optional[str] = None) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
         if (context_error := self._ensure_click_process(expected_process_name)) is not None:
             return context_error
+        if isinstance(guarded := self._guarded_pointer("click", ((x, y),)), dict):
+            return guarded
         result = self._gui.click_at(x, y)
         result.setdefault("process_name", self._connected_window_state().get("process_name"))
         return result
@@ -690,6 +763,8 @@ class WindowsPywinautoBackend:
             return lock_error
         if (context_error := self._ensure_click_process(expected_process_name)) is not None:
             return context_error
+        if isinstance(guarded := self._guarded_pointer("double_click", ((x, y),)), dict):
+            return guarded
         try:
             pyautogui.doubleClick(x=int(x), y=int(y), button="left")
             return {"ok": True, "method": "pyautogui.doubleClick", "x": int(x), "y": int(y)}
@@ -701,6 +776,8 @@ class WindowsPywinautoBackend:
             return lock_error
         if (context_error := self._ensure_click_process(expected_process_name)) is not None:
             return context_error
+        if isinstance(guarded := self._guarded_pointer("right_click", ((x, y),)), dict):
+            return guarded
         try:
             pyautogui.rightClick(x=int(x), y=int(y))
             return {"ok": True, "method": "pyautogui.rightClick", "x": int(x), "y": int(y)}
@@ -712,6 +789,8 @@ class WindowsPywinautoBackend:
             return lock_error
         if (context_error := self._ensure_click_process(expected_process_name)) is not None:
             return context_error
+        if isinstance(guarded := self._guarded_pointer("middle_click", ((x, y),)), dict):
+            return guarded
         try:
             pyautogui.middleClick(x=int(x), y=int(y))
             return {"ok": True, "method": "pyautogui.middleClick", "x": int(x), "y": int(y)}
@@ -721,6 +800,8 @@ class WindowsPywinautoBackend:
     def hover_at(self, x: int, y: int) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if isinstance(guarded := self._guarded_pointer("hover", ((x, y),)), dict):
+            return guarded
         try:
             pyautogui.moveTo(int(x), int(y))
             return {"ok": True, "method": "pyautogui.moveTo", "x": int(x), "y": int(y)}
@@ -730,6 +811,8 @@ class WindowsPywinautoBackend:
     def drag(self, x1: int, y1: int, x2: int, y2: int, duration: float = 0.25) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if isinstance(guarded := self._guarded_pointer("drag", ((x1, y1), (x2, y2))), dict):
+            return guarded
         try:
             pyautogui.moveTo(int(x1), int(y1))
             pyautogui.dragTo(int(x2), int(y2), duration=float(duration), button="left")
@@ -746,6 +829,11 @@ class WindowsPywinautoBackend:
     def scroll(self, clicks: int, x: Optional[int] = None, y: Optional[int] = None) -> dict:
         if (lock_error := self._ensure_window_lock()) is not None:
             return lock_error
+        if x is None or y is None:
+            return {"ok": False, "code": "pointer_target_mismatch",
+                    "error": "scroll requires an explicit point in the locked window"}
+        if isinstance(guarded := self._guarded_pointer("scroll", ((x, y),)), dict):
+            return guarded
         try:
             if x is not None and y is not None:
                 pyautogui.moveTo(int(x), int(y))
@@ -775,7 +863,7 @@ class WindowsPywinautoBackend:
     # orchestration can be unit-tested with fakes on non-Windows hosts.
 
     @staticmethod
-    def _enumerate_top_windows_windows() -> list:
+    def _enumerate_top_windows_windows(*, strict: bool = False) -> list:
         """Live: enumerate visible top-level windows as info dicts.
 
         Windows/pywinauto only. Returns a list of
@@ -788,23 +876,51 @@ class WindowsPywinautoBackend:
         try:
             desktop = Desktop(backend="uia")
         except Exception as exc:  # pragma: no cover - live-only
+            if strict:
+                raise ValueError("window_inventory_unavailable") from exc
             return out
-        for win in desktop.windows():
+        try:
+            windows = desktop.windows()
+        except Exception as exc:
+            if strict:
+                raise ValueError("window_inventory_unavailable") from exc
+            return out
+        for win in windows:
             try:
                 if not win.is_top_level() or not win.is_visible():
                     continue
             except Exception:
+                if strict:
+                    raise ValueError("window_inventory_unavailable")
                 continue
             try:
                 handle = int(win.handle)
                 title = win.window_text() or ""
                 pid = int(win.process_id())
+                try:
+                    root_control_id = str(getattr(win.element_info, "automation_id", "") or "")
+                except Exception:
+                    # A title/handle is still useful inventory evidence, but
+                    # must not be presented as a stable UIA root identity.
+                    root_control_id = ""
                 process_name = ""
                 try:
                     process_name = psutil.Process(pid).name()
+                except Exception as exc:
+                    if strict:
+                        raise ValueError("window_inventory_unavailable") from exc
+                r = win.rectangle()
+                owner_handle = None
+                try:
+                    import ctypes
+                    from ctypes import wintypes
+                    user32 = ctypes.windll.user32
+                    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+                    user32.GetWindow.restype = wintypes.HWND
+                    owner = user32.GetWindow(handle, 4)  # GW_OWNER
+                    owner_handle = int(owner) if owner else None
                 except Exception:
                     pass
-                r = win.rectangle()
                 rect = {
                     "left": int(r.left), "top": int(r.top),
                     "right": int(r.right), "bottom": int(r.bottom),
@@ -817,9 +933,13 @@ class WindowsPywinautoBackend:
                         "process_name": process_name,
                         "pid": pid,
                         "rect": rect,
+                        "root_control_id": root_control_id,
+                        "parent_native_id": owner_handle,
                     }
                 )
             except Exception:
+                if strict:
+                    raise ValueError("window_inventory_unavailable")
                 continue
         return out
 
@@ -926,6 +1046,15 @@ class WindowsPywinautoBackend:
                 "point": {"x": sx, "y": sy},
             }
 
+        # Public MCP callers cannot inject these test-only probes. In the live
+        # route, use the same native lock/foreground/generation guard as every
+        # other pointer action immediately before the wheel event.
+        if _enumerate_windows is None and _hit_test_top_window is None:
+            guarded = self._guarded_pointer("scroll_window", ((int(x), int(y)),),
+                                            coordinate_space="window")
+            if isinstance(guarded, dict):
+                return {**guarded, "scope": "window"}
+
         try:
             pyautogui.moveTo(int(sx), int(sy))
             pyautogui.scroll(int(clicks))
@@ -949,6 +1078,10 @@ class WindowsPywinautoBackend:
 
 
     # ── Connect-required ──────────────────────────────────────────────────────
+
+    def connect_window_identity(self, handle: int, pid: int, timeout: float = 10.0) -> dict:
+        """Connect the exact window already resolved by the session registry."""
+        return self._gui.connect_by_window(int(handle), int(pid), timeout)
 
     def connect(
         self,
@@ -1158,7 +1291,10 @@ class WindowsPywinautoBackend:
             return lock_error
         if (context_error := self._ensure_click_process(expected_process_name)) is not None:
             return context_error
-        result = self._gui.click_window_at(x, y, window_title_re)  # type: ignore[arg-type]
+        if isinstance(guarded := self._guarded_pointer("click_window", ((x, y),),
+                                                       coordinate_space="window"), dict):
+            return guarded
+        result = self._gui.click_at(*guarded[0])
         result.setdefault("process_name", self._connected_window_state().get("process_name"))
         return result
 

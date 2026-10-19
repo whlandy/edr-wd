@@ -26,9 +26,6 @@ except ImportError:
 
 logger = logging.getLogger("edr_wd.pywinauto_client")
 
-# Default HiSec entry executable path (can be overridden via EDR_WD_EDR_EXE env var)
-DEFAULT_EDR_EXE = r"C:\Program Files\HiSec-Endpoint\core\safra\HisecEndpointAgent.exe"
-DEFAULT_EDR_CLIENT_EXE = r"C:\Program Files\HiSec-Endpoint\core\EDRClient.exe"
 #: The service that actually draws the EDR UI. `HisecEndpointAgent.exe cmd ui`
 #: is not a launcher — it is a gRPC client that asks this service, over local
 #: IPC, to show the window. With the service absent nothing is listening, the
@@ -599,8 +596,14 @@ class WindowsGUI:
             edr_widget_auto_id: full automation_id of the edrWidget GroupBox.
                 Defaults to the known EDR path.
         """
-        exe = exe_path or os.environ.get("EDR_WD_EDR_EXE", DEFAULT_EDR_EXE)
-        client_exe = os.environ.get("EDR_WD_EDR_CLIENT_EXE", DEFAULT_EDR_CLIENT_EXE)
+        try:
+            from .product_profiles import INSTALLED_PRODUCT_SPECS
+        except ImportError:  # target-local deployment
+            from product_profiles import INSTALLED_PRODUCT_SPECS
+        application = INSTALLED_PRODUCT_SPECS[("windows_hisec", "windows_pywinauto")][
+            "application"]
+        exe = exe_path or application["entry_path"]
+        client_exe = application["path"]
         ui_service = os.environ.get("EDR_WD_EDR_SERVICE", DEFAULT_EDR_SERVICE)
         try:
             ipc_port = int(os.environ.get("EDR_WD_EDR_IPC_PORT", DEFAULT_EDR_IPC_PORT))
@@ -1003,6 +1006,15 @@ class WindowsGUI:
                 semantic_result["control_id"] = control_id
                 return semantic_result
 
+            rect = ctrl.rectangle()
+            x = int(rect.left + rect.width() / 2)
+            y = int(rect.top + rect.height() / 2)
+            pointer_guard = getattr(self, "pointer_guard", None)
+            if callable(pointer_guard):
+                guarded = pointer_guard(x, y)
+                if isinstance(guarded, dict):
+                    return guarded
+
             try:
                 ctrl.click_input()
                 time.sleep(0.1)
@@ -1010,9 +1022,10 @@ class WindowsGUI:
                         "automation_id": getattr(ctrl, "automation_id", lambda: None)()}
             except Exception as click_error:
                 logger.warning("click_input failed; falling back to coordinates: %s", click_error)
-                rect = ctrl.rectangle()
-                x = int(rect.left + rect.width() / 2)
-                y = int(rect.top + rect.height() / 2)
+                if callable(pointer_guard):
+                    guarded = pointer_guard(x, y)
+                    if isinstance(guarded, dict):
+                        return guarded
                 mouse.click(button="left", coords=(x, y))
                 time.sleep(0.1)
                 return {
@@ -1065,6 +1078,11 @@ class WindowsGUI:
             rect = ctrl.rectangle()
             x = int(rect.left + rect.width() / 2 + x_offset)
             y = int(rect.top + rect.height() / 2 + y_offset)
+            pointer_guard = getattr(self, "pointer_guard", None)
+            if callable(pointer_guard):
+                guarded = pointer_guard(x, y)
+                if isinstance(guarded, dict):
+                    return guarded
             mouse.click(button="left", coords=(x, y))
             time.sleep(0.1)
             return {

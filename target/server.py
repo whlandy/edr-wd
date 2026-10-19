@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import functools
 import json
+import ntpath
+import posixpath
 import logging
 import os
 import subprocess
@@ -50,6 +53,7 @@ try:  # Installed package / `python -m target.server`.
         error_result as _recording_error,
         source_factory_for_backend as _recording_source_factory,
     )
+    from .recording.models import RecordingModelError
     from .recording.indicator import tkinter_indicator_factory as _recording_indicator_factory
     from .recording.evidence import capture_redacted_window_frame as _capture_redacted_frame
 except ImportError:  # Target-local `python server.py` deployment compatibility.
@@ -70,6 +74,7 @@ except ImportError:  # Target-local `python server.py` deployment compatibility.
         error_result as _recording_error,
         source_factory_for_backend as _recording_source_factory,
     )
+    from recording.models import RecordingModelError
     from recording.indicator import tkinter_indicator_factory as _recording_indicator_factory
     from recording.evidence import capture_redacted_window_frame as _capture_redacted_frame
 
@@ -114,6 +119,38 @@ except ImportError:  # Target-local deployment.
 
 _set_backend_resolver(lambda: _backend)
 
+try:
+    from . import product_policy as _product_policy
+    from .action_dispatcher import cache_clear as _clear_dispatch_cache
+except ImportError:  # target-local deployment
+    import product_policy as _product_policy
+    from action_dispatcher import cache_clear as _clear_dispatch_cache
+
+
+def _clear_product_run_state() -> None:
+    global _window_session, _product_observation
+    _clear_dispatch_cache()
+    if _backend is not None and hasattr(_backend, "unlock_window"):
+        _backend.unlock_window()
+    _window_session = None
+    _product_observation = None
+
+
+_product_policy.register_cleanup_hook(_clear_product_run_state)
+if _backend is not None:
+    _backend = _product_policy.GuardedBackend(_backend, _backend_kind)
+_window_session = None
+_product_observation = None
+_gui_operation_mutex = threading.RLock()
+
+
+def _serialized_product_gui(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _gui_operation_mutex:
+            return func(*args, **kwargs)
+    return wrapper
+
 
 # Server bind metadata. Updated by main() so status() can report the actual
 # runtime port instead of assuming the default 8765.
@@ -142,6 +179,16 @@ def _backend_unavailable(tool_name: str) -> str:
             f"Startup error: {_backend_error or 'unknown'}"
         ),
     }, ensure_ascii=False)
+
+
+def _legacy_gui_conflict(tool_name: str) -> str | None:
+    try:
+        _product_policy.authorize_legacy_gui_call(tool_name)
+    except ValueError:
+        return json.dumps({"ok": False, "code": "product_run_conflict",
+                           "error": "legacy GUI operation is disabled during an active product run"},
+                          ensure_ascii=False)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +322,47 @@ def activate_app(app_name: str = None, bundle_id: str = None) -> str:
             "backend": getattr(_backend, "backend_name", "unknown"),
         })
     result = _backend.activate_app(app_name=app_name, bundle_id=bundle_id)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="activate_product_app",
+    description="Activate a locally registered product using its target-owned app catalog entry.",
+)
+@_serialized_product_gui
+def activate_product_app(profile_id: str) -> str:
+    if _backend is None:
+        return _backend_unavailable("activate_product_app")
+    try:
+        _product_policy.require_product_run(None)
+        capability = _product_policy.load_allowed_profiles().get(profile_id)
+        if capability is None or capability.backend != _backend_kind:
+            raise ValueError("product_profile_unknown")
+        try:
+            from .product_profiles import INSTALLED_PRODUCT_SPECS
+        except ImportError:  # target-local deployment
+            from product_profiles import INSTALLED_PRODUCT_SPECS
+        application = INSTALLED_PRODUCT_SPECS[(profile_id, _backend_kind)]["application"]
+        path = application["path"]
+        if _backend_kind == "windows_pywinauto":
+            executable = ntpath.basename(path)
+            owners = {name.casefold() for role in capability.window_roles
+                      for name in role.process_names}
+            if executable.casefold() not in owners:
+                raise ValueError("product_application_owner_mismatch")
+            result = _backend.activate_registered_app(
+                executable, _resolve=lambda _name: path)
+        elif _backend_kind == "macos_accessibility":
+            bundle_id = application.get("bundle_id")
+            app_name = application.get("app_name")
+            if not bundle_id and not app_name:
+                raise ValueError("product_application_activation_missing")
+            result = _backend.activate_app(app_name=app_name, bundle_id=bundle_id)
+        else:
+            raise ValueError("product_profile_backend_invalid")
+    except (KeyError, ValueError) as exc:
+        code = str(exc).split(":", 1)[0]
+        return json.dumps({"ok": False, "code": code}, ensure_ascii=False)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -1016,6 +1104,8 @@ def transfer_stat(relative_path: str) -> str:
 
 @mcp.tool(name="start_recording", description="Start a target-local, process/window-scoped desktop recording session. Fails if the platform capture source or required permissions are unavailable.")
 def start_recording(name: str, process_name: str, window_title: str, lease_seconds: float = 300.0) -> str:
+    if (blocked := _legacy_gui_conflict("start_recording")) is not None:
+        return blocked
     try:
         result = _recording_service.start(name=name, process_name=process_name, window_title=window_title, lease_seconds=lease_seconds)
     except Exception as exc:
@@ -1095,15 +1185,98 @@ def replay_capture() -> str:
     }, ensure_ascii=False)
 
 
+@mcp.tool(name="observe_window_bundle", description="Capture one locked-window tree and optional source-redacted image/OCR with identity recheck.")
+@_serialized_product_gui
+def observe_window_bundle(run_token: str | None = None, capture_image: bool = False,
+                          include_ocr: bool = False) -> str:
+    global _product_observation
+    if _backend is None:
+        return _backend_unavailable("observe_window_bundle")
+    try:
+        from .windowing.observation import observe_window_bundle as _observe
+    except ImportError:
+        from windowing.observation import observe_window_bundle as _observe
+    try:
+        context = _product_policy.require_product_run(run_token)
+        before_registry = _window_session.verify_locked() if context and _window_session else None
+        if context and before_registry is None:
+            raise ValueError("window_identity_stale")
+        try:
+            from .automation.ocr import extract_redacted_text as _ocr_extract
+        except ImportError:
+            from automation.ocr import extract_redacted_text as _ocr_extract
+        result = _observe(
+            _backend, session_id=context.run_id if context else "legacy",
+            backend_kind=_backend_kind, run_token=run_token,
+            capture_image=capture_image, include_ocr=include_ocr,
+            capture_redacted_frame=_capture_redacted_frame,
+            ocr_extract=_ocr_extract if include_ocr else None,
+        )
+        if before_registry is not None:
+            after_registry = _window_session.verify_locked()
+            observed = result["window_identity"]
+            if (after_registry.binding != before_registry.binding or
+                after_registry.native_id != observed["native_id"] or
+                after_registry.generation != observed["generation"] or
+                after_registry.rect != tuple(observed["rect"])):
+                raise ValueError("observation_window_changed")
+            try:
+                from .windowing.observation import normalize_observed_control
+            except ImportError:
+                from windowing.observation import normalize_observed_control
+            controls = {
+                f"T{index:04d}": normalize_observed_control(source, observed, index)
+                for index, source in enumerate(result["tree"]["controls"], start=1)
+                if isinstance(source, dict)
+            }
+            _product_observation = {
+                "run_id": context.run_id,
+                "observation_id": result["observation_id"],
+                "window_binding": after_registry.binding,
+                "window_rect": after_registry.rect,
+                "controls": controls,
+            }
+    except Exception as exc:
+        # Only stable codes cross the wire; never return raw tree/image on error.
+        code = str(exc).split(":", 1)[0]
+        return json.dumps({"ok": False, "code": code, "error": code}, ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="observe_product_windows", description="Read the active product run's registered, path-owned windows without changing the GUI lock.")
+@_serialized_product_gui
+def observe_product_windows(run_token: str) -> str:
+    if _backend is None:
+        return _backend_unavailable("observe_product_windows")
+    try:
+        context = _product_policy.require_product_run(run_token)
+        if context is None or _window_session is None:
+            raise ValueError("product_run_expired")
+        try:
+            from .product_profiles import INSTALLED_PRODUCT_SPECS
+        except ImportError:
+            from product_profiles import INSTALLED_PRODUCT_SPECS
+        spec = INSTALLED_PRODUCT_SPECS.get((context.capability.profile_id, _backend_kind))
+        if spec is None:
+            raise ValueError("product_window_path_unavailable")
+        windows = _window_session.observe_product_windows(
+            context.capability, spec["application"],
+        )
+    except Exception as exc:
+        code = str(exc).split(":", 1)[0]
+        return json.dumps({"ok": False, "code": code}, ensure_ascii=False)
+    return json.dumps({"ok": True, "windows": [window.__dict__ for window in windows]},
+                      ensure_ascii=False)
+
+
 @mcp.tool(
     name="activate_edr",
     description=(
         "HiSec EDR specific. On Windows, ensures HisecEndpointAgent is visible "
         "with 'cmd ui', then prefers EDRClient.exe 17 --show and falls back to "
         "clicking edrWidget. By default waits up to 15 s for the EDRClient "
-        "window to appear. exe_path can override the default HisecEndpointAgent "
-        "executable path. "
-        "On non-Windows backends, returns ok=false with an explanatory error."
+        "window to appear. The entry executable path must match the target's "
+        "locally installed application catalog."
     ),
 )
 def activate_edr(exe_path: str = None, wait: bool = True, timeout: float = 15.0,
@@ -1115,8 +1288,24 @@ def activate_edr(exe_path: str = None, wait: bool = True, timeout: float = 15.0,
             "ok": False,
             "error": f"activate_edr is not supported by the {type(_backend).__name__} backend",
         })
+    try:
+        try:
+            from .product_profiles import INSTALLED_PRODUCT_SPECS
+        except ImportError:  # target-local deployment
+            from product_profiles import INSTALLED_PRODUCT_SPECS
+        profile_id = {"windows_pywinauto": "windows_hisec",
+                      "macos_accessibility": "macos_hisec"}[_backend_kind]
+        configured_path = INSTALLED_PRODUCT_SPECS[(profile_id, _backend_kind)][
+            "application"]["entry_path"]
+        normalise = (ntpath.normcase if _backend_kind == "windows_pywinauto"
+                     else posixpath.normpath)
+        if exe_path is not None and normalise(exe_path) != normalise(configured_path):
+            raise ValueError("product_application_path_unregistered")
+    except (KeyError, ValueError) as exc:
+        return json.dumps({"ok": False, "code": str(exc).split(":", 1)[0]},
+                          ensure_ascii=False)
     result = _backend.activate_edr(  # type: ignore[attr-defined]
-        exe_path=exe_path, wait=wait, timeout=timeout,
+        exe_path=configured_path, wait=wait, timeout=timeout,
         edr_widget_auto_id=edr_widget_auto_id,
     )
     return json.dumps(result, ensure_ascii=False)
@@ -1190,6 +1379,8 @@ def restore_edr() -> str:
     """还原 EDR 窗口（如果最小化则强制恢复）"""
     if _backend is None:
         return _backend_unavailable("restore_edr")
+    if (blocked := _legacy_gui_conflict("restore_edr")) is not None:
+        return blocked
     try:
         def _value(v):
             return v() if callable(v) else v
@@ -1555,6 +1746,8 @@ def _terminate_job(proc) -> None:
     ),
 )
 def run_powershell(command: str, timeout: int = 30, cwd: str = None) -> str:
+    if (blocked := _legacy_gui_conflict("run_powershell")) is not None:
+        return blocked
     if not _check_ps_enabled():
         return json.dumps({"ok": False, "error": "PowerShell disabled: set EDR_WD_ENABLE_POWERSHELL=1 to enable"})
     result = _run_ps_sync(command, timeout, cwd)
@@ -1570,6 +1763,8 @@ def run_powershell(command: str, timeout: int = 30, cwd: str = None) -> str:
     ),
 )
 def start_powershell(command: str, timeout: int = 300, cwd: str = None) -> str:
+    if (blocked := _legacy_gui_conflict("start_powershell")) is not None:
+        return blocked
     if not _check_ps_enabled():
         return json.dumps({"ok": False, "error": "PowerShell disabled: set EDR_WD_ENABLE_POWERSHELL=1 to enable"})
     job_id = uuid.uuid4().hex[:12]
@@ -1658,12 +1853,53 @@ def diagnose_windows() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _verify_product_target_ref(context, target_ref: dict) -> None:
+    """Reject stale semantic targets before any backend click is attempted."""
+    observation = _product_observation
+    if (observation is None or observation["run_id"] != context.run_id
+        or target_ref.get("snapshot_id") != observation["observation_id"]):
+        raise ValueError("observation_stale")
+    saved = observation["controls"].get(target_ref.get("target_id"))
+    if (saved is None or not target_ref.get("fingerprint")
+        or saved["fingerprint"] != target_ref["fingerprint"]
+        or saved.get("rect") is None):
+        raise ValueError("observation_stale")
+    if _window_session is None:
+        raise ValueError("window_identity_stale")
+    locked = _window_session.verify_locked()
+    if (locked.binding != observation["window_binding"]
+            or locked.rect != tuple(observation["window_rect"])):
+        raise ValueError("window_identity_stale")
+    current = _backend.dump_tree(max_depth=15)
+    if not isinstance(current, dict) or not current.get("ok"):
+        raise ValueError("observation_stale")
+    try:
+        from .windowing.observation import normalize_observed_control
+        from .windowing.guard import WindowGuard
+    except ImportError:
+        from windowing.observation import normalize_observed_control
+        from windowing.guard import WindowGuard
+    identity = _window_session.verify_locked().__dict__
+    matches = [normalize_observed_control(source, identity, index)
+               for index, source in enumerate(current.get("controls") or (), start=1)
+               if isinstance(source, dict)]
+    matches = [item for item in matches if item["fingerprint"] == saved["fingerprint"]]
+    if len(matches) != 1 or matches[0].get("rect") is None:
+        raise ValueError("observation_stale")
+    WindowGuard.verify_target_before_injection(
+        {"observation_id": target_ref["snapshot_id"], "target_rect": saved["rect"]},
+        observation["observation_id"], tuple(matches[0]["rect"]),
+    )
+
+
+@_serialized_product_gui
 def execute_action(
     action_id: str,
     action_code: str | None = None,
     args: dict | None = None,
     target_ref: dict | None = None,
     request_id: str | None = None,
+    run_token: str | None = None,
 ) -> str:
     """Single unified dispatcher (P1.1).
 
@@ -1674,8 +1910,52 @@ def execute_action(
     # Lazy import to keep the module import surface stable.
     try:
         from .action_dispatcher import dispatch
+        from .action_catalog import ACTIONS_V1, get_spec
+        from .action_dispatcher.receipts import ActionReceipt
     except ImportError:
         from action_dispatcher import dispatch
+        from action_catalog import ACTIONS_V1, get_spec
+        from action_dispatcher.receipts import ActionReceipt
+
+    # A product run binds actions to the current native window generation.
+    # The backend pointer guard then performs the final foreground/hit-test
+    # check at the injection boundary. Legacy calls keep their old contract.
+    try:
+        context = _product_policy.require_product_run(run_token)
+    except ValueError:
+        context = None  # dispatcher emits the canonical token error below
+    if context is not None:
+        spec = get_spec(ACTIONS_V1, action_id)
+        if request_id:
+            try:
+                from .action_dispatcher.cache import lookup, scoped_request_key
+            except ImportError:
+                from action_dispatcher.cache import lookup, scoped_request_key
+            if lookup(scoped_request_key(context.run_id, request_id)) is not None:
+                return dispatch(action_id=action_id, action_code=action_code,
+                                args=args, target_ref=target_ref,
+                                request_id=request_id, run_token=run_token).to_json()
+        if spec is not None and "window_lock" in spec.requires:
+            try:
+                if _window_session is None:
+                    raise ValueError("window_identity_stale")
+                _window_session.verify_locked()
+            except Exception:
+                return ActionReceipt.from_error(
+                    code="window_identity_stale", action_id=action_id,
+                    action_code=action_code, request_id=request_id,
+                    message="native window identity changed before dispatch",
+                ).to_json()
+        if spec is not None and "target_ref" in spec.requires and target_ref:
+            try:
+                _verify_product_target_ref(context, target_ref)
+            except Exception as exc:
+                return ActionReceipt.from_error(
+                    code="window_identity_stale" if str(exc) == "window_identity_stale" else "observation_stale",
+                    action_id=action_id, action_code=action_code,
+                    request_id=request_id,
+                    message="semantic target changed before dispatch",
+                ).to_json()
 
     receipt = dispatch(
         action_id=action_id,
@@ -1683,7 +1963,35 @@ def execute_action(
         args=args,
         target_ref=target_ref,
         request_id=request_id,
+        run_token=run_token,
     )
+    if context is not None and spec is not None and spec.side_effect != "none":
+        # Even an error may have occurred after an OS input was sent; a new
+        # observation is required before another target-bearing action.
+        global _product_observation
+        _product_observation = None
+    if receipt.ok and action_id == "session.window_lock.set" and run_token:
+        try:
+            if _window_session is None:
+                raise ValueError("window_identity_stale")
+            _window_session.bind_backend_lock()
+        except Exception:
+            with _product_policy.authorized_dispatch(run_token):
+                _backend.unlock_window()
+            try:
+                from .action_dispatcher.receipts import ActionReceipt as _ActionReceipt
+                from .action_dispatcher.cache import scoped_request_key, store
+            except ImportError:
+                from action_dispatcher.receipts import ActionReceipt as _ActionReceipt
+                from action_dispatcher.cache import scoped_request_key, store
+            receipt = _ActionReceipt.from_error(
+                code="window_identity_stale", action_id=action_id,
+                action_code=action_code, request_id=request_id,
+                message="locked window could not be uniquely bound to its native identity",
+            )
+            if request_id:
+                context = _product_policy.require_product_run(run_token)
+                store(scoped_request_key(context.run_id, request_id), receipt)
     return receipt.to_json()
 
 
@@ -1699,6 +2007,96 @@ mcp.tool(
         "returns the cached receipt on duplicate request_id (FR-P1.1-01..02)."
     ),
 )(execute_action)
+
+
+@mcp.tool(name="begin_product_run", description="Acquire an exclusive, leased product GUI run.")
+@_serialized_product_gui
+def begin_product_run(profile_id: str, digest: str, lease_seconds: float = 300) -> str:
+    global _window_session
+    try:
+        recording = _recording_service.status(heartbeat=False)
+    except RecordingModelError as exc:
+        if exc.code != "recording_session_missing":
+            return json.dumps({"ok": False, "code": "recording_status_unavailable"}, ensure_ascii=False)
+        recording = {"state": "idle"}
+    except Exception:
+        return json.dumps({"ok": False, "code": "recording_status_unavailable"}, ensure_ascii=False)
+    if recording.get("state") in {"recording", "paused"}:
+        return json.dumps({"ok": False, "code": "recording_session_active"}, ensure_ascii=False)
+    try:
+        context = _product_policy.begin_product_run(profile_id, digest,
+                                                    lease_seconds=lease_seconds,
+                                                    backend_kind=_backend_kind)
+    except ValueError as exc:
+        return json.dumps({"ok": False, "code": str(exc).split(":", 1)[0]}, ensure_ascii=False)
+    try:
+        from .windowing.runtime import WindowSession
+    except ImportError:
+        from windowing.runtime import WindowSession
+    _window_session = WindowSession(context.run_id, _backend_kind, _backend)
+    try:
+        _window_session.bind_backend_lock()
+    except Exception:
+        # A run can begin before any connect/lock; the first role focus or
+        # session.window_lock.set will establish the authoritative binding.
+        pass
+    return json.dumps({
+        "ok": True, "run_id": context.run_id, "run_token": context.run_token,
+        "profile_id": context.capability.profile_id, "expires_in": lease_seconds,
+    }, ensure_ascii=False)
+
+
+@mcp.tool(name="end_product_run", description="Release the active product GUI run.")
+@_serialized_product_gui
+def end_product_run(run_token: str) -> str:
+    try:
+        _product_policy.end_product_run(run_token)
+    except ValueError as exc:
+        return json.dumps({"ok": False, "code": str(exc).split(":", 1)[0]}, ensure_ascii=False)
+    return json.dumps({"ok": True}, ensure_ascii=False)
+
+
+@mcp.tool(name="focus_window_role", description="Resolve, focus and lock one role from the active product profile.")
+@_serialized_product_gui
+def focus_window_role(role: str, run_token: str) -> str:
+    global _product_observation
+    try:
+        context = _product_policy.require_product_run(run_token)
+        if context is None or _window_session is None:
+            raise ValueError("product_run_expired")
+        identity = _window_session.focus_and_lock_role(role, context.capability, run_token)
+        _product_observation = None
+    except Exception as exc:
+        code = str(exc).split(":", 1)[0]
+        return json.dumps({"ok": False, "code": code}, ensure_ascii=False)
+    return json.dumps({"ok": True, "identity": identity.__dict__}, ensure_ascii=False)
+
+
+@mcp.tool(name="focus_window_selector", description="Focus and lock one path-owned product window by its stable UIA root identity.")
+@_serialized_product_gui
+def focus_window_selector(process_name: str, title_regex: str,
+                          root_control_id: str, run_token: str) -> str:
+    global _product_observation
+    try:
+        context = _product_policy.require_product_run(run_token)
+        if context is None or _window_session is None:
+            raise ValueError("product_run_expired")
+        try:
+            from .product_profiles import INSTALLED_PRODUCT_SPECS
+        except ImportError:
+            from product_profiles import INSTALLED_PRODUCT_SPECS
+        spec = INSTALLED_PRODUCT_SPECS.get((context.capability.profile_id, _backend_kind))
+        if spec is None:
+            raise ValueError("product_window_path_unavailable")
+        identity = _window_session.focus_and_lock_selector(
+            process_name, title_regex, root_control_id,
+            context.capability, spec["application"], run_token,
+        )
+        _product_observation = None
+    except Exception as exc:
+        code = str(exc).split(":", 1)[0]
+        return json.dumps({"ok": False, "code": code}, ensure_ascii=False)
+    return json.dumps({"ok": True, "identity": identity.__dict__}, ensure_ascii=False)
 
 
 def _restore_python_tool_callables() -> None:

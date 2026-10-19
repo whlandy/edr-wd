@@ -56,6 +56,7 @@ from .conditions import (
     check_action_code_match,
     check_live_enablement,
     check_ownership,
+    check_product_action,
     check_requires,
 )
 from .mapping import ActionDispatchMap, is_mutating
@@ -69,6 +70,8 @@ from .receipts import (
     CODE_OK,
     CODE_OWNERSHIP_MISMATCH,
     CODE_PRECONDITION_FAILED,
+    CODE_PRODUCT_RUN_CONFLICT,
+    CODE_PRODUCT_RUN_EXPIRED,
     CODE_UNKNOWN_ACTION_ID,
     ActionReceipt,
     normalize,
@@ -77,6 +80,11 @@ from .runtime import (
     BackendNotConfiguredError,
     get_backend,
 )
+
+try:
+    from ..product_policy import authorized_dispatch, require_product_run
+except ImportError:  # target-local deployment
+    from product_policy import authorized_dispatch, require_product_run
 
 
 # Module-level default dispatch map; built lazily on first call.
@@ -97,6 +105,7 @@ def dispatch(
     args: Mapping[str, Any] | None = None,
     target_ref: Mapping[str, Any] | None = None,
     request_id: str | None = None,
+    run_token: str | None = None,
     dispatch_map: ActionDispatchMap | None = None,
     has_connected_window: bool = True,
     has_window_lock: bool = True,
@@ -126,23 +135,48 @@ def dispatch(
             ),
         )
 
+    # A token is checked before reading the cache. A revoked/expired run must
+    # never obtain a previous receipt, even for the same request_id.
+    try:
+        context = require_product_run(run_token)
+    except ValueError as exc:
+        code = CODE_PRODUCT_RUN_EXPIRED if "expired" in str(exc) else CODE_PRODUCT_RUN_CONFLICT
+        return ActionReceipt.from_error(
+            code=code, action_id=action_id, action_code=action_code,
+            request_id=request_id, message=str(exc),
+        )
+    cache_key = cache.scoped_request_key(context.run_id if context else None, request_id) if request_id else None
+
     # Steps 2..13 run under a per-request inflight lock so that
     # concurrent dispatch() calls sharing the same `request_id`
     # serialise. FR-P1.1-02: the backend executes exactly once
     # for a given request_id; second callers block, then read the
     # cached receipt.
-    with cache.inflight_lock(request_id or ""):
+    with cache.inflight_lock(cache_key or ""):
+        # Recheck after waiting for the lock; the lease can expire meanwhile.
+        if context is not None:
+            try:
+                require_product_run(run_token)
+            except ValueError as exc:
+                return ActionReceipt.from_error(
+                    code=CODE_PRODUCT_RUN_EXPIRED, action_id=action_id,
+                    action_code=action_code, request_id=request_id, message=str(exc),
+                )
         # Step 3 — idempotency lookup.
-        if request_id:
-            cached = cache.lookup(request_id)
+        if cache_key:
+            cached = cache.lookup(cache_key)
             if cached is not None:
                 return cached
+
+        fail = check_product_action(context, action_id, request_id=request_id)
+        if fail is not None:
+            return _cache_and_return(cache_key, fail)
 
         # Step 4 — catalog lookup.
         dmap = dispatch_map or _get_default_map()
         spec = dmap.get_by_action_id(action_id)
         if spec is None:
-            return _cache_and_return(request_id, ActionReceipt.from_error(
+            return _cache_and_return(cache_key, ActionReceipt.from_error(
                 code=CODE_UNKNOWN_ACTION_ID,
                 action_id=action_id,
                 action_code=action_code,
@@ -187,7 +221,7 @@ def dispatch(
                 request_id=request_id,
             )
             if fail is not None:
-                return _cache_and_return(request_id, fail)
+                return _cache_and_return(cache_key, fail)
 
         # Step 6 — requires / preconditions.
         fail = check_requires(
@@ -200,7 +234,7 @@ def dispatch(
             target_ref=target_ref,
         )
         if fail is not None:
-            return _cache_and_return(request_id, fail)
+            return _cache_and_return(cache_key, fail)
 
         # Step 7 — action_code match (if supplied).
         fail = check_action_code_match(
@@ -209,7 +243,7 @@ def dispatch(
             request_id=request_id,
         )
         if fail is not None:
-            return _cache_and_return(request_id, fail)
+            return _cache_and_return(cache_key, fail)
 
         # Step 8 — ownership. The dispatcher uses the backend's lock
         # state to confirm `expected_process_name` matches.
@@ -217,7 +251,7 @@ def dispatch(
             try:
                 backend = get_backend()
             except BackendNotConfiguredError as exc:
-                return _cache_and_return(request_id, ActionReceipt.from_error(
+                return _cache_and_return(cache_key, ActionReceipt.from_error(
                     code=CODE_DISPATCH_TARGET_MISSING,
                     action_id=action_id,
                     action_code=action_code,
@@ -231,13 +265,13 @@ def dispatch(
                 request_id=request_id,
             )
             if fail is not None:
-                return _cache_and_return(request_id, fail)
+                return _cache_and_return(cache_key, fail)
 
         # Step 9 — backend method resolution.
         try:
             backend = get_backend()
         except BackendNotConfiguredError as exc:
-            return _cache_and_return(request_id, ActionReceipt.from_error(
+            return _cache_and_return(cache_key, ActionReceipt.from_error(
                 code=CODE_DISPATCH_TARGET_MISSING,
                 action_id=action_id,
                 action_code=action_code,
@@ -246,7 +280,7 @@ def dispatch(
             ))
         method = dmap.resolve_backend_method(backend, action_id)
         if method is None:
-            return _cache_and_return(request_id, ActionReceipt.from_error(
+            return _cache_and_return(cache_key, ActionReceipt.from_error(
                 code=CODE_DISPATCH_TARGET_MISSING,
                 action_id=action_id,
                 action_code=action_code,
@@ -259,9 +293,10 @@ def dispatch(
 
         # Step 10 — invoke the backend method.
         try:
-            backend_payload = method(**args) if args else method()
+            with authorized_dispatch(run_token):
+                backend_payload = method(**args) if args else method()
         except Exception as exc:  # noqa: BLE001 (intentional: surface as receipt)
-            return _cache_and_return(request_id, ActionReceipt.from_error(
+            return _cache_and_return(cache_key, ActionReceipt.from_error(
                 code=CODE_BACKEND_ERROR,
                 action_id=action_id,
                 action_code=action_code,
@@ -301,7 +336,7 @@ def dispatch(
             )
 
         # Step 13 — cache the receipt.
-        return _cache_and_return(request_id, receipt)
+        return _cache_and_return(cache_key, receipt)
 
 
 def _cache_and_return(request_id: str | None,

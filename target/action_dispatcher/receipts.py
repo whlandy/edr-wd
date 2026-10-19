@@ -54,6 +54,11 @@ CODE_DISPATCH_TARGET_MISSING     = "dispatch_target_missing"
 CODE_MISSING_SELECTOR_HINT       = "missing_selector_hint"
 CODE_BACKEND_ERROR               = "backend_error"
 CODE_INVALID_REQUEST_ID          = "invalid_request_id"
+CODE_PRODUCT_ACTION_FORBIDDEN     = "product_action_forbidden"
+CODE_PRODUCT_RUN_CONFLICT         = "product_run_conflict"
+CODE_PRODUCT_RUN_EXPIRED          = "product_run_expired"
+CODE_WINDOW_IDENTITY_STALE        = "window_identity_stale"
+CODE_OBSERVATION_STALE            = "observation_stale"
 
 STABLE_DISPATCH_CODES: frozenset[str] = frozenset({
     CODE_OK,
@@ -66,6 +71,11 @@ STABLE_DISPATCH_CODES: frozenset[str] = frozenset({
     CODE_MISSING_SELECTOR_HINT,
     CODE_BACKEND_ERROR,
     CODE_INVALID_REQUEST_ID,
+    CODE_PRODUCT_ACTION_FORBIDDEN,
+    CODE_PRODUCT_RUN_CONFLICT,
+    CODE_PRODUCT_RUN_EXPIRED,
+    CODE_WINDOW_IDENTITY_STALE,
+    CODE_OBSERVATION_STALE,
 })
 
 
@@ -242,5 +252,10 @@ __all__ = [
     "CODE_MISSING_SELECTOR_HINT",
     "CODE_BACKEND_ERROR",
     "CODE_INVALID_REQUEST_ID",
+    "CODE_PRODUCT_ACTION_FORBIDDEN",
+    "CODE_PRODUCT_RUN_CONFLICT",
+    "CODE_PRODUCT_RUN_EXPIRED",
+    "CODE_WINDOW_IDENTITY_STALE",
+    "CODE_OBSERVATION_STALE",
     "normalize",
 ]

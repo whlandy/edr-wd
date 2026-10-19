@@ -191,13 +191,12 @@ class TkRecordingIndicator:
         dialog = self._tk.Toplevel(self._root)
         dialog.title("Add explicit assertion")
         dialog.attributes("-topmost", True)
-        # assertion accepts: text_equals / text_contains / text_contains_time /
-        # value_equals / visible / checked / enabled / window_open.
-        # text_contains_time takes a strftime pattern (e.g. %Y-%m-%d) which is
-        # rendered at replay time, not the timestamp visible while recording.
+        # Time ranges accept HH:MM or HH:MM:SS; durationSeconds overrides the
+        # default minute/second precision. strftime assertions remain separate.
         fields = [
             ("assertion", "text_equals"), ("expected", ""),
             ("timeoutSeconds", "10"),
+            ("durationSeconds", ""),
             ("automationId", self._assertion_target.get("automationId") or ""),
             ("identifier", self._assertion_target.get("identifier") or ""),
             ("controlType", self._assertion_target.get("controlType") or "Text"),
@@ -224,6 +223,8 @@ class TkRecordingIndicator:
             except json.JSONDecodeError:
                 expected = raw_expected
             payload = {field: entry.get() for field, entry in entries.items()}
+            if not payload["durationSeconds"].strip():
+                payload.pop("durationSeconds")
             payload["expected"] = expected
             payload["bindPrevious"] = bool(bind_previous.get())
             if expected == "" and not self._messagebox.askyesno(

@@ -11,6 +11,7 @@ import ctypes
 import dataclasses
 import hashlib
 import json
+import ntpath
 import re
 import sys
 import threading
@@ -47,6 +48,12 @@ def _transition_evidence(packet: "HookPacket") -> dict[str, object]:
     if isinstance(handle, int) and not isinstance(handle, bool):
         evidence["handle"] = handle
     return evidence
+
+
+def _executable_in_root(executable: str, root: str) -> bool:
+    normalized = ntpath.normcase(executable)
+    base = ntpath.normcase(root.rstrip("\\/"))
+    return bool(base and normalized.startswith(base + "\\"))
 
 
 class WindowsLowLevelHookDriver:
@@ -399,6 +406,21 @@ class WindowsUIAResolver:
         expected = str(process_name or "").lower().removesuffix(".exe")
         if not expected:
             return None
+        # Recording starts from a connected/locked window. Anchor the root
+        # to that exact owner instead of the first same-named process in the
+        # machine's process table.
+        get_lock = getattr(self._backend, "get_window_lock", None)
+        lock = get_lock().get("lock") if callable(get_lock) else None
+        locked_pid = lock.get("pid") if isinstance(lock, Mapping) else None
+        if isinstance(locked_pid, int) and not isinstance(locked_pid, bool):
+            try:
+                owner = psutil.Process(locked_pid)
+                if owner.name().lower().removesuffix(".exe") != expected:
+                    return None
+                return self._install_root(owner.exe())
+            except Exception:
+                return None
+        roots: set[str] = set()
         for proc in psutil.process_iter(["name", "exe"]):
             try:
                 name = str(proc.info.get("name") or "").lower().removesuffix(".exe")
@@ -408,10 +430,22 @@ class WindowsUIAResolver:
                 if executable:
                     root = self._install_root(executable)
                     if root:
-                        return root
+                        roots.add(root)
             except Exception:
                 continue
-        return None
+        return next(iter(roots)) if len(roots) == 1 else None
+
+    @staticmethod
+    def process_pid_belongs_to_root(pid: int, root: str) -> bool:
+        """Check one observed owner, not any same-named running process."""
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return False
+        try:
+            import psutil
+            executable = psutil.Process(pid).exe()
+        except Exception:
+            return False
+        return _executable_in_root(str(executable or ""), root)
 
     def process_belongs_to_root(self, process_name: str, root: str) -> bool | None:
         """Is a running process of this name installed under `root`?
@@ -722,7 +756,8 @@ class WindowsUIACorrelator:
     def _process_matches(actual: object, expected: str) -> bool:
         return str(actual or "").lower().removesuffix(".exe") == expected.lower().removesuffix(".exe")
 
-    def _process_in_scope(self, actual: object, scope: CaptureScope) -> bool:
+    def _process_in_scope(self, actual: object, scope: CaptureScope,
+                          pid: object = None) -> bool:
         """Does this process belong to the application the scope names?
 
         The scope's own process always qualifies. Sibling processes of the
@@ -730,6 +765,13 @@ class WindowsUIACorrelator:
         (or when the bundle cannot be resolved) this is exactly the old
         single-process behaviour.
         """
+        if self._scope_root and isinstance(pid, int) and not isinstance(pid, bool):
+            check_pid = getattr(self._resolver, "process_pid_belongs_to_root", None)
+            if callable(check_pid):
+                try:
+                    return bool(check_pid(pid, self._scope_root))
+                except Exception:
+                    return False
         if self._process_matches(actual, scope.process_name):
             return True
         normalized = str(actual or "").lower().removesuffix(".exe")
@@ -805,7 +847,8 @@ class WindowsUIACorrelator:
     def current_target(self, scope: CaptureScope) -> ObservedTarget | None:
         """Hit-test the current pointer while preserving the recording scope."""
         foreground = self._resolver.foreground()
-        if not self._process_in_scope(foreground.get("processName"), scope):
+        if not self._process_in_scope(foreground.get("processName"), scope,
+                                      foreground.get("pid")):
             return None
         try:
             if not re.search(scope.window_title, str(foreground.get("windowTitle") or "")):
@@ -935,12 +978,7 @@ class WindowsUIACorrelator:
     ) -> RawCaptureEvent | tuple[RawCaptureEvent, ...] | None:
         """Commit the final focused value when recording stops."""
         foreground = self._resolver.foreground()
-        if not self._process_in_scope(foreground.get("processName"), scope):
-            return None
-        try:
-            if not re.search(scope.window_title, str(foreground.get("windowTitle") or "")):
-                return None
-        except re.error:
+        if not self._in_scope(foreground, scope):
             return None
         # A recording can stop with the wheel still spinning; that gesture is
         # real input and must not be dropped just because nothing followed it.
@@ -990,7 +1028,8 @@ class WindowsUIACorrelator:
         for window in windows or ():
             if not isinstance(window, Mapping):
                 continue
-            if not self._process_in_scope(window.get("processName"), scope):
+            if not self._process_in_scope(window.get("processName"), scope,
+                                          window.get("pid")):
                 continue
             title = window.get("title")
             if isinstance(title, str) and title:
@@ -1170,7 +1209,8 @@ class WindowsUIACorrelator:
         a click that opens a dialog is recorded but everything the user then
         does inside the dialog is silently dropped.
         """
-        if not self._process_in_scope(foreground.get("processName"), scope):
+        if not self._process_in_scope(foreground.get("processName"), scope,
+                                      foreground.get("pid")):
             return False
         # The entry window is always checked against the user's own regex
         # first. That match must not depend on seeding having succeeded, so
@@ -1289,7 +1329,7 @@ class WindowsUIACorrelator:
         if kind not in {"opened", "closed"}:
             return None
         process_name = packet.native.get("processName")
-        if not self._process_in_scope(process_name, scope):
+        if not self._process_in_scope(process_name, scope, packet.native.get("pid")):
             return None
         # The scope follows the window either way. A window that opened on its
         # own is not a recorded step — nothing the user did explains it — but
@@ -1516,7 +1556,8 @@ class WindowsUIACorrelator:
         # buries the one rejection that explains a lost click. Only input that
         # resolved to this application's own windows is diagnostic.
         if window is not None and scope is not None:
-            if not self._process_in_scope(window.get("processName"), scope):
+            if not self._process_in_scope(window.get("processName"), scope,
+                                          window.get("pid")):
                 self.foreign_app_events += 1
                 return
         if len(self.rejections) >= 60:
@@ -1818,8 +1859,9 @@ class WindowsWinEventDriver:
     WINEVENT_SKIPOWNPROCESS = 0x0002
     WM_QUIT = 0x0012
 
-    def __init__(self, process_name: str) -> None:
+    def __init__(self, process_name: str, application_root: str | None = None) -> None:
         self.process_name = process_name
+        self.application_root = ntpath.normcase(application_root.rstrip("\\/")) if application_root else None
         self._emit: Callable[[HookPacket], None] | None = None
         self._thread: threading.Thread | None = None
         self._thread_id: int | None = None
@@ -1827,7 +1869,7 @@ class WindowsWinEventDriver:
         self._startup_error: Exception | None = None
         self._hook = None
         self._callback = None
-        self._titles: dict[int, str] = {}
+        self._titles: dict[int, tuple[str, str, int]] = {}
 
     @staticmethod
     def _matches(actual: object, expected: str) -> bool:
@@ -1878,6 +1920,16 @@ class WindowsWinEventDriver:
                 user32.GetWindowTextW(hwnd, buffer, length + 1)
                 return buffer.value
 
+            def belongs_to_application(pid: int, name: str) -> bool:
+                if self.application_root:
+                    try:
+                        import psutil
+                        executable = psutil.Process(pid).exe()
+                        return _executable_in_root(executable, self.application_root)
+                    except Exception:
+                        return False
+                return self._matches(name, self.process_name)
+
             def callback(hook, event, hwnd, id_object, id_child, thread_id, timestamp):
                 del hook, thread_id, timestamp
                 if self._emit is None or not hwnd:
@@ -1891,16 +1943,17 @@ class WindowsWinEventDriver:
                     pid = wintypes.DWORD()
                     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                     name = process_name_of(int(pid.value))
-                    if not self._matches(name, self.process_name):
+                    if not belongs_to_application(int(pid.value), name):
                         return
                     title = window_title(hwnd)
-                    self._titles[handle] = title
+                    self._titles[handle] = (title, name, int(pid.value))
                     kind, resolved_pid = "opened", int(pid.value)
                 else:
-                    title = self._titles.pop(handle, None)
-                    if title is None:
+                    remembered = self._titles.pop(handle, None)
+                    if remembered is None:
                         return
-                    name, kind, resolved_pid = self.process_name, "closed", None
+                    title, name, resolved_pid = remembered
+                    kind = "closed"
                 self._emit(HookPacket(
                     kind="window_transition",
                     monotonic_ms=int(time.monotonic() * 1000),
@@ -1985,7 +2038,8 @@ def windows_source_factory(backend: object | None = None):
             sink=sink,
             driver=CompositeHookDriver(
                 WindowsLowLevelHookDriver(),
-                WindowsWinEventDriver(scope.process_name),
+                WindowsWinEventDriver(scope.process_name,
+                                      application_root=resolver.application_root(scope.process_name)),
             ),
             correlator=WindowsUIACorrelator(resolver, inventory=inventory),
             inventory=inventory,

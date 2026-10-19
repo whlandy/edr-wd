@@ -97,6 +97,7 @@ class RecordingSession:
         # can wait for an in-flight one instead of losing the recording.
         self._settled = threading.Event()
         self._last_action_causal_id: str | None = None
+        self._assertion_window: dict[str, Any] | None = None
 
     @property
     def state(self) -> CaptureSessionState:
@@ -235,7 +236,7 @@ class RecordingSession:
                 modifiers = set(event.input.get("modifiers") or [])
                 if "SHIFT" in modifiers and modifiers.intersection({"CTRL", "META"}):
                     self._last_heartbeat = self._monotonic()
-                    self._open_assertion_editor()
+                    self._open_assertion_editor(event)
                     return False
             if event.type in {"key_down", "key_up", "pointer_move"}:
                 return False
@@ -276,7 +277,38 @@ class RecordingSession:
             self._last_heartbeat = self._monotonic()
             return self._receipt()
 
-    def _open_assertion_editor(self) -> None:
+    @staticmethod
+    def _event_window(event: RawCaptureEvent | None) -> dict[str, Any] | None:
+        raw = event.evidence.get("window") if event is not None else None
+        if (
+            not isinstance(raw, Mapping)
+            and event is not None
+            and event.type == "window_transition"
+            and event.input.get("kind") == "opened"
+        ):
+            # A CLI-authored assertion may follow a newly opened window before
+            # any pointer/key event has stamped its foreground identity.
+            raw = event.input
+        if not isinstance(raw, Mapping):
+            return None
+        title, process = raw.get("title"), raw.get("processName")
+        if not isinstance(title, str) or not title or not isinstance(process, str) or not process:
+            return None
+        window = {"title": title, "processName": process}
+        root = raw.get("rootAutomationId")
+        if isinstance(root, str) and root:
+            window["rootAutomationId"] = root
+        handle = raw.get("handle")
+        if isinstance(handle, int) and not isinstance(handle, bool):
+            window["handle"] = handle
+        return window
+
+    def _open_assertion_editor(self, trigger: RawCaptureEvent | None = None) -> None:
+        # The recorder UI takes foreground while the editor is open. Keep the
+        # product window that received its hotkey, not the session entry window
+        # or the recorder UI's current foreground window.
+        recent = self._events[-1] if self._events else None
+        self._assertion_window = self._event_window(trigger) or self._event_window(recent)
         current_target = getattr(self._source, "current_observed_target", None)
         target = current_target() if callable(current_target) else None
         if not isinstance(target, ObservedTarget):
@@ -302,12 +334,34 @@ class RecordingSession:
             "text_equals", "text_contains", "value_equals", "visible",
             "checked", "enabled", "window_open", "text_contains_time",
             "window_text_contains", "window_text_contains_time",
+            "text_time_range", "window_text_time_range",
         }:
             raise RecordingModelError(
                 "recording_assertion_invalid", f"unsupported assertion {assertion_type!r}",
                 path="assertion.assertion",
             )
         expected_value = payload["expected"]
+        duration_seconds = payload.get("durationSeconds")
+        if assertion_type in {"text_time_range", "window_text_time_range"}:
+            try:
+                try:
+                    from ..time_assertions import parse_time_range
+                except ImportError:  # target-local deployment
+                    from time_assertions import parse_time_range
+                if isinstance(duration_seconds, str) and duration_seconds.strip():
+                    duration_seconds = int(duration_seconds)
+                elif duration_seconds == "":
+                    duration_seconds = None
+                parse_time_range(expected_value, duration_seconds)
+            except (ValueError, TypeError) as exc:
+                raise RecordingModelError(
+                    "recording_assertion_invalid", str(exc), path="assertion.expected",
+                ) from exc
+        elif duration_seconds not in (None, ""):
+            raise RecordingModelError(
+                "recording_assertion_invalid", "durationSeconds is only valid for time ranges",
+                path="assertion.durationSeconds",
+            )
         if assertion_type in {"text_contains_time", "window_text_contains_time"}:
             if not isinstance(expected_value, str) or not expected_value:
                 raise RecordingModelError(
@@ -330,6 +384,12 @@ class RecordingSession:
                 raise RecordingModelError(
                     "recording_assertion_invalid",
                     f"{assertion_type} expected must be a string",
+                    path="assertion.expected",
+                )
+            if assertion_type in {"text_contains", "window_text_contains"} and not expected_value:
+                raise RecordingModelError(
+                    "recording_assertion_invalid",
+                    "contains assertion requires non-empty expected text",
                     path="assertion.expected",
                 )
         elif assertion_type in {"visible", "checked", "enabled"}:
@@ -396,8 +456,12 @@ class RecordingSession:
         }
         # Window-scoped assertions state what the screen must show, not which
         # widget shows it, so they never need a control identity.
-        identity_free = {"window_open", "window_text_contains", "window_text_contains_time"}
-        if assertion_type not in identity_free and not any(identity.values()):
+        identity_free = {"window_open", "window_text_contains", "window_text_contains_time", "window_text_time_range"}
+        stable_identity = (
+            identity["automationId"] or identity["identifier"]
+            or (identity["controlType"] and identity["text"])
+        )
+        if assertion_type not in identity_free and not stable_identity:
             raise RecordingModelError(
                 "recording_target_unresolved", "assertion requires a semantic control identity",
                 path="assertion.selector",
@@ -424,10 +488,12 @@ class RecordingSession:
             type="assertion",
             scope=self.scope,
             observed_target=observed,
+            evidence={"window": dict(self._assertion_window)} if self._assertion_window else {},
             assertion={
                 "type": assertion_type,
                 "expected": expected_value,
                 "timeoutSeconds": timeout_seconds,
+                **({"durationSeconds": duration_seconds} if duration_seconds is not None else {}),
             },
             causal_id=causal_id,
         )
@@ -436,6 +502,7 @@ class RecordingSession:
                 "recording_state_invalid", "assertion could not be added in current state",
                 path="session.state",
             )
+        self._assertion_window = None
         return self._receipt()
 
     def stop(

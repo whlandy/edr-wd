@@ -51,12 +51,35 @@ def _is_protected(control: Mapping[str, Any]) -> bool:
 _PROTECTED_CACHE_TTL_SECONDS = 4.0
 
 
-def _window_identity(backend: Any) -> tuple:
+def _window_identity(backend: Any) -> tuple | None:
     """Which window a cached redaction answer belongs to."""
+    get_lock = getattr(backend, "get_window_lock", None)
+    if callable(get_lock):
+        try:
+            result = get_lock()
+        except Exception:
+            result = None
+        lock = result.get("lock") if isinstance(result, Mapping) else None
+        if isinstance(lock, Mapping):
+            snapshot = lock.get("snapshot")
+            snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+            native_id = (lock.get("native_id") or lock.get("handle")
+                         or snapshot.get("native_id") or snapshot.get("handle"))
+            # A PID/title-only lock is not strong enough for cache reuse:
+            # two successive top-level windows can share both.
+            if native_id is None:
+                return None
+            return ("lock", lock.get("pid") or snapshot.get("pid"),
+                    str(native_id), lock.get("generation"),
+                    snapshot.get("title"))
     snapshot = getattr(backend, "_connected_window_snapshot", None)
     if isinstance(snapshot, Mapping):
-        return (snapshot.get("pid"), snapshot.get("title"))
-    return (getattr(backend, "_connected_pid", None), None)
+        native_id = snapshot.get("native_id") or snapshot.get("handle")
+        if native_id is None:
+            return None
+        return ("snapshot", snapshot.get("pid"), str(native_id),
+                snapshot.get("title"))
+    return None
 
 
 def _cached_protected_controls(backend: Any) -> list | None:
@@ -70,7 +93,8 @@ def _cached_protected_controls(backend: Any) -> list | None:
     now = time.monotonic()
     entry = getattr(backend, "_edr_protected_cache", None)
     if (
-        isinstance(entry, dict)
+        identity is not None
+        and isinstance(entry, dict)
         and entry.get("identity") == identity
         and now - entry.get("at", 0.0) < _PROTECTED_CACHE_TTL_SECONDS
     ):
@@ -243,9 +267,20 @@ def capture_redacted_window_frame(
     evidence and replay evidence both go through it, so no runtime frame can
     reach an execution report with protected regions still visible.
     """
-    protected = list(protected_rectangles(backend))
-    protected.extend(extra_redactions)
-    result = backend.screenshot(None)
+    # A window can be replaced between secure-control enumeration and the
+    # frame. Re-enumerate once for its new native identity; never paint an old
+    # window's redactions onto a new window's pixels.
+    for _ in range(2):
+        before_identity = _window_identity(backend)
+        protected = list(protected_rectangles(backend))
+        protected.extend(extra_redactions)
+        if _window_identity(backend) != before_identity:
+            continue
+        result = backend.screenshot(None)
+        if _window_identity(backend) == before_identity:
+            break
+    else:
+        raise ValueError("recording window changed during capture")
     if not isinstance(result, Mapping) or not result.get("ok"):
         raise ValueError("recording screenshot unavailable")
     if result.get("capture_scope") != "window":

@@ -44,6 +44,16 @@ from .receipts import (
 )
 
 
+def check_product_action(context, action_id: str, *, request_id: str | None = None) -> ActionReceipt | None:
+    """Enforce a target-owned capability, independently of planner filtering."""
+    if context is None or action_id in context.capability.allowed_action_ids:
+        return None
+    return ActionReceipt.from_error(
+        code="product_action_forbidden", action_id=action_id,
+        request_id=request_id, message="action is not allowed by active product run",
+    )
+
+
 def check_live_enablement(
     spec: ActionSpec,
     enabled: bool,
@@ -247,4 +257,5 @@ __all__ = [
     "check_requires",
     "check_action_code_match",
     "check_ownership",
+    "check_product_action",
 ]
