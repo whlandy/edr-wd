@@ -222,8 +222,8 @@ Use the least invasive operation that satisfies the request:
 | `stop_server(repair=False)` | No upload/install | Validate tracked payload and invoke its installed stop script. |
 | `restart_server(repair=False)` | No upload/install | Stop, then ensure; stop failures short-circuit. |
 | `deploy_target` | Yes | Upload only Git-tracked files from `target/`. |
-| `install_target_task` | Yes | Register Windows Task Scheduler or macOS LaunchAgent using tracked scripts. |
-| `repair_target(repair=True)` | Yes | Run `deploy_target -> install_target_task -> ensure_server_running(repair=True)`. |
+| `install_target_task` | Yes; Windows after preflight | Register Windows Task Scheduler or macOS LaunchAgent using tracked scripts; Windows first verifies Python, dependencies, PowerShell, and target identity. |
+| `repair_target(repair=True)` | Yes after preflight | Run `probe_target -> deploy_target -> install_target_task -> ensure_server_running(repair=True)`; failed preflight makes no deployment writes. |
 | `stop_server(repair=True)` | Conditional | Repair only `target_payload_incomplete`, then retry stop. |
 | CLI `push` | Yes, unrestricted | Debug escape hatch; bypasses tracked-only filtering. |
 

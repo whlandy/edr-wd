@@ -406,6 +406,14 @@ def repair_target(name: Optional[str] = None, repair: bool = False) -> dict:
         repair_actions: list[str] = []
         repair_results: dict[str, dict] = {}
         if repair:
+            # A failed runtime/identity probe must not leave a partially
+            # uploaded payload or a Task Scheduler/LaunchAgent definition.
+            preflight = probe_target(target_name)
+            repair_actions.append("probe_target")
+            repair_results["probe_target"] = preflight
+            if not preflight.get("ok"):
+                return preflight
+
             deploy_result = deploy_target(target_name)
             repair_actions.append("deploy_target")
             repair_results["deploy_target"] = deploy_result

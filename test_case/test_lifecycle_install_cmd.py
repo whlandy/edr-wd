@@ -29,7 +29,9 @@ def _capture_install(monkeypatch):
 
     monkeypatch.setattr("agent.lifecycle.windows.run_ssh", fake_run_ssh)
     monkeypatch.setattr("agent.lifecycle.windows.scp_to", fake_scp_to)
-    return WindowsLifecycle(), commands
+    lifecycle = WindowsLifecycle()
+    monkeypatch.setattr(lifecycle, "probe", lambda _cfg: {"ok": True})
+    return lifecycle, commands
 
 
 def _install_cmd_for(commands: list[str]) -> str:
@@ -78,3 +80,27 @@ def test_install_file_path_is_pure_backslash_windows_path(monkeypatch):
     # -TargetRoot is a PowerShell-side value: backslash form, double-quoted.
     assert '-TargetRoot "C:\\Users\\admin\\Desktop\\edr-wd"' in cmd, cmd
     assert '-TaskName "StartEDRMCP"' in cmd, cmd
+
+
+def test_install_missing_python_does_not_upload_or_register_task(monkeypatch):
+    from agent.lifecycle.windows import WindowsLifecycle
+
+    lifecycle = WindowsLifecycle()
+    monkeypatch.setattr(lifecycle, "probe", lambda _cfg: {
+        "ok": False, "stage": "probe", "code": "python_not_found",
+        "error": "configured Python is absent", "details": {"python": {"ok": False}},
+    })
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("install must not upload or register before preflight")
+
+    monkeypatch.setattr("agent.lifecycle.windows.scp_to", forbidden)
+    monkeypatch.setattr("agent.lifecycle.windows.run_ssh", forbidden)
+
+    result = lifecycle.install({
+        "ssh": {"host": "127.0.0.1"},
+        "windows": {"target_root": "C:\\Users\\admin\\Desktop\\edr-wd"},
+    })
+
+    assert not result["ok"] and result["stage"] == "install"
+    assert result["code"] == "python_not_found"

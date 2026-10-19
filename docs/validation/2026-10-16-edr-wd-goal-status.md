@@ -664,3 +664,18 @@ returns separate page, API, and client observation/digest references. The
 new test passes, and the selected offline suite reports **2587 passed,
 28 deselected**. This establishes the adapter wiring in simulation, not
 an authenticated Browser Use session or an EDRClient live comparison.
+
+Deployment preflight follow-up (2026-10-20): the live 11.26 repair had
+previously uploaded scripts and registered `StartEDRMCP` even though the
+configured Python interpreter was absent; only server startup exposed
+that missing prerequisite. `repair_target(repair=True)` now runs
+`probe_target` before deployment, installation, or restart. Direct Windows
+`install()` also probes Python, required imports, PowerShell, and target
+identity before uploading scripts or registering a task. Negative tests
+verify a `python_not_found` preflight performs zero deployment writes;
+positive tests preserve the ordered probe/deploy/install/ensure path.
+The focused repair/install tests report **7 passed**; the selected offline
+suite reports **2590 passed, 28 deselected**. `compileall`, Skill validation,
+and `git diff --check` exited 0. This prevents future partial repairs; it
+does not remove the task already registered on 11.26, install Python, or
+constitute successful live replay.

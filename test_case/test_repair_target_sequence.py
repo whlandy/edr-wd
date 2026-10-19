@@ -14,6 +14,10 @@ def test_repair_target_runs_deploy_install_ensure(monkeypatch):
 
     monkeypatch.setattr(target_manager, "TargetConfig", FakeTargetConfig)
     monkeypatch.setattr(
+        target_manager, "probe_target",
+        lambda name: calls.append(("probe", name)) or {"ok": True, "data": {}},
+    )
+    monkeypatch.setattr(
         target_manager,
         "deploy_target",
         lambda name: calls.append(("deploy", name)) or {"ok": True, "data": {}},
@@ -34,11 +38,13 @@ def test_repair_target_runs_deploy_install_ensure(monkeypatch):
 
     assert result["ok"] is True
     assert calls == [
+        ("probe", "unit-target"),
         ("deploy", "unit-target"),
         ("install", "unit-target"),
         ("ensure", "unit-target", True),
     ]
     assert result["data"]["repair_actions"] == [
+        "probe_target",
         "deploy_target",
         "install_target_task",
         "ensure_server_running",
@@ -56,6 +62,9 @@ def test_repair_target_stops_when_install_fails(monkeypatch):
             return "unit-target"
 
     monkeypatch.setattr(target_manager, "TargetConfig", FakeTargetConfig)
+    monkeypatch.setattr(
+        target_manager, "probe_target", lambda _name: {"ok": True, "data": {}},
+    )
     monkeypatch.setattr(
         target_manager, "deploy_target", lambda _name: {"ok": True, "data": {}},
     )

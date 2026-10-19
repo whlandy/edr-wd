@@ -892,6 +892,13 @@ class WindowsLifecycle:
 
     def install(self, cfg: dict) -> dict:
         """Upload install scripts and register the Task Scheduler task."""
+        preflight = self.probe(cfg)
+        if not preflight.get("ok"):
+            return self._err(
+                "install", preflight.get("code") or "target_preflight_failed",
+                preflight.get("error") or "Windows target prerequisites are unavailable",
+                details={"preflight": preflight},
+            )
         ssh_cfg = cfg["ssh"]
         win_cfg = cfg["windows"]
         target_root = win_cfg["target_root"]
