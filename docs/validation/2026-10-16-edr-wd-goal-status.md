@@ -491,3 +491,14 @@ installation. The cloud endpoint again answered read-only probes
 certificate verification disabled for the probe); no authenticated
 page/API session was available, so no end–cloud comparison is claimed.
 This round produced no new offline verification.
+
+Second 2026-10-20 round: a bounded read-only search of the 11.26 host
+checked `C:\Python*`, both Program Files roots, the per-user
+`AppData\Local\Programs` directory, the `python`/`python3`/`py` PATH
+lookups and `C:\Windows\py.exe`; all returned nothing (`NOT_FOUND`).
+This is stronger than the earlier unbounded recursive search timeout:
+no standard-location Python installation exists on the host, so the
+deployment gate is an operator action (install Python 3.11, or provide
+a different host/path), not a local config correction. No remote file
+or service was changed. The offline baseline is unchanged at **2562
+passed, 28 deselected**.
