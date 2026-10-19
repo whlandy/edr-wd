@@ -502,3 +502,18 @@ deployment gate is an operator action (install Python 3.11, or provide
 a different host/path), not a local config correction. No remote file
 or service was changed. The offline baseline is unchanged at **2562
 passed, 28 deselected**.
+
+Third 2026-10-20 round: an adversarial review of the time-prefix and
+duration assertion path found no new false-pass. The matcher's
+lookbehind/lookahead correctly rejects embedded digits and timezone
+offsets while accepting one-digit seconds; midnight-wrap arithmetic in
+`matching_times` keeps the exclusive upper bound correct across the
+day boundary; both time-range evaluators fail closed on invalid or
+duplicate control selectors (already parameterized-tested), and a
+malformed non-dict window entry cannot pass — it raises and the
+executor blocks the step, so no assertion can pass from a broken
+observation. The registry-wide crash smoke and the
+record→compile→replay duration-preservation test cover the remaining
+paths. No code change was required; the offline baseline remains
+**2562 passed, 28 deselected**. The 11.26 Python gate still awaits the
+operator action recorded in the previous entry.
