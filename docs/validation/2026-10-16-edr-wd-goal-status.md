@@ -845,3 +845,17 @@ removed registry-wide pid tolerance only changes multi-process
 providers of a single product, an intentional fail-closed trade that
 leaves the single-process EDRClient flow untouched. No gap found;
 no code change this round. 11.26 re-probed: still `python_not_found`.
+
+Thirteenth 2026-10-20 round: milestone confirmation. All six work
+areas (end–cloud consistency, live visual candidates, cross-window
+recording, deployment integrity, time-prefix/duration assertions,
+component-ID and image-template replay stability) have now each been
+adversarially reviewed at least once in this session and are
+offline-saturated: the selected offline suite reports **2610 passed,
+28 deselected**, and `compileall` / `git diff --check` exit 0. The
+remaining unverified items are all live gates: the end–cloud
+comparison needs an authenticated Browser Use page/API session, and
+live EDRClient record/replay, live time-assertion checks, and the
+deployment upload/import evidence all need Python 3.11 installed on
+11.26 (operator action, still pending). The tree is clean and in sync
+with `origin/hermes-remote`. No new code work this round.
