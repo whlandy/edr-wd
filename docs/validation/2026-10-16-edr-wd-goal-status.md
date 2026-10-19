@@ -827,3 +827,21 @@ paths, the pid on the description, the missing-owner refusal, and the
 sibling-window refusal. The focused capture suite reported **99
 passed** and the selected offline suite **2610 passed, 28
 deselected**.
+
+Twelfth 2026-10-20 round: follow-up adversarial pass over the click
+ownership change from the previous round, checking that the strict
+`ownerPid` rule cannot reject a legitimate flow or admit a stale one.
+The window identity fed to the ownership check is the hook-time stamped
+window (enriched on the worker), never a later hit test: when the
+stamp is usable, a click whose destination moved to another window
+between hook and processing is refused rather than attributed to
+either side; when the stamp is unusable and a fresh point hit test
+still finds a window, both window and element are fresh and mutually
+consistent, so admission is sound; when nothing is under the point,
+the production resolver refuses instead of falling back to the
+foreground, and the `foreground()` fallback is retained only for the
+macOS/legacy resolver contracts the correlator also serves. The
+removed registry-wide pid tolerance only changes multi-process
+providers of a single product, an intentional fail-closed trade that
+leaves the single-process EDRClient flow untouched. No gap found;
+no code change this round. 11.26 re-probed: still `python_not_found`.
