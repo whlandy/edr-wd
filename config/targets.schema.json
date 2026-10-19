@@ -19,11 +19,11 @@
   "$defs": {
     "target": {
       "type": "object",
-      "required": ["platform", "app_profile", "identity", "ssh", "mcp"],
+      "required": ["platform", "identity", "ssh", "mcp"],
       "properties": {
         "description": {"type": "string"},
         "platform": {"enum": ["windows", "macos"]},
-        "app_profile": {"enum": ["windows_hisec", "macos_hisec", "macos_generic"]},
+        "app_profile": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$", "description": "Optional override of the app catalog's EDRClient default. Must be registered for this platform."},
         "identity": {
           "type": "object",
           "required": ["hostname", "os_version"],
@@ -43,15 +43,13 @@
         {
           "if": {"properties": {"platform": {"const": "windows"}}},
           "then": {
-            "required": ["windows"],
-            "properties": {"app_profile": {"const": "windows_hisec"}}
+            "required": ["windows"]
           }
         },
         {
           "if": {"properties": {"platform": {"const": "macos"}}},
           "then": {
-            "required": ["macos"],
-            "properties": {"app_profile": {"enum": ["macos_hisec", "macos_generic"]}}
+            "required": ["macos"]
           }
         }
       ],
