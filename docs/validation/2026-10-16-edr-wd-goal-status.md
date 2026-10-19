@@ -652,3 +652,15 @@ content still qualifies as a semantic candidate. Nine regression cases
 positive control, the live action, and the replay no-click assertion)
 pass, and the selected offline suite reported **2585 passed, 28
 deselected**. `compileall` and `git diff --check` exited 0.
+
+End-cloud adapter integration follow-up (2026-10-20): an offline
+contract test now composes independent Browser Use-like page/API reads
+with the actual `MCPObservationProvider` bundle ingestion path, not only
+a stubbed client reader. The simulated target returns a window-scoped,
+source-redacted PNG, a matching SHA-256 digest, stable window identity,
+and a policy-state control; `EDRWDClientReader` extracts the client value.
+`check_consistency()` accepts the same device, policy, and time window and
+returns separate page, API, and client observation/digest references. The
+new test passes, and the selected offline suite reports **2587 passed,
+28 deselected**. This establishes the adapter wiring in simulation, not
+an authenticated Browser Use session or an EDRClient live comparison.

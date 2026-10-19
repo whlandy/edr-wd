@@ -1,13 +1,18 @@
 """Browser-Use/EDR-WD provider contract tests without external services."""
 
+import base64
+import hashlib
+from io import BytesIO
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from PIL import Image
 
 from agent.consistency import (
     BrowserUseCloudReader, ConsistencySpec, EDRWDClientReader,
     Snapshot, SnapshotPending, check_consistency,
 )
+from agent.recording.mcp_runtime import MCPObservationProvider
 
 
 pytestmark = pytest.mark.unit
@@ -398,6 +403,64 @@ def test_client_reader_requires_locked_redacted_bundle_and_adds_evidence():
     assert snapshot.evidence_refs == ("client:log:1", "edrwd:OBS-1", "sha256:" + "a" * 64)
     with pytest.raises(ValueError, match="consistency_client_window_unverified"):
         EDRWDClientReader(_BundleProvider(valid=False), extracted)()
+
+
+def test_browser_page_api_and_actual_mcp_bundle_provider_compare_one_event():
+    frame = BytesIO()
+    Image.new("RGB", (20, 20), "white").save(frame, format="PNG")
+    png = frame.getvalue()
+    calls = []
+
+    class TargetAgent:
+        def call_tool(self, name, args, timeout=None):
+            calls.append(name)
+            assert name == "observe_window_bundle"
+            assert args["run_token"] == "RUN" and args["capture_image"] is True
+            return {
+                "ok": True, "observation_id": "OBS-END-CLOUD",
+                "window_identity": {"native_id": "42", "generation": 1,
+                                    "process_name": "EDRClient.exe", "title": "日志中心",
+                                    "rect": [100, 200, 120, 220]},
+                "tree": {"ok": True, "controls": [{
+                    "automation_id": "policyState", "text": "enabled", "protected": False,
+                    "rect": [105, 205, 115, 215],
+                }]},
+                "screenshot_scope": "window", "screenshot_redacted": True,
+                "screenshot_origin": [100, 200],
+                "screenshot_b64": base64.b64encode(png).decode(),
+                "screenshot_sha256": "sha256:" + hashlib.sha256(png).hexdigest(),
+            }
+
+    def page():
+        calls.append("browser_page")
+        return _cloud_raw({"policy": {"enabled": True}}, "page:policy")
+
+    def api():
+        calls.append("browser_api")
+        return _cloud_raw({"policy": {"enabled": True}}, "api:policy")
+
+    provider = MCPObservationProvider(TargetAgent(), use_bundle=True,
+                                      capture_screenshot=True, run_token="RUN")
+
+    def extract(bundle):
+        assert bundle["controls"][0]["automation_id"] == "policyState"
+        enabled = bundle["controls"][0]["text"] == "enabled"
+        return _cloud_raw({"policy": {"enabled": enabled}}, "client:log")
+
+    result = check_consistency(
+        _spec(max_wait_seconds=0),
+        fetch_cloud=BrowserUseCloudReader(page, api),
+        fetch_client=EDRWDClientReader(provider, extract),
+        clock=lambda: 0.0, sleep=lambda _: pytest.fail("should not sleep"),
+    )
+
+    assert result.passed and result.attempts == 1
+    assert calls == ["browser_page", "browser_api", "observe_window_bundle"]
+    assert result.cloud_evidence == ("page:policy", "api:policy")
+    assert result.client_evidence == (
+        "client:log", "edrwd:OBS-END-CLOUD",
+        "sha256:" + hashlib.sha256(png).hexdigest(),
+    )
 
 
 def test_client_event_outside_window_cannot_be_hidden_by_observation_time():
