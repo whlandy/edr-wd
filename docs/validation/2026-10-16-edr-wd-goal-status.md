@@ -679,3 +679,25 @@ suite reports **2590 passed, 28 deselected**. `compileall`, Skill validation,
 and `git diff --check` exited 0. This prevents future partial repairs; it
 does not remove the task already registered on 11.26, install Python, or
 constitute successful live replay.
+
+Eighth 2026-10-20 round: the end–cloud consistency checker was
+reviewed end to end and every path is fail closed — a non-Snapshot
+fetch raises instead of comparing, a concrete snapshot from the wrong
+device or policy returns `consistency_identity_mismatch` immediately,
+pending sides poll to the deadline and then report
+`consistency_timeout` carrying the last concrete evidence references,
+an out-of-window snapshot cannot be compared, and `consistent` requires
+every declared field present on both sides and strictly equal
+(`_same_value` keeps bool apart from int and demands identical mapping
+keys and list lengths). The concurrent round's fix to retain prior
+evidence on an empty pending read was verified safe: the retained
+references are report metadata for the identity-mismatch and timeout
+results only and never enter the verdict, while the consistent path
+still reports the fresh references. The companion adapter tests from
+that round were collected and pass. The consistency suite reported
+**45 passed** and the selected offline suite **2590 passed, 28
+deselected**. The live end–cloud gate is unchanged: it needs an
+authenticated Browser Use page/API session for the cloud side, which is
+not available offline. 11.26 re-probed: still `python_not_found`. The
+branch's one unpushed concurrent commit was pushed as housekeeping
+(no content change).
