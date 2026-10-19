@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from target.recording.models import (
@@ -11,7 +13,8 @@ from target.recording.models import (
     RecordingModelError,
 )
 from target.recording.source import CompositeHookDriver, HookPacket, QueuedCaptureSource
-from target.recording.windows import WindowsUIACorrelator
+from target.recording import windows as windows_recording
+from target.recording.windows import WindowsUIACorrelator, WindowsUIAResolver, _native_window_at
 from target.recording.session import CaptureSessionState, RecordingSession
 
 pytestmark = pytest.mark.unit
@@ -1479,6 +1482,118 @@ def test_a_click_on_a_covering_window_is_still_out_of_scope():
     assert correlator.out_of_scope_events == 1
 
 
+def test_native_hit_test_resolves_top_level_window_owner_and_title():
+    class Function:
+        def __init__(self, callback):
+            self.callback = callback
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    observed = []
+    user32 = SimpleNamespace(
+        WindowFromPoint=Function(lambda point: observed.append((point.x, point.y)) or 55),
+        GetAncestor=Function(lambda handle, flag: 777 if (handle, flag) == (55, 2) else 0),
+        GetWindowThreadProcessId=Function(lambda handle, pointer: setattr(pointer._obj, "value", 42) or 1),
+        GetWindowTextLengthW=Function(lambda handle: len("日志中心")),
+        GetWindowTextW=Function(lambda handle, buffer, length: setattr(buffer, "value", "日志中心") or len("日志中心")),
+    )
+
+    window = _native_window_at(user32, 600, 400)
+
+    assert observed == [(600, 400)]
+    assert window == {"handle": 777, "pid": 42, "windowTitle": "日志中心"}
+
+
+def test_production_resolver_enriches_native_hit_with_process_name(monkeypatch):
+    monkeypatch.setattr(windows_recording.ctypes, "WinDLL", lambda *args, **kwargs: object(),
+                        raising=False)
+    monkeypatch.setattr(windows_recording, "_native_window_at", lambda *_args: {
+        "handle": 777, "pid": 42, "windowTitle": "日志中心",
+    })
+    monkeypatch.setattr(psutil, "Process", lambda pid: SimpleNamespace(name=lambda: "EDRClient.exe"))
+    assert WindowsUIAResolver().window_at(600, 400) == {
+        "handle": 777, "pid": 42, "windowTitle": "日志中心",
+        "processName": "EDRClient.exe",
+    }
+
+
+def test_hook_time_window_identity_survives_changed_point_hit_test():
+    resolver = _PointResolver(
+        [{"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777}],
+        front={"processName": "Claude", "windowTitle": "Claude", "pid": 9, "handle": 1},
+        at_point={"processName": "Claude", "windowTitle": "Claude", "pid": 9, "handle": 1},
+    )
+    resolver.window_from_native = lambda native: {**native, "processName": "EDRClient.exe"}
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+    packet = HookPacket(
+        kind="pointer_up", monotonic_ms=100,
+        wall_time="2026-08-17T00:00:00.000Z", screen_point=(600, 400),
+        button="left", native={"window": {"handle": 777, "pid": 42,
+                                         "windowTitle": "日志中心"}},
+    )
+    event = correlator.correlate(packet, SCOPE, 1)
+    assert event is not None
+    assert event.evidence["window"]["handle"] == 777
+
+
+def test_missing_hook_time_window_does_not_use_later_foreground():
+    resolver = _PointResolver(
+        [{"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777}],
+        front={"processName": "EDRClient.exe", "windowTitle": "日志中心",
+               "pid": 42, "handle": 777},
+        at_point={"processName": "EDRClient.exe", "windowTitle": "日志中心",
+                  "pid": 42, "handle": 777},
+    )
+    resolver.window_from_native = lambda native: None
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+    packet = HookPacket(
+        kind="pointer_up", monotonic_ms=100,
+        wall_time="2026-08-17T00:00:00.000Z", screen_point=(600, 400),
+        button="left", native={"window": None},
+    )
+    assert correlator.correlate(packet, SCOPE, 1) is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_unknown_window_under_pointer_does_not_fall_back_to_foreground():
+    resolver = _PointResolver(
+        [{"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777}],
+        front={"processName": "EDRClient.exe", "windowTitle": "日志中心",
+               "pid": 42, "handle": 777},
+        at_point=None,
+    )
+    resolver.strict_point_ownership = True
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+    assert correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(600, 400)), SCOPE, 1,
+    ) is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_uia_control_description_carries_owning_pid():
+    wrapper = SimpleNamespace(
+        element_info=SimpleNamespace(process_id=42, is_password=False,
+                                     control_type="Button", automation_id="openLog", name="日志中心"),
+        rectangle=lambda: SimpleNamespace(left=0, top=0, right=100, bottom=40),
+        parent=lambda: None,
+    )
+    assert WindowsUIAResolver()._describe(wrapper)["ownerPid"] == 42
+
+
+def test_production_uia_resolver_rejects_missing_control_owner():
+    correlator = WindowsUIACorrelator(WindowsUIAResolver())
+    window = {"processName": "EDRClient.exe", "windowTitle": "日志中心",
+              "pid": 42, "handle": 777}
+    assert correlator._target_owned_by_scope({"automationId": "openLog"}, window, SCOPE) is False
+    assert correlator._target_owned_by_scope(
+        {"automationId": "openLog", "ownerPid": "invalid"}, window, SCOPE,
+    ) is False
+
+
 def test_keyboard_input_still_resolves_through_the_focused_window():
     """Keystrokes carry no coordinate, so focus is the only honest answer."""
     resolver = _PointResolver(
@@ -1544,6 +1659,23 @@ def test_an_element_owned_by_another_application_never_enters_the_recording():
     )
 
     assert event is None
+    assert correlator.out_of_scope_events == 1
+
+
+def test_sibling_product_window_control_cannot_be_attributed_to_pointer_window():
+    resolver = _CrossAppResolver(
+        [
+            {"title": "日志中心", "pid": 42, "processName": "EDRClient.exe", "handle": 777},
+            {"title": "其他窗口", "pid": 43, "processName": "EDRClient.exe", "handle": 778},
+        ],
+        {"controlType": "Button", "text": "日志中心", "automationId": "openLog",
+         "rect": [0, 0, 100, 100], "protected": False, "ownerPid": 43},
+    )
+    correlator = WindowsUIACorrelator(resolver)
+    correlator.seed_scope(SCOPE)
+    assert correlator.correlate(
+        _packet("pointer_up", monotonic_ms=100, screen_point=(600, 400)), SCOPE, 1,
+    ) is None
     assert correlator.out_of_scope_events == 1
 
 

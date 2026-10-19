@@ -56,6 +56,34 @@ def _executable_in_root(executable: str, root: str) -> bool:
     return bool(base and normalized.startswith(base + "\\"))
 
 
+def _native_window_at(user32: object, x: int, y: int) -> dict[str, object] | None:
+    """Read the top-level HWND actually receiving input at a screen point."""
+    from ctypes import wintypes
+
+    user32.WindowFromPoint.argtypes = [wintypes.POINT]
+    user32.WindowFromPoint.restype = wintypes.HWND
+    user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetAncestor.restype = wintypes.HWND
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    hit = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+    if not hit:
+        return None
+    handle = user32.GetAncestor(hit, 2) or hit  # GA_ROOT
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(handle, ctypes.byref(pid))
+    if not pid.value:
+        return None
+    length = max(0, int(user32.GetWindowTextLengthW(handle)))
+    title = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(handle, title, length + 1)
+    return {"handle": int(handle), "pid": int(pid.value), "windowTitle": title.value}
+
+
 class WindowsLowLevelHookDriver:
     """Own WH_MOUSE_LL/WH_KEYBOARD_LL hooks on a dedicated message-loop thread."""
 
@@ -174,6 +202,13 @@ class WindowsLowLevelHookDriver:
                         kind = "scroll"
                         delta = ctypes.c_short((data.mouseData >> 16) & 0xFFFF).value
                         native = {"delta": int(delta)}
+                    try:
+                        # Pin the receiving HWND at hook time. The queue may
+                        # process a click after it opens/closes a window, when
+                        # a fresh point hit-test would answer a different one.
+                        native["window"] = _native_window_at(user32, int(data.pt.x), int(data.pt.y))
+                    except Exception:
+                        native["window"] = None
                     self._emit(HookPacket(
                         kind=kind,
                         monotonic_ms=int(time.monotonic() * 1000),
@@ -269,6 +304,8 @@ class WindowsLowLevelHookDriver:
 class WindowsUIAResolver:
     """Resolve foreground ownership and one UIA element for a hook packet."""
 
+    strict_point_ownership = True
+
     def __init__(self, backend: object | None = None) -> None:
         # The automation backend, when the server supplies it. Scope seeding
         # asks it for the window list rather than enumerating the desktop a
@@ -342,6 +379,7 @@ class WindowsUIAResolver:
         except Exception:
             ancestry = []
         return {
+            "ownerPid": getattr(info, "process_id", None),
             "controlType": getattr(info, "control_type", None),
             "automationId": getattr(info, "automation_id", None),
             "text": getattr(info, "name", None),
@@ -577,6 +615,26 @@ class WindowsUIAResolver:
             return None
         result = dump(int(handle), max_depth=max_depth)
         return result if isinstance(result, Mapping) else None
+
+    def window_at(self, x: int, y: int) -> Mapping[str, object] | None:  # pragma: no cover - Windows only
+        native = _native_window_at(ctypes.WinDLL("user32", use_last_error=True), x, y)
+        return self.window_from_native(native)
+
+    def window_from_native(self, native: Mapping[str, object] | None) -> Mapping[str, object] | None:
+        """Add the process name on the worker, never inside the hook callback."""
+        if not isinstance(native, Mapping):
+            return None
+        pid = native.get("pid")
+        handle = native.get("handle")
+        if (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
+                or not isinstance(handle, int) or isinstance(handle, bool) or handle <= 0):
+            return None
+        try:
+            import psutil
+            process_name = psutil.Process(pid).name()
+        except Exception:
+            return None
+        return {**native, "processName": process_name}
 
     def element_at(self, x: int, y: int) -> Mapping[str, object] | None:  # pragma: no cover - Windows only
         from pywinauto import Desktop
@@ -1518,17 +1576,20 @@ class WindowsUIACorrelator:
     ) -> bool:
         """Does the resolved element belong to the application being recorded?
 
-        Only enforced when the resolver can say which process owns the
-        element; a resolver that cannot is left exactly as permissive as
-        before rather than silently dropping every step.
+        Production UIA must prove the element belongs to the input window's
+        PID. Legacy resolver doubles without owner evidence retain their
+        prior contract, but a missing/invalid production PID fails closed.
         """
         owner = target_data.get("ownerPid")
         if owner is None:
-            return True
+            # The production UIA resolver promises ownerPid. A missing value
+            # means its ownership evidence failed, not that an arbitrary hit
+            # test can be trusted. Keep older resolver doubles compatible.
+            return not isinstance(self._resolver, WindowsUIAResolver)
         try:
             owner = int(owner)
         except (TypeError, ValueError):
-            return True
+            return not isinstance(self._resolver, WindowsUIAResolver)
         expected = (foreground or {}).get("pid")
         if expected is not None:
             try:
@@ -1536,11 +1597,8 @@ class WindowsUIACorrelator:
                     return True
             except (TypeError, ValueError):
                 pass
-        # The admitted window's pid is the strongest signal, but a flow that
-        # legitimately crosses the application's processes must still pass.
-        for window in self.window_registry:
-            if window.get("pid") == owner:
-                return True
+        # A sibling process can own another window of this same product, but
+        # it cannot own the control under this particular input window.
         return False
 
     def _note_rejection(
@@ -1590,6 +1648,15 @@ class WindowsUIACorrelator:
         stamped = (packet.native or {}).get("window")
         if isinstance(stamped, Mapping) and stamped.get("processName"):
             return stamped
+        if "window" in (packet.native or {}):
+            enrich = getattr(self._resolver, "window_from_native", None)
+            if callable(enrich):
+                try:
+                    return enrich(stamped) or {}
+                except Exception:
+                    return {}
+            # macOS shares the correlator but its resolver has a different
+            # native-window contract; retain its point lookup below.
         point = packet.screen_point
         locate = getattr(self._resolver, "window_at", None)
         if point is not None and callable(locate):
@@ -1599,6 +1666,10 @@ class WindowsUIACorrelator:
                 located = None
             if located:
                 return located
+            if getattr(self._resolver, "strict_point_ownership", False):
+                # Production Windows hit testing is authoritative. macOS and
+                # legacy resolvers retain their separate fallback contract.
+                return {}
         return self._resolver.foreground()
 
     def _correlate(

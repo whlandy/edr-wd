@@ -805,3 +805,25 @@ stash entry remains intact in the stash list, the contaminated state
 is preserved under `recovery-backup-20261020`, and the tree now holds
 only the peer's current work-in-progress. The selected offline suite
 reported **2610 passed, 28 deselected** after the recovery.
+
+Eleventh 2026-10-20 round: the in-tree work-in-progress on Windows
+click attribution was verified and preserved as a commit. The low-level
+hook now pins the receiving HWND at hook time (`WindowFromPoint` plus
+`GetAncestor(GA_ROOT)`, failures degrade to `None` instead of raising
+inside the callback), because the queue may process a click after the
+desktop has changed and a later hit test would answer a different
+window. The UIA resolver carries `ownerPid` into the target data and
+enriches the native hit with the process name on the worker, not in the
+hook. The correlator's ownership check is now strict for the
+production resolver: a missing or invalid `ownerPid` fails closed
+(legacy test doubles keep their old permissive contract), and the
+former fallback that admitted any window pid present in the registry is
+gone — a sibling product process can own another window of the same
+product but cannot own the control under this particular input
+window. Missing hook-time window evidence no longer falls back to the
+later foreground either. Nine named regressions cover the hit test,
+the enrichment, surviving a changed point hit test, both no-fallback
+paths, the pid on the description, the missing-owner refusal, and the
+sibling-window refusal. The focused capture suite reported **99
+passed** and the selected offline suite **2610 passed, 28
+deselected**.
