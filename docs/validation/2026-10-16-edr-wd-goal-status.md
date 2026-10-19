@@ -585,3 +585,24 @@ suite reports **23 passed** and the selected offline suite **2576 passed,
 28 deselected**. A fresh read-only 11.26 status probe confirms SSH still
 connects as `desktop-s917l7s\\admin` but the configured Python 3.11 path
 still returns `python_not_found`; this is not live replay evidence.
+
+Sixth 2026-10-20 round: the cross-window recording path was reviewed
+end to end. Compiler side: a causally bound assertion whose recorded
+window differs from the action's window keeps its own observe-only step
+instead of being folded into the action, and the action still counts as
+verifier-verified for scroll/drag through `cross_window_verified_actions`;
+distinct recorded handles that share one replay selector mark the new
+step incomplete with `compile_window_identity_ambiguous`; `window_open`
+assertions stay attached because they evaluate the product window
+inventory, not the focused window. Replay side: the executor focuses the
+step's own window before refreshing a stale lock, re-locks once before
+dispatch when the cached lock went stale, and re-locks a declared next
+window only while the current step carries no expectation outside
+`action_ok`/`window_open` — a control assertion on the old window blocks
+the re-lock rather than being silently evaluated against the new one.
+Each guard has a direct test (`test_replay_does_not_retarget_old_window
+_control_assertion_to_next_window`, focus-once caching, stale-lock
+recovery), so the review found no remaining false-pass gap in this area.
+11.26 re-probed: still `python_not_found` (the install gate is unchanged).
+No code change this round; the recording suite was re-run and stayed
+green.
