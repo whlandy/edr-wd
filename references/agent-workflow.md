@@ -230,7 +230,13 @@ Use the least invasive operation that satisfies the request:
 `ensure_server_running` must reject incomplete payload with
 `target_payload_incomplete`, invalid Windows registration with
 `scheduled_task_invalid`, and invalid macOS registration with
-`launchagent_invalid`. Keep SSH/probe errors distinct from missing state.
+`launchagent_invalid`. It also checks the live MCP `tools/list` after a
+listener is found or started: `runtime_capabilities_missing` means the
+process lacks current product-run, observation, recording or replay tools;
+`runtime_capability_probe_failed` means the live process could not be
+verified. Neither is GUI-ready evidence. After confirming the target identity,
+deploy/restart through the normal repair path if its process is stale. Keep
+SSH/probe errors distinct from missing state.
 
 Successful repair results include ordered `repair_actions` and per-step
 `repair_results`. Results must remain JSON-serializable. A repair failure or a

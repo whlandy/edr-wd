@@ -33,6 +33,11 @@ Configuration assets:
 - [`todo/desktop-recording-golden-replay.md`](todo/desktop-recording-golden-replay.md):
   phased implementation and verification tracker for desktop recording and replay.
 
+## In-Progress Architecture
+
+- [`architecture/04-product-adapter-window-hybrid-locator-design.md`](architecture/04-product-adapter-window-hybrid-locator-design.md):
+  product adapters, window identity/lifecycle, hybrid localization, and intent-driven PC GUI execution (implementation and acceptance tracker).
+
 Implementation ownership:
 
 ```text

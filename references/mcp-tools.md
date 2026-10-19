@@ -41,6 +41,17 @@ Session/window:
 - `is_window_open`
 - `wait_window`
 - `status`
+- `begin_product_run`
+- `end_product_run`
+- `focus_window_role`
+- `observe_window_bundle`
+- `observe_product_windows` — read-only, run-token-scoped inventory of registered
+  windows. It verifies process executable paths and native window identities;
+  use it for `window_open`/`window_closed` replay assertions, including a
+  terminal step whose previous lock has lost foreground. An incomplete
+  enumeration, uncertain ownership, unclassified product window, or ambiguous
+  role is an error, not an
+  empty list that could make a closed-window assertion pass.
 
 HiSec:
 

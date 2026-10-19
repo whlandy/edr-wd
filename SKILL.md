@@ -34,6 +34,8 @@ before executing GUI/PowerShell actions.
 | Execute atomic tests / inspect evidence | `agent/execution/`, `agent/trace/` | `references/testing.md` |
 | Add fixed product verification | `sops/INDEX.md` | `sops/TEMPLATE.md` |
 | Plan/evaluate action sequences | `agent/planner/`, `agent/eval/` | `references/mcp-tools.md`, `references/testing.md` |
+| Record, assert, generate golden trace, replay | `edr-wd record start` | `references/testing.md` |
+| Compare end/client and cloud state | Browser Use cloud observation + EDR-WD client observation | `references/end-cloud-consistency.md` |
 | Use CHM manuals / RAG / action knowledge | separate `edr-rag` repo | `docs/requirements/EDR-RAG-INTEGRATION.md` |
 
 ## edr-rag Boundary
@@ -104,8 +106,11 @@ edr-wd config --rename-target OLD_NAME
 ```
 
 Target keys use `<IP3>.<IP4>-<hostname>-<os-major>`, for example
-`2.26-edr-win26-win11`. Supported platforms are `windows` and `macos`;
-supported profiles are `windows_hisec`, `macos_hisec`, and `macos_generic`.
+`2.26-edr-win26-win11`. Supported platforms are `windows` and `macos`.
+Run `edr-wd products` for installed profiles; `app_profile` selects one.
+If omitted, the default app is EDRClient (`windows_hisec` or `macos_hisec`).
+All reviewed applications, installation paths, and declared windows are in
+`target/product_specs/apps.json`; changes require target deployment.
 
 Inline password auth is permitted for trusted intranet use. Config writes must
 remain atomic and user-only; do not weaken the backup, validation, or permission
@@ -121,6 +126,8 @@ edr-wd --target TARGET restart
 edr-wd --target TARGET repair
 edr-wd --target TARGET test
 edr-wd --target TARGET tools
+edr-wd products
+edr-wd --target TARGET open-app --profile windows_notepad
 edr-wd --target TARGET call list_windows
 edr-wd --target TARGET call is_window_open --args '{"process_name":"EDRClient.exe"}'
 edr-wd --target TARGET open-edr
@@ -131,9 +138,10 @@ repair paths may write tracked target payload. `repair` means
 `deploy -> install -> ensure`. Target helpers belong under `target/scripts/` or
 `target/automation/`; never generate ad hoc remote scripts to make a run pass.
 
-Use `tools`, `call`, and `open-edr` for interactive operation. Do not create
+Use `products`, `open-app`, `tools`, and `call` for product-neutral interactive
+operation. `open-edr` remains an EDRClient compatibility command. Do not create
 temporary Python MCP clients merely to initialize a session, list/call tools,
-decode screenshots, or open EDRClient. `open-edr` owns the complete generic
+decode screenshots, or open EDRClient. `open-edr` owns the complete EDR-specific
 workflow: ensure readiness, repair an owned stale tunnel once, activate the
 application, verify the exact EDRClient main-window title, connect that window,
 and persist the returned screenshot under agent-local
@@ -156,6 +164,11 @@ For precise UI work:
 4. resolve one unique semantic target;
 5. execute the semantic action;
 6. re-observe and verify the expected state.
+
+When a reviewed redacted template is attached to a product intent, the live
+executor compares it with the fresh locked-window image and feeds its
+confidence-scored matches into the same `HybridLocator` as semantic and
+optional OCR candidates. A missing template never licenses an unguarded click.
 
 Prefer `gui.click`, `gui.type_text`, and `gui.select`. Coordinate actions are
 guarded fallbacks. Never reuse stale `target_id`/`control_id` values or confuse
@@ -185,6 +198,13 @@ pass. The event chain is authoritative; `step-results.json`, `trace.md`, and
 Screenshots must use relative report links, content digests, ownership metadata,
 and configured redaction. Recovery creates a new trace branch and never rewrites
 failed history.
+
+Recorded `text_time_range` and `window_text_time_range` assertions accept a
+`HH:MM` or second-precision prefix (`HH:MM:S` / `HH:MM:SS`). `10:10`
+covers `10:10:0` through `10:10:59`;
+optional `durationSeconds` replaces that default width. This is separate from
+the replay-clock `*_contains_time` strftime assertions. See
+`references/testing.md` for recording and replay requirements.
 
 ## MaaFramework Node Table
 
@@ -252,6 +272,8 @@ skipped.
 - `references/activate-edr.md`: HiSec entry/client activation internals.
 - `references/window-detection.md`: window verification and diagnostics.
 - `references/testing.md`: test tiers, traces, reports, failure triage.
+- `references/end-cloud-consistency.md`: Browser Use / EDR-WD snapshot contract,
+  device-policy-time correlation, synchronization polling, and diff evidence.
 - `docs/requirements/EDR-RAG-INTEGRATION.md`: boundary between `edr-wd` and
   the standalone `edr-rag` project.
 - `sops/INDEX.md`: fixed verification catalog.

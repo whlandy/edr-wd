@@ -98,7 +98,7 @@ For macOS targets use:
 ```json
 {
   "platform": "macos",
-  "app_profile": "macos_generic",
+  "app_profile": "macos_hisec",
   "identity": {
     "hostname": "EDR-MAC29",
     "os_version": "macos14"
@@ -182,10 +182,22 @@ test runner and verify `pytest`/`httpx` imports there.
 
 ## Platform/Profile Safety
 
-Known profile defaults:
+The application catalog's default is EDRClient on both platforms:
 
 - `platform=windows` -> `windows_hisec`
-- `platform=macos` -> `macos_generic`
+- `platform=macos` -> `macos_hisec`
+
+Omitting `app_profile` selects that platform's EDRClient profile. Setting it
+explicitly always overrides the default; `macos_generic` remains available
+as a non-product platform capability profile.
+
+Set `app_profile` to any installed descriptor for that platform, for example
+`windows_notepad` or `macos_calculator`; run `edr-wd products` to list choices
+and `edr-wd config --validate` to check the selection. `edr-wd --target TARGET
+open-app` uses the selected product, while `--profile ID` overrides it for one
+call. For a new product, add an entry to the single reviewed catalog
+`target/product_specs/apps.json` and deploy that tracked file to the target before
+running; see [`target/product_specs/README.md`](../target/product_specs/README.md).
 
 Do not silently run Windows HiSec tests against a macOS target. If a live backend
 does not match the configured profile, fail clearly or route only through the

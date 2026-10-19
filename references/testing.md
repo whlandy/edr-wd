@@ -109,9 +109,9 @@ listen-only hooks. `record stop` drains the target queue, retrieves each
 source-redacted capture once, validates its digest, and writes `recording.json`,
 `case.json`, `golden-trace.json`, generated pytest, `compile-report.json`, and
 deduplicated observation assets under `OUTPUT_ROOT/<safe-flow-name>/`.
-When the target has `app_profile` in its configuration, `record stop` binds it
-into the generated golden trace automatically; `--profile PROFILE` overrides
-that value.
+`record stop` binds the target's configured `app_profile` (or the catalog's
+EDRClient default for its platform) into the generated golden trace;
+`--profile PROFILE` overrides that value.
 
 An existing recording can be recompiled offline:
 
@@ -121,12 +121,13 @@ python3 -m agent.cli record compile recordings/policy-flow/recording.json \
 ```
 
 Replay accepts only a ready golden trace whose catalog and profile binding match
-the current runtime:
+the current runtime. When `--profile` is omitted, the target's configured app
+profile is used (EDRClient by default); an explicit override must still match
+the golden trace's binding:
 
 ```bash
 python3 -m agent.cli --target TARGET replay \
   recordings/policy-flow/golden-trace.json \
-  --profile windows_hisec \
   --trace-root result-report/replay-traces
 ```
 
@@ -134,12 +135,63 @@ Use `--confirm-action ACTION_ID` for each action that requires out-of-band
 confirmation. `semantic_only` is the default replay mode;
 `--replay-mode semantic_first` or `visual_only` must be explicit. Recording and
 replay cannot be active on the same target at the same time.
+For an unlabelled click with no stable control identity, compilation initially
+leaves the step incomplete. `record stop` upgrades it to a visual-only selector
+only if a digest-verified, source-redacted pre-action frame yields a template
+for an explicitly unprotected target. Such a trace needs `semantic_first` or
+`visual_only`; the default `semantic_only` mode rejects its image-only step.
+The generated pytest fixture selects `semantic_first` when its golden trace
+contains an image-only click, so the delivered test can run; set
+`EDR_WD_REPLAY_MODE` to override that choice deliberately.
+Visual replay preflights every referenced template and digest before connecting
+or locking the target; a missing or altered asset fails locally without a
+partial GUI run.
+The matcher retains RGB evidence, keeps spatially distinct repeated-icon
+candidates, and uses a uniquely matched context patch to constrain element
+search. Equal-scoring contexts remain ambiguous; no pointer action is sent.
 
 The raw recording's required `captureDiagnostics` fields make queue loss and
 correlator errors compilation failures instead of silently accepting a partial
-flow. Recorded scroll and drag, and unbound window transitions, remain visible
-as incomplete steps. The platform adapters do not yet synthesize automatic
-window-transition events.
+flow. Recorded scroll and drag without a bound result verifier, and unbound
+window transitions, remain visible as incomplete steps. Windows subscribes to
+native show/hide/destroy events; macOS polls scoped windows. Same-process
+transitions are supported, while cross-process Windows flows and real two-pass
+replay still require target acceptance.
+Stopping a capture in an admitted child window flushes its final scroll and
+text commit using the same process/window scope rule as live events.
+
+The recorder assertion editor accepts `text_time_range` (control-scoped) and
+`window_text_time_range` (whole locked window). Enter `HH:MM`, `HH:MM:S`, or `HH:MM:SS`
+in `expected`; blank `durationSeconds` uses the precision width (60 or 1
+second), while a positive integer in `durationSeconds` defines a half-open
+range starting at the prefix. For example, `10:10` with `120` accepts through
+`10:11:59`, including a midnight-crossing range. `timeoutSeconds` is the
+separate observation-polling budget, not the accepted time width. Replay
+rechecks the locked-window observation until this deadline for standalone or
+action-bound assertions; it never repeats the preceding action while polling.
+Time-range checks inspect control text, accessibility name, and value. For a
+dynamic “today/now at replay time” assertion, use `*_contains_time` with a
+strftime pattern instead.
+Control-scoped assertions persist their own stable control match, even when
+bound to a preceding click or drag; they do not borrow the action's target.
+An assertion authored in a different product window becomes a separate
+observe-only replay step, even with `bindPrevious=true`: replay first completes
+the action, then focuses the assertion window and checks its content without
+repeating the action. The causal binding still satisfies the compiler's
+result-verifier requirement for a recorded scroll or element drag.
+Recording-time HWNDs distinguish same-title windows within one capture, but
+are never replay selectors. If two distinct captured windows collapse to the
+same title/process selector and no stable root control ID separates them,
+compilation leaves the trace incomplete instead of asserting on an arbitrary
+same-title window.
+The recorder requires an ID or a control-type/name pair for such assertions.
+At replay, a missing or non-unique control fails the assertion, including an
+empty-text equality check. `text_contains` and `window_text_contains` require
+non-empty expected text so they cannot pass vacuously.
+Atomic control assertions also require a non-empty widget selector; a lone
+observed control, empty selector, or state-only filter such as `checked=false`
+is not proof that the intended component was found. `control_absent` needs an
+explicit selector even when the observed control list is empty.
 
 Focused offline checks:
 

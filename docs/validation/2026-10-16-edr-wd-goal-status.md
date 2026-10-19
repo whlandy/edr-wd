@@ -1,0 +1,477 @@
+# EDR-WD goal validation — 2026-10-16
+
+This is a current-state validation record, not a completion certificate.
+The working tree contains the implementation under review and is not yet
+deployed to a live target.
+
+## Offline evidence
+
+Command: `python3 -m pytest -q -m 'unit or regression'`
+
+Latest result: **2489 passed, 28 deselected** (38.01 s). `python3 -m compileall -q
+agent target` and `git diff --check` both exit 0. This rerun includes the
+generic-product activation failure-code check and macOS window resolution tests.
+The latter now cover bundle/app-name connection through an actual native
+window and verify that a cached connection cannot fabricate 800×600 bounds or
+resurrect a closed window. Template replay also keeps a 100% relative click
+anchor inside the exclusive element rectangle; boolean anchor coordinates
+are rejected at selector validation. Component-ID drag replay now also keeps
+100% start/end anchors within each current control rectangle and rejects
+empty or inverted rectangles. The focused visual/replay suite has **75 passed**.
+Visual-only template replay and the shared locator now reject non-finite,
+non-numeric, boolean or out-of-range confidence values before ranking or
+pointer materialization; OCR no longer turns Tesseract `NaN` into a perfect
+score. The focused hybrid/OCR/visual/live-locator suite has **38 passed**.
+Time-range matching now ignores ISO timezone offsets such as `+08:00` rather
+than treating them as event-clock text; the focused time/expectation suites
+have **51 passed**. The repository's `SKILL.md` passed
+`skill-creator/scripts/quick_validate.py`.
+
+Recorded control assertions now carry the assertion editor's own stable
+control match into case and golden artifacts. A bound assertion on a log-time
+control is evaluated against that control, not the preceding clicked button;
+the compiled and golden JSON both validate against their schemas. A weak
+assertion identity stays incomplete, and the recorder rejects it early when
+authored through the editor. Positive control assertions reject missing and
+duplicate matches; absence assertions fail if any match remains. Empty-string
+`text_contains`/`window_text_contains` expectations are rejected before
+recording and fail if supplied directly to an evaluator. The focused
+expectation, recording, time and replay suite has **238 passed**. These are
+offline assertions and do not substitute for a live EDRClient log check.
+
+The selected suite includes:
+
+| Requirement | Direct evidence |
+| --- | --- |
+| Product catalog/adapter and EDRClient intent | `test_case/test_app_catalog.py`, `test_case/test_product_intent.py`, `test_case/test_registered_app_activation.py` |
+| Window identity, registry, ownership and guarded pointer operations | `test_case/test_window_registry.py`, `test_case/test_window_session.py`, `test_case/test_window_guard_coverage.py` |
+| Shared hybrid locator, OCR and live visual candidates | `test_case/test_hybrid_locator.py`, `test_case/test_live_hybrid_action.py`, `test_case/test_ocr_redacted.py` |
+| Time prefix, duration, record/compile/replay and deadline polling | `test_case/test_recording/test_time_range_assertion.py`, `test_case/test_recording/test_replay.py` |
+| Stable control-ID and RGB/context-template replay, including repeated-icon locality, ambiguity rejection, pre-lock asset integrity and post-click cross-window re-locking | `test_case/test_recording/test_replay.py`, `test_case/test_recording/test_visual_templates.py` |
+| Cross-window recording and stop-time flush | `test_case/test_recording/test_windows_capture.py`, `test_case/test_recording/test_windows_app_scope.py` |
+| Tracked-only target deployment and required-module integrity | `test_case/test_deploy_payload_integrity.py`, `test_case/test_lifecycle_target_integrity.py`, `test_case/test_macos_deploy_tracked_only.py` |
+| Page/API plus locked-client end–cloud comparison | `test_case/test_end_cloud_consistency.py`, `test_case/test_bundle_provider.py` |
+
+The target deployment allowlist (`git ls-files -- target`) contains the new
+`target/time_assertions.py`, `target/windowing/*`, `target/automation/ocr.py`,
+`target/product_profiles.py`, `target/product_policy.py`, and
+`target/product_specs/apps.json`. This only proves local packaging eligibility,
+not upload or successful target import.
+
+Deployment now refuses an empty tracked-only manifest, checks every current
+product/windowing/OCR/time-assertion module and platform startup script on the
+remote host, and reads the probe's actual `found`/`missing` output rather than
+accepting exit code 0 alone. Target startup integrity uses the same required
+file lists. Before any remote I/O, Windows and macOS deployment now also
+reject required local files missing from disk or the actual Git upload manifest;
+this prevents an old remote copy from masking an omitted new module. The local
+manifest and negative paths have direct tests (**11 focused passes**), but
+there is still no successful remote upload/import evidence.
+
+The replay executor now focuses a recorded step's window before its first
+refresh, and if a successful action transfers foreground to the explicitly
+recorded next window, it can re-lock that window after the action. This
+recovery is not permitted when the current step still asserts a control in
+the old window. If a cached lock for consecutive same-window steps has gone
+stale before dispatch, it now re-focuses that recorded window once and
+refreshes again; it never repeats the preceding action. All three paths have
+direct offline tests; live EDRClient replay remains unverified.
+
+Recording now builds a click's visual template from its redacted
+`beforeCapture`, not the post-action `capture`. This matters when the click
+closes or navigates away from its target: replay searches the pre-action UI.
+Template generation also requires `observed_target.protected is False`; an
+unknown protection status cannot turn a pre-action frame into a target
+template. The focused recording-evidence, management and visual-template
+suite has **60 passed**. Its end-to-end artifact test deliberately uses a
+blue pre-action frame and red post-action frame and checks that the emitted
+template is blue; a parametrized privacy test covers protected and unknown
+targets. This establishes offline artifact correctness, not live template
+match stability.
+
+Image-only clicks now have an explicit path through recording compilation and
+replay. Compilation leaves a click with no stable semantic identity incomplete;
+artifact generation promotes only that selector issue after it creates a
+digest-verified redacted pre-action template for an explicitly unprotected
+target. Missing/tampered captures leave it incomplete. The saved golden trace,
+compile report and `record stop` response agree on the promoted status and
+issues. `semantic_first` and `visual_only` can execute the resulting empty-
+control selector through the guarded visual resolver; default `semantic_only`
+fails without dispatch. The focused evidence, replay and management suite has
+**117 passed** after adding generated-fixture and pre-lock mode coverage. The generated pytest
+fixture selects `semantic_first` for image-only clicks, otherwise
+`semantic_only`, while allowing an explicit `EDR_WD_REPLAY_MODE` override.
+An image-only trace requested in `semantic_only` mode is rejected before any
+target window lock or remote call.
+The emitted PNGs were also matched twice with the real Pillow matcher at two
+different window origins; both resolved to the same guarded window-relative
+click point. This is offline evidence; actual image-only EDRClient replay
+still needs the live two-run acceptance gate.
+
+Windows cross-process recording now derives its application root from the
+locked entry-window PID when available, rather than the first same-named
+process. When a foreground/window event supplies a PID, the correlator checks
+that exact executable path against the root; a different installation with
+the same executable name is excluded. The focused Windows capture/scope suite
+has **95 passed**; the target's actual multi-process flow remains unverified.
+
+End–cloud polling now reads cloud and client independently on every attempt.
+If either event is pending, a timeout retains the available evidence from
+both sides and reports both pending reasons when applicable. This behavior
+has offline tests; a real Browser Use page/API and EDRClient log comparison
+is still required.
+
+Within the cloud reader, page and API are likewise read independently: an
+API event already visible while the page is pending still contributes its
+opaque evidence reference. This also holds when the page fetch raises a
+`SnapshotPending` exception: both fetches run, and one or both pending reasons
+and evidence references survive the poll. The focused end–cloud suite has
+**24 passed**. A pending client log retains both its observation
+ID and redacted frame digest. These are evidence-preservation checks, not a
+substitute for live source binding.
+The sibling `edr-cloud-recorder` Skill has an `orchestrate/` layer for cloud
+and endpoint steps, but no configured Browser Use page/API callbacks or live
+EDRClient log selector were available in this run; those are still acceptance
+inputs, not offline proof.
+
+## Live gates not yet passed
+
+- `python3 -m agent.cli --target 11.26-desktop-s917l7s-win10 status` again
+  returned `stage=probe`, `SSH connection timed out` (2026-10-16, latest probe
+  after the pre-action template fix). No deployment
+  or live EDRClient run was attempted after this failure.
+- `python3 -m agent.cli --target mac-dev status` also returned an SSH timeout.
+  `/Applications/HiSecEndpoint.app` is absent on the local host.
+- The 28 deselected tests are live/integration tests. They include Windows and
+  macOS HiSec activation/window checks, the opt-in recording lifecycle, and a
+  new generic-product Calculator smoke.
+- Local Calculator smoke reached application activation, actual-window discovery,
+  product-run creation, and role resolution. Strict foreground lock then rejected
+  it: the latest opt-in run still reported WeChat as frontmost despite Calculator
+  activation. Direct backend diagnostics confirmed a successful PID connection
+  to Calculator, followed by a failed strict lock (`window_focus_failed`).
+  The test is not counted as passed; no ownership guard was relaxed to force it.
+- Live acceptance still needs: deploy/import the target package; record a
+  real cross-window flow; replay it twice after fresh starts in both stable-ID
+  and guarded-template modes; validate an actual page/API/client comparison
+  for one device, policy and event-time window. Preserve trace and redacted
+  evidence IDs, and do not claim success from an offline double alone.
+
+On 2026-10-19, the terminal-window gap was addressed offline. A new
+`observe_product_windows` target tool enumerates registered roles under the
+active product run without shifting the GUI lock, and verifies each PID's
+executable path against the installed app catalog. Ambiguous roles, uncertain
+process ownership, unclassified product windows and failed platform
+enumeration now fail closed. The MCP
+observation provider exposes this inventory only for window-only assertions;
+the executor uses it both immediately after the action and while polling, so
+an asynchronous new window can appear after the old lock loses foreground.
+An older target without the inventory tool is rejected before window-lock
+acquisition for a golden trace with a window verifier. The focused window
+session and replay suites have **79 passed**. These tests cover a terminal
+`window_open` after the old lock becomes unusable, delayed appearance,
+`window_closed` passing after a window genuinely disappears and failing while
+the registered window remains, path-based
+exclusion of a namesake process, role ambiguity, ownership uncertainty and
+MCP run-token routing. At that stage, the full selected offline suite reported
+**2476 passed, 28 deselected**; `compileall`, `git diff --check`, and the
+Skill validator also exited 0. The Windows target status probe on 2026-10-19
+still failed at `stage=probe` with `SSH connection timed out`, so this is not
+yet live EDRClient evidence.
+
+The opt-in local macOS Calculator activation/lock/tree smoke passed once on
+2026-10-19 (`1 passed`, 66.83 s). A second run, extended to assert the new
+inventory tool after focus, failed at strict `focus_window_role` with
+`window_focus_failed` before the inventory assertion; the GUI foreground
+guard was not relaxed. A separate direct product-run probe then called
+`observe_product_windows` without taking a GUI lock and succeeded: it
+returned one registered `main` Calculator window with a native ID, PID,
+title `计算器`, and the expected role, then released the run token. This is
+real macOS inventory evidence, but neither a repeatable focus test nor a
+Windows EDRClient replay pass.
+
+The end–cloud correlation spec now rejects non-finite, boolean or nonnumeric
+polling deadlines and intervals before either provider is read. The cloud
+page/API skew limit has the same validation, avoiding a `NaN` deadline that
+could never expire. The focused provider/checker suite has **35 passed**;
+the full selected offline suite is now **2489 passed, 28 deselected**. The
+11.26 Windows status probe still timed out over SSH in this continuation.
+The browser inventory showed no usable in-app/MCP Apps tab; the Chrome tab
+provider twice returned `nodeRepl.fetch request failed`, so no cloud page or
+API session could be bound. This is a tool-access failure, not evidence that
+the cloud application has no event.
+Native Chrome inspection found the existing `HiSec Endpoint` tab, but its
+saved login URL currently displays `ERR_CONNECTION_CLOSED` for
+`170.170.12.157:31943`; it exposes no page/API event state to compare. The
+tab was accidentally closed during inspection and immediately restored with
+Chrome's reopen-tab shortcut; the original URL is present again. No cloud
+mutation or credential entry was attempted.
+
+On 2026-10-19, an offline check loaded all nine existing golden traces with
+`GoldenTrace.from_dict`; all retained the current action-catalog digest. Three
+traces were ready and six were incomplete. The recorded Windows selectors
+include `HiSecEndpointAgent.exe` / `logo1` for the entry window and
+`EDRClient.exe` / `logo1` for the main window, followed by
+`EDRClient.exe` / `日志中心`. The registered EDRClient profile previously omitted
+`logo1` from the entry and main title patterns, which would have rejected
+these real recorded selectors during product-scoped role resolution. The
+profile now admits that observed title for the corresponding process-bound
+roles; it does not relax the executable-path ownership check. A regression
+test reads the existing traces and resolves their entry, main and log-center
+roles through `WindowSession.observe_product_windows`. The focused suites
+reported **87 passed**; the full selected offline suite reported **2490
+passed, 28 deselected**. `compileall`, `git diff --check`, and the Skill
+validator exited 0. This fixes catalog/recording alignment offline, not a
+live replay success.
+
+On 2026-10-19, negative assertion review found an offline false-pass path:
+`window_closed` and `control_absent` treated a missing or malformed observation
+collection as an empty, valid inventory. They now require a present,
+well-formed window list or control tree before absence can pass. The MCP
+observation provider also rejects malformed control entries instead of
+silently dropping them, so a partially invalid target tree cannot make a
+recorded control look absent. Eight regression cases first reproduced the
+false pass; two provider tests cover both legacy and bundled observations.
+The focused expectation/provider/replay suites reported **123 passed**, and
+the selected offline suite reported **2500 passed, 28 deselected**.
+`compileall`, `git diff --check`, and the Skill validator exited 0. The
+11.26 Windows target was probed again after these changes and still returned
+`stage=probe`, `SSH connection timed out`; no deployment or live replay was
+claimed.
+
+A further 2026-10-19 cross-process replay check found that initial target
+acquisition preferred `golden.environment.application` over the first step's
+own recorded window process. In a flow beginning in the HiSec entry agent but
+labelled with the primary `EDRClient.exe` application, that would lock the
+wrong process before step replay. `golden_entry_scope` now uses the first
+selector's process and title together, falling back to the environment
+application only if the selector lacks a process. A regression test covers
+this entry-agent/main-client split; focused replay, generated-projection and
+CLI suites reported **82 passed**. As an additional read-only artifact check,
+all three locally ready golden traces compiled to test cases and passed
+SHA-256/PNG validation for their existing visual templates in
+`semantic_first` mode. The six locally incomplete traces were not presented
+as runnable cases. The full selected offline suite reported **2501 passed,
+28 deselected**; `compileall`, `git diff --check`, and the Skill validator
+exited 0. This remains offline evidence, not live EDRClient replay.
+
+Another 2026-10-19 recording-evidence review found that protected-control
+redaction caching could be keyed only by PID/title, or by no usable identity
+on the Windows facade. A second top-level window with the same title could
+therefore inherit the first window's sensitive rectangles for the cache TTL.
+The cache now prefers the actual window lock's native handle and PID (or a
+connected snapshot with a native handle); when native identity is unavailable
+it does not reuse cached redactions. Frame capture also checks that this
+identity is unchanged across protected-control enumeration and screenshot;
+it re-enumerates once after a replacement and refuses a frame if the window
+keeps changing. Direct tests cover same-title/different-handle invalidation,
+unknown-identity non-reuse, one successful replacement recovery, and repeated
+replacement refusal. The focused recording-evidence suite reported **34
+passed**. The selected offline suite reported **2505 passed, 28 deselected**;
+`compileall`, `git diff --check`, and the Skill validator exited 0. No live
+target capture was performed in this check.
+
+The next 2026-10-19 end–cloud review reproduced a false-consistency case:
+Python equates `True` with `1`, so a boolean policy state on the cloud page
+could previously pass against a numeric client value, and page/API values of
+those two types could be silently merged. Field comparison now recurses
+through mappings and arrays with boolean-type awareness while retaining
+normal numeric equivalence. The Browser Use reader also requires a distinct
+page evidence reference and API evidence reference, permitting a shared
+session reference but rejecting a duplicated single-read proof. Direct tests
+cover cloud/client and page/API boolean-vs-number disagreement, nested
+values, numeric equivalence, duplicate evidence refusal, and valid shared
+session provenance. The focused consistency/provider suites reported **43
+passed**. The selected offline suite reported **2510 passed, 28 deselected**;
+`compileall`, `git diff --check`, and the Skill validator exited 0. These
+remain provider-contract tests; no live cloud/client comparison is claimed.
+
+The 11.26 target was probed again on 2026-10-19 and still returned
+`stage=probe`, `SSH connection timed out`. Offline time-assertion review then
+checked the user's literal `10:10:0` example: the matcher previously accepted
+only two-digit seconds, so `10:10` did not match that displayed value. It now
+accepts one- or two-digit seconds while retaining strict hour/minute bounds,
+minute-prefix width, explicit duration, midnight wrap and timezone-offset
+exclusion. A record → compile → replay test covers an unpadded second prefix
+with a two-second duration and its exclusive upper boundary. The focused
+time/expectation suite reported **97 passed** before this added end-to-end
+case; the final time-range suite reported **28 passed**. The selected offline
+suite reported **2514 passed, 28 deselected**; `compileall`, `git diff --check`,
+and the Skill validator exited 0. Live EDRClient replay is still unverified.
+
+Another 2026-10-19 deployment review found that both platform lifecycles
+could report `already_running` as successful solely because their managed
+server port was listening, bypassing the required-payload check. Both now
+check target payload integrity before reporting the existing server ready;
+two new regression tests cover missing required files with a listener present.
+The focused deployment/lifecycle suites reported **36 passed**. The selected
+offline suite reported **2516 passed, 28 deselected**; `compileall`,
+`git diff --check`, and the Skill validator exited 0. This verifies required
+files on disk, not that a pre-existing process has loaded the latest code.
+
+An opt-in local macOS Calculator smoke test did not pass its live focus gate:
+`focus_window_role("main")` returned `window_focus_failed`. A direct activation
+probe found Calculator's window and PID, but the observed foreground process
+remained WeChat. The strict window-ownership check was preserved; this run is
+not evidence of successful GUI replay. The 11.26 Windows target and cloud
+session remain unavailable for live EDRClient/end–cloud validation.
+
+Follow-up deployment validation on 2026-10-19 closed the remaining
+`already_running` ambiguity: file presence is not proof that the listener
+loaded those files. Windows and macOS now query the live MCP `tools/list`
+after payload integrity and again after a fresh start. The required set covers
+product runs/window roles, locked observation, action execution, recording,
+and replay capture. A missing tool returns `runtime_capabilities_missing`;
+transport or malformed-response failures return
+`runtime_capability_probe_failed`, with no ready result. The required set was
+checked against the current FastMCP server's actual registered tools; stale,
+healthy, and transport-failure cases have direct tests. The focused
+deployment/lifecycle suites reported **49 passed** and the selected offline
+suite **2522 passed, 28 deselected**. This checks advertised capabilities,
+not an exact process code digest or successful live GUI operation.
+
+The next 2026-10-19 visual-replay check reproduced a coordinate-provenance
+gap: bundle ingestion accepted a redacted screenshot with a missing, malformed
+or unrelated screen origin. The Pillow matcher could then use a wrong origin
+and return an offset template location. Bundle ingestion now requires an
+integer screenshot origin near the locked window's top-left, with a bounded
+32-pixel allowance for UIA versus Win32 frame geometry; an invalid window
+rectangle is also refused. Four negative origin cases and a small-frame-skew
+positive case were added. The focused bundle/replay/template suites reported
+**100 passed**, and the selected offline suite **2527 passed, 28 deselected**.
+The 11.26 status probe in this continuation again returned `stage=probe`,
+`SSH connection timed out`, so no live template or component-ID replay pass
+is claimed from this check.
+
+Later on 2026-10-19, the 11.26 SSH connection and remote identity probe
+recovered. `python3 -m agent.cli --target 11.26-desktop-s917l7s-win10 status`
+now reaches the host but returns `code=python_not_found`: the configured
+Python 3.11 executable path does not exist. Read-only remote checks found no
+`python.exe` or `py.exe` on PATH, no Python installation at the configured
+per-user directory, no `python.exe` in the first two levels beneath Program
+Files, and no MCP listener on port 8765. A broad per-user recursive search
+timed out without output, so this is not proof that Python is absent from the
+entire machine. Live deployment/replay is gated on an operator-provided valid
+Python path or installation; no remote files or services were changed.
+
+An offline end–cloud review on 2026-10-19 reproduced a false-consistency
+case: provider mappings could include additional event timestamps, but
+normalization discarded them, allowing a current observation time to hide a
+stale client log or cloud page/API event. Provider normalization now parses
+and validates optional timezone-aware `supporting_times`; the cloud reader
+retains each side's declared event times and `check_consistency()` checks all
+of them against the requested device/policy time window. Three regression
+tests first failed for dropped page/API times, a stale client event, and a
+naive client timestamp; the focused suite then reported **43 passed**. The
+selected offline suite reported **2530 passed, 28 deselected**. This remains
+provider-contract evidence, not a live cloud/EDRClient comparison.
+
+## Next gate
+
+On 2026-10-19, the cloud endpoint responded to read-only probes (`HTTP 200`
+on the HTTP root and `HTTP 302` on the HTTPS root with certificate verification
+disabled for the probe). The existing Chrome console tab still displayed
+`ERR_CONNECTION_CLOSED`, and a refresh could not attach to that tab. This is
+only network reachability evidence: there is no authenticated page/API read,
+and no end–cloud comparison or live replay pass is claimed.
+
+The next locator review reproduced two false-selection paths before the fix:
+duplicate visual detections of one candidate could outvote a stronger unique
+match elsewhere, and a low-confidence overlap on the sole semantic control
+could mask a high-confidence conflicting visual location. Fusion now uses at
+most the strongest visual and strongest OCR hit per candidate; conflict
+checking counts only visual hits meeting the policy threshold. OCR evidence
+also requires a redacted window capture and an OCR rectangle fully inside
+the locked window, matching the existing visual-evidence boundary. Four new
+negative/regression tests failed before the corrections and passed after;
+the focused hybrid/live/replay/OCR suite reported **98 passed**. The selected
+offline suite reported **2534 passed, 28 deselected**; `compileall`, `git
+diff --check`, and the Skill validator exited 0. These are synthetic
+candidate tests, not live matching or replay stability evidence.
+
+The same day's 11.26 status probe reached SSH but still returned
+`python_not_found` for the configured Python 3.11 path. A bounded read-only
+probe of common system, Conda, user and WindowsApps interpreter paths found
+no `python.exe`; it does not prove absence from every directory. No remote
+installation or configuration change was made.
+
+A further recording-to-replay check on 2026-10-19 found that `record stop`
+binds the target's app profile to the golden trace, while CLI `replay` used
+the literal `default` when `--profile` was omitted. That rejected a normally
+recorded EDRClient trace before execution. CLI replay now resolves the same
+target app profile from the shared config; the generated pytest fixture uses
+the golden binding or, for an unbound trace, the target app profile. A bound
+profile mismatch is rejected inside `build_replay_runtime()` before any
+target tool call, including when a generated fixture supplies an override.
+The four direct cases failed before correction and now pass; the focused
+replay/generated-adhoc/CLI suite reported **84 passed**. The selected offline
+suite reported **2536 passed, 28 deselected**; `compileall`, `git diff
+--check`, and the Skill validator exited 0. This closes a default-path
+rejection, but no 11.26 replay success is claimed.
+
+When a target is reachable, run target status/identity probe, deploy via the
+normal repair path, then perform the live checks above. If the cloud session
+is available, bind the Browser Use page and API reads to
+`BrowserUseCloudReader` and the locked EDR-WD observation to
+`EDRWDClientReader`; use the same device/policy IDs and explicit event-time
+window. Do not store raw page content, credentials or screenshots in the
+comparison fields.
+
+On 2026-10-19, a cross-window assertion review reproduced a recording bug:
+opening the assertion editor by Ctrl+Shift+A in 日志中心 still authored the
+assertion against the entry EDRClient window. The session now carries the
+hotkey event's product-window identity into the assertion event, including
+the UIA root ID when present; the CLI editor uses the last recorded window
+or a newly opened window transition before its first click. Window-wide and
+control-ID time-range assertion regressions, including the before-first-click
+case, failed before correction and now pass. The focused recording/compiler
+suite reported **134 passed**, and the selected offline suite reported
+**2540 passed, 28 deselected**. `compileall`, `git diff --check`, and the Skill
+validator exited 0. This confirms selector projection in synthetic capture,
+not live 11.26 replay. A verifier explicitly bound to a previous action in
+a different window still needs separate cross-window execution validation;
+the default assertion editor leaves `bindPrevious` off.
+
+The next 2026-10-19 replay check reproduced the remaining explicit-binding
+gap: a `bindPrevious=true` content assertion in 日志中心 was folded into an
+EDRClient action step, so the verifier read the old window. The compiler now
+emits a separate observe-only step whenever a causally bound content
+assertion carries a different recorded window identity, while retaining its
+causal proof for scroll/drag verifier requirements. Source-event alignment
+for visual artifacts follows the same split. Tests cover control-ID and
+window-wide time-range assertions, a verifier-required scroll, and the
+replay executor focusing the log window without repeating the click. The
+focused compiler/replay/time suite reported **184 passed**; the selected
+offline suite reported **2545 passed, 28 deselected**. `compileall`, `git
+diff --check`, and the Skill validator exited 0. The 11.26 status probe still
+reached SSH but returned `python_not_found` at its configured interpreter
+path; no live replay or end-cloud comparison is claimed.
+
+A further 2026-10-19 identity check found that two windows with one title and
+process but different recorded HWNDs, and no root UIA identity, were folded
+into one apparently ready bound-assertion step. The compiler now uses HWNDs
+only to recognize this in-session distinction: it separates the assertion
+step, then marks the trace `compile_window_identity_ambiguous`/incomplete if
+both windows still have the same stable replay selector. With distinct
+`rootAutomationId` values, the two-step trace remains ready and selects each
+window by its stable root; HWND is absent from both selectors. Both cases
+were regression-tested, giving **186 passed** in the focused
+compiler/replay/time suite and **2547 passed, 28 deselected** in the selected
+offline suite. `compileall`, `git diff --check`, and the Skill validator
+exited 0. These results establish fail-closed compilation, not a live
+same-title-window replay pass.
+
+On the next 2026-10-19 assertion-evaluator review, five negative tests
+reproduced false passes from missing control selectors: with one unrelated
+control in the snapshot, `control_exists`, text equality and time-range
+assertions selected it implicitly; an empty `control_absent` selector also
+passed on an empty inventory. A state-only filter such as `checked=false`
+was likewise accepted as a control identity. Control evaluators now require
+an explicit, non-empty widget selector with an identity field before
+matching; negative assertions fail on invalid selectors even when no
+controls are present. A duplicate-component-ID time assertion regression
+also confirms that one matching duplicate cannot pass. The focused
+expectations/time/replay suite reported **164 passed**, the selected offline
+suite **2554 passed, 28 deselected**, and `compileall`, `git diff --check`,
+and Skill validation exited 0. This is offline evaluator evidence, not an
+11.26 live assertion pass.
