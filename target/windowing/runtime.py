@@ -222,7 +222,7 @@ class WindowSession:
                 raise WindowIdentityError("window_selector_not_found")
             if len(candidates) != 1:
                 raise WindowIdentityError("window_selector_ambiguous")
-            if self.backend_kind == "windows_pywinauto" and not callable(
+            if self.backend_kind in {"windows_pywinauto", "macos_accessibility"} and not callable(
                 getattr(self.backend, "connect_window_identity", None)
             ):
                 raise WindowIdentityError("window_identity_unavailable")
@@ -231,7 +231,7 @@ class WindowSession:
     def _focus_and_lock_identity(self, identity: WindowIdentity) -> WindowIdentity:
         title_re = "^" + re.escape(identity.title) + "$" if identity.title else None
         exact_connect = getattr(self.backend, "connect_window_identity", None)
-        if self.backend_kind == "windows_pywinauto" and callable(exact_connect):
+        if self.backend_kind in {"windows_pywinauto", "macos_accessibility"} and callable(exact_connect):
             connected = exact_connect(int(identity.native_id), identity.process_id)
         else:
             connected = self.backend.connect(pid=identity.process_id, title_re=title_re,

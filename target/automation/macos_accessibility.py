@@ -221,6 +221,15 @@ class MacOSAccessibilityBackend:
             "title": parts[2] if len(parts) > 2 else "",
         }
         lock = getattr(self, "_window_lock", None)
+        if isinstance(lock, dict) and lock.get("handle") is not None:
+            # System Events exposes only a title. Resolve the frontmost native
+            # window from CG z-order so equal-title siblings cannot satisfy
+            # one another's exact lock. Missing CG evidence fails closed.
+            for window in self._cg_window_zorder():
+                if (window.get("pid") == state["pid"]
+                        and window.get("title") == state["title"]):
+                    state["handle"] = window.get("number")
+                    break
         if isinstance(lock, dict) and not self._state_matches_lock(state, lock):
             # System Events' "frontmost process" tracks which app owns the
             # menu bar/Dock focus. A tray-style agent (LSUIElement /
@@ -313,9 +322,12 @@ class MacOSAccessibilityBackend:
         lock_pid = lock.get("pid")
         snapshot = lock.get("snapshot") if isinstance(lock.get("snapshot"), dict) else {}
         title = str(snapshot.get("title") or "")
+        handle = lock.get("handle")
         target = None
         target_index = None
         for index, window in enumerate(zorder):
+            if handle is not None and window.get("number") != handle:
+                continue
             if lock_pid is not None and window["pid"] != lock_pid:
                 continue
             if title and window["title"] and window["title"] != title:
@@ -330,6 +342,10 @@ class MacOSAccessibilityBackend:
         tx, ty, tw, th = target["rect"]
         for window in zorder[:target_index]:
             if window["pid"] == target["pid"]:
+                if handle is not None:
+                    ox, oy, ow, oh = window["rect"]
+                    if ox < tx + tw and ox + ow > tx and oy < ty + th and oy + oh > ty:
+                        return None
                 continue  # another window of the same app stacked in front
             if window["pid"] in chrome_pids:
                 # Dock registers a desktop-spanning CGWindowList entry for
@@ -345,6 +361,7 @@ class MacOSAccessibilityBackend:
             "process_name": str(process_name),
             "pid": target["pid"],
             "title": target["title"],
+            "handle": target["number"],
             "matched_by": "cg_zorder_unoccluded",
         }
 
@@ -375,8 +392,11 @@ class MacOSAccessibilityBackend:
         pid = snapshot.get("pid") or getattr(self, "_connected_pid", None)
         owner = str(snapshot.get("owner") or getattr(self, "_connected_app", None) or "").lower()
         title = str(snapshot.get("title") or "")
+        handle = snapshot.get("handle")
         candidates = []
         for window in self._list_windows_cg():
+            if handle is not None and window.get("handle") != handle:
+                continue
             rectangle = window.get("rectangle")
             if not isinstance(rectangle, dict):
                 continue
@@ -421,6 +441,8 @@ class MacOSAccessibilityBackend:
                     return False
             except re.error:
                 return False
+        if lock.get("handle") is not None and state.get("handle") != lock["handle"]:
+            return False
         return True
 
     def _activate_locked_window(self) -> dict:
@@ -2110,6 +2132,32 @@ print(String(data: data, encoding: .utf8) ?? "[]")
             return {"ok": True, "matched": "title_re", "pid": self._connected_pid}
 
         return {"ok": False, "error": "connect: must specify pid, bundle_id, process_name, app_name, or title_re"}
+
+    def connect_window_identity(self, handle: int, pid: Optional[int] = None) -> dict:
+        """Bind a CGWindowNumber, never a same-title sibling."""
+        listed = self.list_windows()
+        if not listed.get("ok"):
+            return {"ok": False, "code": "window_identity_unavailable",
+                    "error": listed.get("error") or "window enumeration failed"}
+        matches = [window for window in listed.get("windows", ())
+                   if window.get("handle") == handle
+                   and (pid is None or window.get("pid") == pid)]
+        if len(matches) != 1:
+            return {"ok": False, "code": "window_identity_ambiguous" if matches else
+                    "window_identity_unavailable"}
+        matched = matches[0]
+        self._connected_pid = matched.get("pid")
+        self._connected_app = matched.get("app_name")
+        self._connected_window_snapshot = {
+            "pid": matched.get("pid"),
+            "title": matched.get("window_title") or "",
+            "owner": matched.get("app_name") or "",
+            "rectangle": matched.get("rectangle"),
+            "handle": handle,
+        }
+        self._connected_app_instance = _MacOSConnectedApp(self)
+        return {"ok": True, "matched": "window_identity", "handle": handle,
+                "pid": self._connected_pid}
 
     def _connected_process_name(self) -> Optional[str]:
         app_name = getattr(self, "_connected_app", None)

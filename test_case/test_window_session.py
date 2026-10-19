@@ -252,6 +252,33 @@ def test_macos_role_uses_pid_process_name_not_localized_cg_owner():
     assert identity.title == "计算器"
 
 
+def test_macos_focus_routes_through_exact_native_identity(monkeypatch):
+    class ExactBackend:
+        def __init__(self):
+            self.connected = None
+
+        def connect_window_identity(self, handle, pid):
+            self.connected = (handle, pid)
+            return {"ok": True}
+
+        def connect(self, **_kwargs):
+            raise AssertionError("title-only connection must not be used")
+
+        def lock_window(self, **_kwargs):
+            return {"ok": True}
+
+    backend = ExactBackend()
+    session = WindowSession("s", "macos_accessibility", backend)
+    identity = WindowIdentity(
+        session_id="s", backend="macos_accessibility", native_id="202",
+        process_id=42, process_name="EDRClient", title="日志中心",
+        rect=(300, 0, 400, 100),
+    )
+    monkeypatch.setattr(session, "bind_backend_lock", lambda: identity)
+    assert session._focus_and_lock_identity(identity) == identity
+    assert backend.connected == (202, 42)
+
+
 def test_product_window_inventory_is_path_owned_and_sees_unlocked_child():
     cap = get_capability("windows_hisec", "windows_pywinauto")
     backend = FakeBackend()

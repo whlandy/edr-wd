@@ -735,3 +735,19 @@ lifecycle/repair suites reported **7 passed** and the selected offline
 suite **2593 passed, 28 deselected**, still green including an
 in-progress, untouched concurrent work-in-progress in the macOS
 accessibility path. 11.26 re-probed: still `python_not_found`.
+
+Tenth 2026-10-20 round: after the same-title macOS inventory fix,
+`WindowSession` now connects a selected macOS window by its native
+CGWindowID, not by PID/title. Its lock verification resolves the frontmost
+native ID from CG z-order and rejects a same-title sibling; a background-only
+agent's visibility fallback also requires the exact native ID and rejects
+an overlapping same-process sibling. Screenshot rectangle refresh uses the
+connected native ID rather than treating equal-title windows as ambiguous.
+Six new focused tests cover exact connection, PID and duplicate rejection,
+frontmost lock mismatch, exact screenshot bounds, same-process occlusion,
+and session routing. The focused macOS/window-session suite reports **44
+passed**; selected offline suite **2599 passed, 28 deselected**.
+`compileall`, `git diff --check`, and Skill validation exited 0. This is
+offline fail-closed evidence, not proof that macOS activation can raise a
+specific same-title sibling or that live EDRClient replay succeeds. The
+11.26 Python runtime and authenticated cloud gates remain open.

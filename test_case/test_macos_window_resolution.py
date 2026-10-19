@@ -222,6 +222,23 @@ def test_connect_by_pid_refuses_missing_or_duplicate_windows(monkeypatch):
     assert backend.connect(pid=42, title_re="^计算器$")["code"] == "window_identity_ambiguous"
 
 
+def test_connect_by_native_identity_selects_same_title_sibling(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    windows = [
+        {"pid": 42, "handle": handle, "window_title": "日志中心",
+         "app_name": "EDRClient", "rectangle": {"x": x, "y": 0, "w": 100, "h": 100}}
+        for handle, x in ((101, 0), (202, 300))
+    ]
+    monkeypatch.setattr(backend, "list_windows", lambda: {"ok": True, "windows": windows})
+
+    assert backend.connect_window_identity(202, 42)["ok"] is True
+    assert backend._connected_window_snapshot["handle"] == 202
+    assert backend._connected_window_snapshot["rectangle"]["x"] == 300
+    assert backend.connect_window_identity(202, 43)["code"] == "window_identity_unavailable"
+    windows.append(dict(windows[1]))
+    assert backend.connect_window_identity(202, 42)["code"] == "window_identity_ambiguous"
+
+
 def test_window_lock_uses_pid_as_canonical_process_identity():
     backend = MacOSAccessibilityBackend()
 
@@ -238,6 +255,30 @@ def test_window_lock_uses_pid_as_canonical_process_identity():
             "title_re": "^HiSec Endpoint$",
         },
     )
+
+
+def test_native_window_lock_rejects_same_title_sibling():
+    backend = MacOSAccessibilityBackend()
+    lock = {"pid": 42, "title_re": "^日志中心$", "handle": 202}
+    state = {"ok": True, "pid": 42, "title": "日志中心", "handle": 101}
+    assert backend._state_matches_lock(state, lock) is False
+    assert backend._state_matches_lock({**state, "handle": 202}, lock) is True
+    assert backend._state_matches_lock({k: v for k, v in state.items() if k != "handle"}, lock) is False
+
+
+def test_frontmost_resolves_native_identity_from_cg_zorder(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    backend._window_lock = {"pid": 42, "title_re": "^日志中心$", "handle": 202,
+                            "process_name": "EDRClient"}
+    monkeypatch.setattr(macos_accessibility, "_run_osascript",
+                        lambda _script, timeout=5: (0, "EDRClient\t42\t日志中心"))
+    monkeypatch.setattr(backend, "_cg_window_zorder", lambda: [
+        {"pid": 42, "title": "日志中心", "number": 101},
+        {"pid": 42, "title": "日志中心", "number": 202},
+    ])
+    monkeypatch.setattr(backend, "_locked_window_visible_state", lambda _lock: None)
+    assert backend._frontmost_window_state()["handle"] == 101
+    assert backend.verify_window_lock(activate=False)["ok"] is False
 
 
 def test_recording_screenshot_rectangle_must_come_from_matching_cg_window(monkeypatch):
@@ -282,6 +323,20 @@ def test_recording_screenshot_rectangle_fails_closed_without_matching_window(mon
 
     assert backend._refresh_connected_window_rectangle() is False
     assert backend._connected_window_snapshot.get("rectangle_verified") is not True
+
+
+def test_recording_screenshot_rectangle_uses_exact_native_identity(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    backend._connected_pid = 42
+    backend._connected_window_snapshot = {"pid": 42, "title": "日志中心",
+                                          "owner": "EDRClient", "handle": 202}
+    monkeypatch.setattr(backend, "_list_windows_cg", lambda: [
+        {"pid": 42, "handle": handle, "window_title": "日志中心",
+         "rectangle": {"x": x, "y": 0, "w": 100, "h": 100}}
+        for handle, x in ((101, 0), (202, 300))
+    ])
+    assert backend._refresh_connected_window_rectangle() is True
+    assert backend._connected_window_snapshot["rectangle"]["x"] == 300
 
 
 def test_list_windows_enriches_system_events_window_with_cg_rectangle(monkeypatch):
@@ -408,6 +463,20 @@ def test_a_background_only_window_lock_verifies_by_z_order(monkeypatch):
     assert state is not None
     assert state["process_name"] == "HiSecEndpointAgent"
     assert state["matched_by"] == "cg_zorder_unoccluded"
+
+
+def test_background_only_exact_lock_rejects_overlapping_same_app_sibling(monkeypatch):
+    backend = MacOSAccessibilityBackend()
+    lock = {**_lock(pid=42, process="EDRClient", title="日志中心"), "handle": 202}
+    monkeypatch.setattr(backend, "_is_background_only", lambda _name: True)
+    monkeypatch.setattr(backend, "_desktop_chrome_pids", lambda: set())
+    monkeypatch.setattr(backend, "_cg_window_zorder", lambda: [
+        {"pid": 42, "title": "日志中心", "number": 101,
+         "rect": (0.0, 0.0, 100.0, 100.0)},
+        {"pid": 42, "title": "日志中心", "number": 202,
+         "rect": (0.0, 0.0, 100.0, 100.0)},
+    ])
+    assert backend._locked_window_visible_state(lock) is None
 
 
 def test_a_genuinely_covered_background_window_is_not_treated_as_locked(monkeypatch):
