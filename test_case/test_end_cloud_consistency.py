@@ -130,6 +130,37 @@ def test_both_pending_report_each_reason_and_evidence():
     assert result.client_evidence == ("edrwd:OBS-1",)
 
 
+def test_timeout_keeps_last_nonempty_evidence_when_both_reads_turn_pending():
+    current = [0.0]
+    attempts = [0]
+
+    def cloud():
+        attempts[0] += 1
+        if attempts[0] > 1:
+            raise SnapshotPending("cloud", "page_temporarily_unavailable")
+        return _snapshot("cloud", True)
+
+    def client():
+        if attempts[0] > 1:
+            raise SnapshotPending("client", "log_temporarily_unavailable")
+        return _snapshot("client", False)
+
+    result = check_consistency(
+        _spec(max_wait_seconds=1), fetch_cloud=cloud, fetch_client=client,
+        clock=lambda: current[0],
+        sleep=lambda seconds: current.__setitem__(0, current[0] + seconds),
+    )
+
+    assert not result.passed and result.code == "consistency_timeout"
+    assert result.attempts == 2
+    assert result.differences == (
+        {"field": "cloud", "reason": "page_temporarily_unavailable"},
+        {"field": "client", "reason": "log_temporarily_unavailable"},
+    )
+    assert result.cloud_evidence == ("cloud:evidence-1",)
+    assert result.client_evidence == ("client:evidence-1",)
+
+
 def test_identity_mismatch_fails_closed_without_waiting():
     result = check_consistency(
         _spec(), fetch_cloud=lambda: _snapshot("cloud", True),

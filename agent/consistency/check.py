@@ -155,7 +155,10 @@ def check_consistency(
         except SnapshotPending as not_ready:
             if not_ready.source != "cloud":
                 raise ValueError("consistency_snapshot_invalid") from not_ready
-            last_cloud_evidence = not_ready.evidence_refs
+            # A transient empty pending response does not erase the last
+            # concrete reference needed to investigate a timeout.
+            if not_ready.evidence_refs:
+                last_cloud_evidence = not_ready.evidence_refs
             pending.append(not_ready)
         # Read both sides on every attempt: a pending cloud page must not
         # erase the client evidence needed to explain a synchronization timeout.
@@ -168,7 +171,8 @@ def check_consistency(
         except SnapshotPending as not_ready:
             if not_ready.source != "client":
                 raise ValueError("consistency_snapshot_invalid") from not_ready
-            last_client_evidence = not_ready.evidence_refs
+            if not_ready.evidence_refs:
+                last_client_evidence = not_ready.evidence_refs
             pending.append(not_ready)
         for snapshot in (cloud, client):
             if snapshot is not None and (

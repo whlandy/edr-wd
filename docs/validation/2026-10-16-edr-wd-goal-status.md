@@ -623,6 +623,19 @@ recovery), so the review found no remaining false-pass gap in this area.
 No code change this round; the recording suite was re-run and stayed
 green.
 
+End-cloud evidence follow-up (2026-10-20): a transient no-reference
+`SnapshotPending` response on the final polling attempt overwrote earlier
+page/client evidence references with empty tuples. A two-attempt regression
+first reproduced this: an initial field mismatch produced both references,
+then both sources became pending without new references and the timeout lost
+them. `check_consistency()` now retains each side's last non-empty refs while
+still reporting the latest pending reason; it never turns pending into a pass.
+The focused consistency suite reports **44 passed**, the selected offline
+suite **2586 passed, 28 deselected**, and `compileall`, `git diff --check`,
+and Skill validation exited 0. This is offline evidence only: authenticated
+Browser Use data and 11.26 EDRClient observations have not yet been compared
+live.
+
 Seventh 2026-10-20 round: the tree held an uncommitted, complete
 changeset in the live-visual area that was preserved and committed
 rather than reworked. The guard: a selector carrying no semantic
