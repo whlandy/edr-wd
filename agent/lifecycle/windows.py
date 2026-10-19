@@ -910,11 +910,17 @@ class WindowsLifecycle:
             uploaded.append(script)
 
         task_name = win_cfg.get("task_name", "StartEDRMCP")
+        # The remote command runs under cmd.exe (Windows OpenSSH's default
+        # shell), which passes single quotes through verbatim; double quotes
+        # are stripped by cmd before PowerShell parses the arguments. The
+        # PowerShell-side paths use pure-backslash Windows form.
+        ps_scripts = remote_scripts.replace("/", "\\")
+        ps_root = target_root.replace("/", "\\")
         install_cmd = (
-            f"powershell -NoProfile -ExecutionPolicy Bypass -File "
-            f"'{remote_scripts}\\install_task.ps1' "
-            f"-TaskName '{task_name}' "
-            f"-TargetRoot '{target_root}'"
+            f'powershell -NoProfile -ExecutionPolicy Bypass -File '
+            f'"{ps_scripts}\\install_task.ps1" '
+            f'-TaskName "{task_name}" '
+            f'-TargetRoot "{ps_root}"'
         )
         rc, out = run_ssh(ssh_cfg, install_cmd, timeout=30)
         if rc != 0:

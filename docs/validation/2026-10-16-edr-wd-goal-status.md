@@ -517,3 +517,26 @@ record→compile→replay duration-preservation test cover the remaining
 paths. No code change was required; the offline baseline remains
 **2562 passed, 28 deselected**. The 11.26 Python gate still awaits the
 operator action recorded in the previous entry.
+
+Fourth 2026-10-20 round: the normal repair path was run against 11.26
+(now SSH-reachable). `deploy` passed (payload uploaded to
+`C:\Users\admin\Desktop\edr-wd`, required files verified). `install`
+reproduced a real quoting defect: `install_cmd` wrapped `-File` /
+`-TaskName` / `-TargetRoot` in single quotes, but the Windows OpenSSH
+default shell (cmd.exe) passes single quotes through verbatim, so
+PowerShell received literal quote characters inside the path and
+refused it with "The format of the path is not supported"
+(`stage=install`, `task_registration_failed`). `install_cmd` now uses
+double quotes (stripped by cmd before PowerShell parses the arguments)
+and pure-backslash Windows paths on the PowerShell side; two regression
+tests capture the constructed command, first failing on the old form and
+passing after the fix. The focused lifecycle/repair suites reported
+**32 passed**; the selected offline suite reported **2564 passed,
+28 deselected**; `compileall` and `git diff --check` exited 0. The live
+repair rerun verified the fix: `deploy` ok, the `StartEDRMCP` scheduled
+task registered with the correct TargetRoot and start script, and
+`ensure_server_running` now reaches the launch attempt and fails with
+`server_start_timeout` (port 8765 did not open within 20s). The
+remaining live gate is unchanged: the host has no Python, so the MCP
+server cannot start until an operator installs Python 3.11 (or provides
+a different interpreter path). No other remote change was made.
