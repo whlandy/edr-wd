@@ -61,9 +61,11 @@ class PillowTemplateMatcher:
             if isinstance(observation, Mapping)
             else getattr(observation, "screenshot_origin", [0, 0])
         )
-        if not isinstance(origin, (list, tuple)) or len(origin) != 2:
-            origin = [0, 0]
-        offset_x, offset_y = int(origin[0]), int(origin[1])
+        if (not isinstance(origin, (list, tuple)) or len(origin) != 2
+                or not all(isinstance(value, int) and not isinstance(value, bool)
+                           for value in origin)):
+            return []
+        offset_x, offset_y = origin
         search_rect = (
             observation.get("search_rect") if isinstance(observation, Mapping) else None
         )

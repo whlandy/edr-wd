@@ -562,3 +562,26 @@ cases fail before the fix and pass after; a positive control proves the
 fixture itself is promotable. The focused and selected offline suites
 reported **2571 passed, 28 deselected**; `compileall` and
 `git diff --check` exited 0.
+
+Sixth 2026-10-20 round: a further visual-replay trust-boundary check found
+that `PillowTemplateMatcher` silently replaced a malformed explicit
+`screenshot_origin` with `(0, 0)` (or coerced strings/bools to integers).
+That could project an otherwise high-confidence template hit to the wrong
+screen coordinate when a caller supplied a damaged observation. Four
+parameterized negative cases reproduced the old behavior before the fix.
+The matcher now returns no candidates for a malformed explicit origin;
+omitted origin still means `(0, 0)` for deliberately local matcher use,
+while the MCP window-bundle path independently requires and validates its
+origin. The focused visual/evidence suite reports **56 passed**; the
+selected offline suite reports **2575 passed, 28 deselected**.
+`compileall`, `git diff --check`, and Skill validation exited 0. This
+adds offline fail-closed evidence only; the live 11.26 replay gate is
+unchanged because the configured Python 3.11 executable is absent.
+
+A follow-up replay-chain test drives the real Pillow matcher through
+`SafeVisualResolver` with a damaged origin and verifies that no guarded
+click is materialized (`visual_match_low_confidence`). The visual-template
+suite reports **23 passed** and the selected offline suite **2576 passed,
+28 deselected**. A fresh read-only 11.26 status probe confirms SSH still
+connects as `desktop-s917l7s\\admin` but the configured Python 3.11 path
+still returns `python_not_found`; this is not live replay evidence.

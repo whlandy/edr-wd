@@ -82,6 +82,49 @@ def test_pillow_matcher_projects_window_local_pixels_to_screen_coordinates(tmp_p
     assert matches[0].rect == (110, 215, 130, 235)
 
 
+@pytest.mark.parametrize("bad_origin", [[100], [100, "200"], [True, 200], None])
+def test_pillow_matcher_rejects_malformed_explicit_screenshot_origin(tmp_path, bad_origin):
+    screenshot = tmp_path / "window.png"
+    template = tmp_path / "template.png"
+    image = Image.new("RGB", (40, 40), "white")
+    ImageDraw.Draw(image).rectangle((10, 10, 19, 19), fill="blue")
+    image.save(screenshot)
+    image.crop((10, 10, 20, 20)).save(template)
+
+    matches = PillowTemplateMatcher(scales=(1.0,))(str(template), {
+        "screenshot_path": str(screenshot), "screenshot_origin": bad_origin,
+    })
+
+    assert matches == []
+
+
+def test_visual_replay_does_not_click_with_malformed_capture_origin(tmp_path):
+    screenshot = tmp_path / "window.png"
+    template = tmp_path / "template.png"
+    image = Image.new("RGB", (40, 40), "white")
+    ImageDraw.Draw(image).rectangle((10, 10, 19, 19), fill="blue")
+    image.save(screenshot)
+    image.crop((10, 10, 20, 20)).save(template)
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe"}, control={},
+        visual={"template": str(template), "elementSha256": "sha256:" + "a" * 64,
+                "redacted": True},
+    )
+    resolver = SafeVisualResolver(
+        PillowTemplateMatcher(scales=(1.0,)),
+        template_verifier=lambda _path, _visual: True,
+    )
+
+    with pytest.raises(StepMaterializationError) as exc:
+        resolver.resolve("gui.click", selector, {
+            "screenshot_path": str(screenshot), "screenshot_origin": [100],
+            "screenshot_scope": "window", "screenshot_redacted": True,
+            "active_window": {"rect": [0, 0, 40, 40]},
+        })
+
+    assert exc.value.code == "visual_match_low_confidence"
+
+
 def test_pillow_matcher_search_rect_respects_screenshot_origin(tmp_path):
     screenshot = tmp_path / "window.png"
     template = tmp_path / "target.png"
