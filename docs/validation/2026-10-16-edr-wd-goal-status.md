@@ -586,6 +586,22 @@ suite reports **23 passed** and the selected offline suite **2576 passed,
 connects as `desktop-s917l7s\\admin` but the configured Python 3.11 path
 still returns `python_not_found`; this is not live replay evidence.
 
+Seventh 2026-10-20 round: the shared `HybridLocator.collect_candidates()`
+treated an empty or non-identifying control selector as matching every
+control. In a live image-only action on a window with exactly one unrelated
+control, a failed template match could therefore become a false semantic
+click. Four initial regression cases failed on the old behavior. The locator
+now requires a non-empty supported control field or a meaningful ancestry
+path before considering semantic candidates; malformed/empty ancestry is
+not an identity. A positive ancestry-only case preserves that legitimate
+lookup. The live executor regression verifies a weak template yields
+`locator_low_confidence` with no materialized step, while a replay-chain
+case confirms image-only golden replay already fails closed through its
+visual-only branch. The focused locator/live/replay suite reports **108
+passed**; the selected offline suite reports **2585 passed, 28 deselected**.
+`compileall`, `git diff --check`, and Skill validation exited 0. The 11.26
+live replay and authenticated end-cloud comparison gates remain open.
+
 Sixth 2026-10-20 round: the cross-window recording path was reviewed
 end to end. Compiler side: a causally bound assertion whose recorded
 window differs from the action's window keeps its own observe-only step

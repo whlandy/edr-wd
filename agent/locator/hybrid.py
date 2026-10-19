@@ -62,6 +62,19 @@ def _confidence(item: Mapping) -> float:
 
 class HybridLocator:
     def collect_candidates(self, request: LocatorRequest, bundle: Mapping) -> tuple[LocatorCandidate, ...]:
+        # A visual-only selector must not turn the sole unrelated control in
+        # the tree into a semantic hit when its template is absent or weak.
+        ancestry = request.control.get("ancestry")
+        if ancestry and (not isinstance(ancestry, (list, tuple)) or not all(
+            isinstance(item, Mapping) and any(value not in (None, "")
+                                              for value in item.values())
+            for item in ancestry
+        )):
+            return ()
+        if not (any(request.control.get(key) not in (None, "") for key in
+                    ("automationId", "identifier", "controlType", "name"))
+                or ancestry):
+            return ()
         observation_id = str(bundle.get("observation_id") or bundle.get("snapshot_id") or "")
         window = bundle.get("window_identity") or {}
         native_id = str(window.get("native_id") or "legacy")

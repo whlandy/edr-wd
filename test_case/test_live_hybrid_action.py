@@ -1,5 +1,8 @@
 """Live semantic and visual paths materialize through one locator/executor."""
 
+import pytest
+
+from agent.execution import StepMaterializationError
 from agent.interaction.runtime import execute_live_action
 from agent.locator import LocatorPolicy, LocatorRequest
 from agent.recording.visual import SafeVisualResolver, VisualCandidate
@@ -67,3 +70,26 @@ def test_live_action_collects_template_evidence_from_fresh_window_observation():
     )
     assert step.action_id == "pointer.click_window"
     assert step.args["x"] == 40 and step.args["y"] == 40
+
+
+def test_live_image_only_click_rejects_sole_control_when_template_has_no_hit():
+    executor = CapturingExecutor(_bundle([{
+        "target_id": "T1", "process_name": "Demo", "window_title": "Main",
+        "text": "Cancel", "rect": [40, 50, 80, 90],
+    }]))
+    resolver = SafeVisualResolver(
+        lambda _template, _observation: [],
+        template_verifier=lambda _template, _visual: True,
+    )
+
+    with pytest.raises(StepMaterializationError) as exc:
+        execute_live_action(
+            LocatorRequest("gui.click", {"processName": "Demo"}, {}),
+            executor=executor, profile="macos_generic",
+            visual_selector={"template": "reviewed/open.png", "redacted": True,
+                             "elementSha256": "sha256:" + "a" * 64},
+            visual_resolver=resolver,
+        )
+
+    assert exc.value.code == "locator_low_confidence"
+    assert executor.step is None

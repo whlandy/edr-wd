@@ -38,6 +38,46 @@ def test_unique_semantic_and_planner_have_same_candidate_ids():
     assert {item["target_id"] for item in candidate_view(bundle, _request())} == {"T1"}
 
 
+def test_image_only_selector_cannot_inherit_an_unrelated_single_control():
+    bundle = _bundle([_control("T1", [0, 0, 30, 30])])
+    request = LocatorRequest("gui.click", {"processName": "Demo"}, {})
+    locator = HybridLocator()
+
+    assert locator.collect_candidates(request, bundle) == ()
+    with pytest.raises(LocatorError, match="locator_low_confidence"):
+        locator.resolve(request, bundle, LocatorPolicy(mode="semantic_first"))
+
+    matched = locator.resolve(
+        request, bundle, LocatorPolicy(mode="semantic_first"),
+        visual_candidates=(_visual([50, 0, 80, 30]),),
+    )
+    assert matched.method == "visual"
+    assert matched.candidate is None
+    assert matched.point == (65, 15)
+
+
+@pytest.mark.parametrize("control", [{"automationId": ""}, {"unknown": "value"},
+                                      {"ancestry": []}, {"ancestry": "Window"},
+                                      {"ancestry": [{}]}])
+def test_non_identifying_selector_does_not_match_every_control(control):
+    item = _control("T1", [0, 0, 30, 30])
+    item["ancestry"] = [{"controlType": "Pane"}] * 8
+    bundle = _bundle([item])
+    request = LocatorRequest("gui.click", {"processName": "Demo"}, control)
+    assert HybridLocator().collect_candidates(request, bundle) == ()
+
+
+def test_ancestry_only_selector_remains_a_semantic_candidate():
+    item = _control("T1", [0, 0, 30, 30])
+    item["ancestry"] = [{"controlType": "Pane", "name": "Toolbar"}]
+    request = LocatorRequest("gui.click", {"processName": "Demo"},
+                             {"ancestry": [{"controlType": "Pane", "name": "Toolbar"}]})
+
+    assert tuple(candidate.target_id for candidate in HybridLocator().collect_candidates(
+        request, _bundle([item])
+    )) == ("T1",)
+
+
 def test_visual_breaks_two_semantic_matches():
     bundle = _bundle([_control("T1", [0, 0, 30, 30]),
                       _control("T2", [50, 0, 80, 30])])

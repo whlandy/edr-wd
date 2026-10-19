@@ -662,6 +662,32 @@ def test_visual_only_selector_without_control_identity_replays_in_visual_modes(m
     assert result.evaluation.visual_fallback_count == 1
 
 
+def test_image_only_replay_does_not_click_sole_control_when_template_is_missing():
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={},
+        visual={"template": "assets/unlabeled.png", "redacted": True,
+                "elementSha256": VISUAL_DIGEST},
+    )
+    runtime, _, calls = _runtime([{
+        "process_name": "EDRClient.exe", "window_title": "EDRClient",
+        "automation_id": "unrelated", "control_type": "Button", "text": "Cancel",
+        "rect": [0, 0, 30, 30],
+    }])
+    object.__setattr__(runtime, "replay_mode", "semantic_first")
+    object.__setattr__(runtime, "visual_resolver", SafeVisualResolver(
+        lambda _template, _observation: [],
+    ))
+
+    result = replay_golden_trace(
+        runtime, _golden(RecordedStep("step-0001", "gui.click", {}, selector)),
+    )
+
+    assert result.task_success is False
+    assert result.case_result.step_results[0].error["code"] == "visual_match_low_confidence"
+    assert calls == []
+
+
 def test_visual_only_selector_does_not_silently_run_in_semantic_only_mode():
     selector = ReplaySelector(
         window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
