@@ -781,3 +781,27 @@ the selected offline suite reports **2602 passed, 28 deselected**. A
 read-only local macOS probe could connect a native window but returned no
 AX roots for sampled Chrome/ChatGPT windows, so this fix has synthetic
 scope evidence only; live EDRClient AX-tree behavior remains unverified.
+
+Tenth 2026-10-20 round: the concurrent round's macOS exact-lock chain
+(five commits: same-title identity preservation, native window lock
+binding, empty-AX-title resolution, and AX control scoping) was
+reviewed link by link and every link is fail closed. Locks now bind a
+CGWindowNumber instead of a title, so equal-title siblings cannot
+satisfy one another; `connect_window_identity` requires exactly one
+match and refuses with `window_identity_ambiguous`/`_unavailable`;
+an empty AX title resolves through the pid-frontmost visible CG
+window and backfills the title, after which the exact handle check
+still applies; a same-app sibling stacked above the target fails the
+unoccluded check; and the AX control tree is geometrically bound to
+the one verified CG window (IoU ≥ 0.85 plus a 32 px edge tolerance),
+returning an empty control set for zero or multiple matches so a
+click can never resolve against the wrong window. The focused macOS
+window suites reported **47 passed**. Note for the record: a
+`git stash pop` in this round accidentally applied a July stash that
+had sat at the top of the stash list, scattering stale conflict
+markers across six files; the incident was fully recovered with zero
+data loss — the peer's live work was already committed, the July
+stash entry remains intact in the stash list, the contaminated state
+is preserved under `recovery-backup-20261020`, and the tree now holds
+only the peer's current work-in-progress. The selected offline suite
+reported **2610 passed, 28 deselected** after the recovery.
