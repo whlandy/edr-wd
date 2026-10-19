@@ -540,3 +540,25 @@ task registered with the correct TargetRoot and start script, and
 remaining live gate is unchanged: the host has no Python, so the MCP
 server cannot start until an operator installs Python 3.11 (or provides
 a different interpreter path). No other remote change was made.
+
+Fifth 2026-10-20 round: the component-ID / image-template replay path
+was reviewed end to end — `generate_redacted_templates`
+(redact-then-crop, target/redaction overlap refusal, digests computed on
+the stored bytes), `PillowTemplateMatcher` (per-scale IoU seeding,
+±stride refinement, final dedup), and `SafeVisualResolver` (all gates
+fail closed) — all sound. The compile-time promotion in
+`_attach_visual_templates` had one lenient fallback: a missing or
+malformed `beforeCapture.origin` silently rebased the template crop to
+(0, 0). The PNG digest covers only the frame bytes, so a tampered origin
+would still digest-verify and the template could be cut from the wrong
+region, letting replay match a similar-looking one. The raw-document
+model layer (`_validate_capture_metadata`) already rejects a malformed
+origin at parse/construct time — a CLI-level probe confirmed that is the
+first line of defence (`recording_persistence_failed`: "origin must
+contain two integers") — and the compile layer is now strict as well,
+matching the replay bundle-ingestion and visual-resolver practice of
+re-validating at each trust boundary. Six malformed-origin regression
+cases fail before the fix and pass after; a positive control proves the
+fixture itself is promotable. The focused and selected offline suites
+reported **2571 passed, 28 deselected**; `compileall` and
+`git diff --check` exited 0.

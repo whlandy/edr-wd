@@ -112,9 +112,24 @@ def _attach_visual_templates(
         if not observation.is_file():
             updated_steps.append(step)
             continue
-        origin = capture.get("origin") or [0, 0]
-        if not isinstance(origin, (list, tuple)) or len(origin) != 2:
-            origin = [0, 0]
+        origin = capture.get("origin")
+        if (
+            not isinstance(origin, (list, tuple))
+            or len(origin) != 2
+            or not all(
+                isinstance(value, int) and not isinstance(value, bool)
+                for value in origin
+            )
+        ):
+            # A missing or malformed origin (legacy or tampered evidence) must
+            # not silently rebase the crop to (0, 0): the element rectangle
+            # would be cut from the wrong region while the PNG digest still
+            # verifies, so replay could match the wrong place.  The current
+            # target evidence builder always records a strict integer origin;
+            # anything else keeps the step non-promotable.
+            updated_steps.append(step)
+            continue
+        origin = [int(origin[0]), int(origin[1])]
         x0, y0, x1, y1 = event.observed_target.rect
         element_rect = (
             x0 - int(origin[0]), y0 - int(origin[1]),

@@ -322,6 +322,117 @@ def test_record_stop_fetches_redacted_captures_and_builds_visual_assets(
     assert Image.open(template).getpixel((0, 0)) == (0, 0, 255)
 
 
+def _promotion_fixtures(before_origin, tmp_path):
+    """One image-only click plus its digest-verified redacted beforeCapture.
+
+    The raw-document model layer (target/recording/models.py) already rejects
+    a malformed origin at parse time; these fixtures exercise the compile
+    layer directly so its own trust boundary is what is under test.
+    """
+    from agent.recording.artifacts import _attach_visual_templates
+    from agent.recording.compiler import CompilationResult, CompileIssue
+    from agent.recording.models import GoldenTrace, RecordedStep, RecordedTestCase
+    from target.recording.models import (
+        CaptureScope, ObservedTarget, RawCaptureEvent, RawRecording,
+    )
+
+    output = io.BytesIO()
+    Image.new("RGB", (120, 80), "blue").save(output, format="PNG")
+    before_payload = output.getvalue()
+    before_digest = "sha256:" + hashlib.sha256(before_payload).hexdigest()
+    capture_id = "CAP-" + "0" * 32
+    before_capture = {
+        "id": capture_id, "sha256": before_digest,
+        "width": 120, "height": 80, "origin": [0, 0],
+        "redacted": True, "redactions": [],
+    }
+    event = RawCaptureEvent(
+        sequence=1,
+        wall_time="2026-08-17T00:00:00Z",
+        monotonic_ms=10,
+        type="pointer_click",
+        scope=CaptureScope(
+            target="win-dev", backend="windows_pywinauto",
+            process_name="EDRClient.exe", window_title="^EDRClient$",
+        ),
+        input={"screenPoint": [30, 30]},
+        # Image-only click: no automationId/text identity.
+        observed_target=ObservedTarget(
+            snapshot_id="OBS-1", target_id="T0001",
+            fingerprint="sha256:pane", control_type="Pane",
+            rect=(10, 10, 60, 50), protected=False,
+        ),
+        evidence={"beforeCapture": before_capture},
+    )
+    # The model layer validates the origin at construction time; mutate the
+    # plain-dict evidence afterwards so the compile layer is what sees it.
+    before_capture["origin"] = before_origin
+    recording = RawRecording(session_id="REC-1", name="bad origin flow", events=(event,))
+    step = RecordedStep(
+        step_id="step-0001", action_id="gui.click", args={},
+        selector=None, status="incomplete",
+        issues=("compile_selector_ambiguous",),
+    )
+    case = RecordedTestCase(
+        name="bad origin flow", source_session_id="REC-1",
+        steps=(step,), status="incomplete",
+    )
+    golden = GoldenTrace(
+        name="bad origin flow", source_recording={}, catalog={},
+        environment={}, steps=(step,), status="incomplete",
+    )
+    result = CompilationResult(
+        case=case, golden=golden,
+        issues=(CompileIssue("compile_selector_ambiguous", 1, "ambiguous selector"),),
+    )
+    observations = tmp_path / "assets" / "observations"
+    observations.mkdir(parents=True)
+    (observations / f"{capture_id}.png").write_bytes(before_payload)
+    return _attach_visual_templates, recording, result, (capture_id, before_payload)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param("origin", id="not-a-list"),
+        pytest.param([0], id="one-component"),
+        pytest.param([0, 0, 0], id="three-components"),
+        pytest.param(["0", "0"], id="non-integer"),
+        pytest.param([True, 0], id="boolean"),
+    ],
+)
+def test_visual_promotion_refuses_malformed_capture_origin(tmp_path, origin):
+    """A beforeCapture without a strict integer origin must stay incomplete.
+
+    The PNG digest only covers the frame bytes, not the origin field: a
+    tampered or legacy origin that silently rebased the template crop to
+    (0, 0) would still digest-verify, and replay could then match the wrong
+    region of a similar UI.  Such a step must remain non-promotable.
+    """
+    attach, recording, result, (capture_id, payload) = _promotion_fixtures(origin, tmp_path)
+    updated = attach(tmp_path, recording, result, {capture_id: payload})
+
+    step = updated.case.steps[0]
+    assert step.selector is None
+    assert step.status == "incomplete"
+    assert "compile_selector_ambiguous" in step.issues
+    assert updated.golden.status == "incomplete"
+    assert any(issue.code == "compile_selector_ambiguous" for issue in updated.issues)
+
+
+def test_visual_promotion_accepts_strict_integer_origin(tmp_path):
+    """Positive control: the same fixture with a valid origin is promotable."""
+    attach, recording, result, (capture_id, payload) = _promotion_fixtures([0, 0], tmp_path)
+    updated = attach(tmp_path, recording, result, {capture_id: payload})
+
+    step = updated.case.steps[0]
+    assert step.selector is not None
+    assert step.selector.visual["redacted"] is True
+    assert step.status == "ready"
+    assert updated.golden.status == "ready"
+
+
 def test_record_stop_persists_capture_transfer_failures_in_compile_report(
     monkeypatch, tmp_path, capsys,
 ):
