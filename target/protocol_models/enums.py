@@ -31,6 +31,8 @@ EXPECTATION_CONTROL_TEXT_CONTAINS_TIME = "control_text_contains_time"
 #: Window-wide variant: the pattern need only appear somewhere in the window,
 #: so an assertion can be written without knowing any control's identity.
 EXPECTATION_WINDOW_TEXT_CONTAINS_TIME = "window_text_contains_time"
+EXPECTATION_CONTROL_TEXT_TIME_RANGE = "control_text_time_range"
+EXPECTATION_WINDOW_TEXT_TIME_RANGE = "window_text_time_range"
 EXPECTATION_VISUAL_EVIDENCE_CAPTURED = "visual_evidence_captured"
 
 VALID_EXPECTATION_TYPES: frozenset[str] = frozenset({
@@ -48,6 +50,8 @@ VALID_EXPECTATION_TYPES: frozenset[str] = frozenset({
     EXPECTATION_WINDOW_TEXT_CONTAINS,
     EXPECTATION_CONTROL_TEXT_CONTAINS_TIME,
     EXPECTATION_WINDOW_TEXT_CONTAINS_TIME,
+    EXPECTATION_CONTROL_TEXT_TIME_RANGE,
+    EXPECTATION_WINDOW_TEXT_TIME_RANGE,
     EXPECTATION_VISUAL_EVIDENCE_CAPTURED,
 })
 

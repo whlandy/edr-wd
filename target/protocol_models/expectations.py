@@ -38,6 +38,7 @@ from .enums import (
     EXPECTATION_CONTROL_EXISTS,
     EXPECTATION_CONTROL_TEXT_CONTAINS,
     EXPECTATION_CONTROL_TEXT_CONTAINS_TIME,
+    EXPECTATION_CONTROL_TEXT_TIME_RANGE,
     EXPECTATION_CONTROL_TEXT_EQUALS,
     EXPECTATION_CONTROL_VALUE_EQUALS,
     EXPECTATION_CONTROL_CHECKED_EQUALS,
@@ -47,6 +48,7 @@ from .enums import (
     EXPECTATION_WINDOW_OPEN,
     EXPECTATION_WINDOW_TEXT_CONTAINS,
     EXPECTATION_WINDOW_TEXT_CONTAINS_TIME,
+    EXPECTATION_WINDOW_TEXT_TIME_RANGE,
     VALID_EXPECTATION_TYPES,
 )
 from .models import ProtocolModelError
@@ -112,6 +114,11 @@ _EXPECTATION_TYPE_REGISTRY_RAW: dict[str, ExpectationTypeSpec] = {
         ),
         required_fields=("selector", "value"),
     ),
+    EXPECTATION_CONTROL_TEXT_TIME_RANGE: ExpectationTypeSpec(
+        type=EXPECTATION_CONTROL_TEXT_TIME_RANGE,
+        description="Control text contains a time within a validated time-of-day range.",
+        required_fields=("selector", "value"),
+    ),
     EXPECTATION_CONTROL_VALUE_EQUALS: ExpectationTypeSpec(
         type=EXPECTATION_CONTROL_VALUE_EQUALS,
         description="A uniquely matched control value equals the expected value.",
@@ -138,6 +145,11 @@ _EXPECTATION_TYPE_REGISTRY_RAW: dict[str, ExpectationTypeSpec] = {
             "Window or tree text contains a strftime pattern rendered at "
             "evaluation time. Needs no control identity."
         ),
+        required_fields=("value",),
+    ),
+    EXPECTATION_WINDOW_TEXT_TIME_RANGE: ExpectationTypeSpec(
+        type=EXPECTATION_WINDOW_TEXT_TIME_RANGE,
+        description="Window or control text contains a time within a validated range.",
         required_fields=("value",),
     ),
     EXPECTATION_VISUAL_EVIDENCE_CAPTURED: ExpectationTypeSpec(
