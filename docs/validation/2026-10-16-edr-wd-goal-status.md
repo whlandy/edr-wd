@@ -1010,3 +1010,54 @@ not re-probed live this round; 端云一致性 still blocked on an
 authenticated Browser Use session (operator item); 实时视觉候选 not
 re-probed live. The `status` tool is safe again: the server no longer
 crashes on a status call with a connected backend.
+
+Sixteenth 2026-10-21 round: time-prefix + duration assertion live replay
+gate PASSED on 11.26. The old asset
+`recordings/live-20261020/live_edr_20261020b` was un-replayable
+(`incomplete`); both defects were root-caused and fixed by re-recording
+rather than by code change: (1) a mid-session `connect` to the recorder's
+own UI window disturbed the backend's window state, so the assertion event
+carried `captureError` (protected-control enumeration/screenshot failure)
+— clean re-recording (dialog located via read-only `list_windows`, driven
+via in-session `run_powershell` SetForegroundWindow+SendInput coordinate
+clicks, no window-lock touches) eliminated it; (2) an assertion created
+before any recorded input had no window evidence and fell back to the
+scope-seed window (`^logo1$`) instead of the window whose text it reads —
+recording one real in-window click before the assertion binds it to
+`LogCenterWindow`. Both findings are documented in `references/testing.md`
+(assertion-recording hygiene).
+
+New ready assets, all bound to `LogCenterWindow` (HWND 524628):
+`live_time_20261021b` (pass set: operationLog click + `00:28` whole-minute
++ `00:28:56` dur 1), `live_time_20261021c` (`00:28:57` dur 1, expected
+failure), `live_time_20261021d` (`00:28:55` dur 1, expected failure).
+Live baseline: Operation Log's first entry `2026-10-21 00:28:56`; the
+other on-page timestamps (21:07:57, 21:07:40, 21:05:27, 20:06:24,
+18:59:10) are natural negative samples.
+
+Replay results (per-run details, time inputs, observed values, failure
+codes, window attribution, report paths:
+`result-report/2026-10-21_time-assertion/acceptance-summary.md`): three
+independent replays of the pass set — all `taskSuccess=true`, 3/3 steps,
+assertion rate 1.0, `pathFidelity=1.0`, verifiers recorded the actual
+match `["2026-10-21 00:28:56"]` for both time assertions (whole-minute
+`00:28` and start-inclusive `00:28:56` dur 1), `action_ok` +
+`control_checked_equals` (real UIA checked state) on the click step, no
+failure codes. Boundary runs: `00:28:57` dur 1 (one second before the
+start) and `00:28:55` dur 1 (observed value exactly at the exclusive end)
+both failed with the assertion-level diagnostic `no observed time is
+within the expected range` — controlled semantic failures, not
+`backend_unavailable`. Window attribution was identical across all five
+runs (HWND 524628 / root `LogCenterWindow`). Coverage note: the asserted
+timestamp comes from the current first log entry and changes as logs
+refresh; a future re-run must re-record the assertion value.
+
+Suites: targeted recording set **497 passed**; full marker suite
+**2625 passed, 28 deselected** (unchanged — no product code changed this
+round).
+
+Live gate status: 时间前缀/持续时间断言 ✓ live-verified (this round);
+跨窗录制与回放 ✓ (fifteenth round); 部署完整性 ✓; 组件ID回放稳定性 ✓
+live (semantic); 图像模板 (visual) replay not re-probed live; 端云一致性
+still blocked on an authenticated Browser Use session (operator item);
+实时视觉候选 not re-probed live.

@@ -120,6 +120,16 @@ python3 -m agent.cli record compile recordings/policy-flow/recording.json \
   --output-root recordings --profile windows_hisec
 ```
 
+> **断言录制卫生**（11.26 实机验证过的两条，2026-10-21）：
+> 1. 录制会话进行中**不要** `connect`/`lock` 录制器自身的 UI 窗口（指示器或
+>    断言编辑器对话框）。connect 会扰动后端的当前窗口状态，随后的断言事件会带
+>    `captureError`（受保护控件枚举/截图失败），编译期即 `incomplete`。定位对话框
+>    只读 `list_windows`；驱动对话框用会话内 `run_powershell`（SetForegroundWindow +
+>    SendInput 坐标点击），全程不碰窗口锁。
+> 2. 断言事件没有自己捕获的窗口证据时，选择器回退到 scope 种子窗口。要让
+>    `window_text_*` 断言绑定到它真正读取的窗口，先在该窗口内录一次真实输入
+>    （如点击其控件）再创建断言——断言继承最近事件的 evidence window。
+
 Replay accepts only a ready golden trace whose catalog and profile binding match
 the current runtime. When `--profile` is omitted, the target's configured app
 profile is used (EDRClient by default); an explicit override must still match
