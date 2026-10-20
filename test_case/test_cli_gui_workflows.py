@@ -45,7 +45,9 @@ def test_open_edr_uses_exact_main_window_and_persists_screenshot(monkeypatch, ca
     assert output["ok"] is True
     connect = next(call for call in agent.calls if call[0] == "connect")
     assert connect[1]["process_name"] == "EDRClient.exe"
-    assert connect[1]["title_re"] == "^华为HiSec Endpoint$"
+    # pattern derived from the windows_hisec main role spec (live EDR
+    # builds may present the main window as "logo1")
+    assert connect[1]["title_re"] == "^(EDRClient|华为HiSec Endpoint|logo1)$"
     assert output["agent_artifact"]["screenshot"]["path"] == "main.png"
 
 

@@ -23,6 +23,13 @@ class EDRClientAdapter:
                                   item.root_control_ids, item.parent_role)
             for item in capability.window_roles
         }
+        # Derive the activation title pattern from the role spec (single source
+        # of truth): live EDR builds may show the main window under titles like
+        # "logo1" that the class-level fallback does not cover.  The fallback
+        # stays for profiles whose main role declares no pattern.
+        main_role = self._roles.get("main")
+        if main_role is not None and main_role.title_pattern:
+            self.activation_window_title_pattern = main_role.title_pattern
 
     @property
     def window_roles(self) -> tuple[WindowRole, ...]:
@@ -42,9 +49,17 @@ class EDRClientAdapter:
         result = call_tool("activate_edr", args)
         if not isinstance(result, dict) or not result.get("ok"):
             return {"ok": False, "code": "product_activation_failed"}
-        if (("main" in result and not result.get("main", {}).get("window_found")) or
-            ("client" in result and not result.get("client", {}).get("window_found"))):
+        # Only the EDRClient window is a precondition.  The agent entry window
+        # (result["main"]) is not: the target's own activate_edr contract says
+        # it is only needed by the edrWidget fallback path, and live targets
+        # whose agent UI never surfaces (service-session only) still have a
+        # fully usable EDRClient.  Report its absence; do not fail activation.
+        if "client" in result and not result.get("client", {}).get("window_found"):
             return {"ok": False, "code": "product_window_missing"}
+        if "main" in result and not result.get("main", {}).get("window_found"):
+            result = dict(result)
+            result["main_window_note"] = (
+                "agent entry window is not open; EDRClient main window is available")
         return {**result, "code": "ok"}
 
     def expected_result(self, intent_id: str, args: dict | None = None) -> tuple[dict, ...]:

@@ -140,3 +140,49 @@ def test_edr_activation_rejects_path_outside_catalog(monkeypatch):
     assert accepted["ok"] is True
     assert calls[0]["exe_path"] == \
         "C:\\Program Files\\HiSec-Endpoint\\core\\safra\\HisecEndpointAgent.exe"
+
+
+def test_edr_adapter_activation_title_pattern_derives_from_role_spec():
+    from agent.products.edrclient import EDRClientAdapter
+    windows = EDRClientAdapter("windows_pywinauto")
+    assert windows.activation_window_title_pattern == \
+        "^(EDRClient|华为HiSec Endpoint|logo1)$"
+    macos = EDRClientAdapter("macos_accessibility")
+    assert macos.activation_window_title_pattern == "^华为HiSec Endpoint$"
+
+
+def test_edr_adapter_activate_ok_when_only_client_window_is_found():
+    from agent.products.edrclient import EDRClientAdapter
+    calls = []
+
+    def call_tool(name, params):
+        calls.append((name, params))
+        return {
+            "ok": True,
+            "already_open": True,
+            "main": {"window_found": False, "window": {"found": False, "count": 0}},
+            "client": {"window_found": True, "window": {"found": True, "count": 1}},
+        }
+
+    adapter = EDRClientAdapter("windows_pywinauto")
+    result = adapter.activate(call_tool)
+    assert result["ok"] is True
+    assert result["code"] == "ok"
+    assert "main_window_note" in result
+    assert calls[0][0] == "activate_edr"
+
+
+def test_edr_adapter_activate_fails_when_client_window_missing():
+    from agent.products.edrclient import EDRClientAdapter
+
+    def call_tool(name, params):
+        return {
+            "ok": True,
+            "main": {"window_found": True, "window": {"found": True, "count": 1}},
+            "client": {"window_found": False, "window": {"found": False, "count": 0}},
+        }
+
+    adapter = EDRClientAdapter("windows_pywinauto")
+    result = adapter.activate(call_tool)
+    assert result["ok"] is False
+    assert result["code"] == "product_window_missing"
