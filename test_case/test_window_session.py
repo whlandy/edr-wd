@@ -116,6 +116,44 @@ def test_windows_inventory_retains_root_uia_id_for_same_title_windows(monkeypatc
     ]
 
 
+def test_windows_inventory_keeps_window_when_is_top_level_missing(monkeypatch):
+    """pywinauto 0.6.x UIAWrapper has no is_top_level(); the window must still
+    be enumerated (live 11.26 symptom: strict inventory was unavailable)."""
+    from target.automation.windows_pywinauto import WindowsPywinautoBackend
+
+    class NoTopLevelWindow:
+        def __init__(self, handle, root):
+            self.handle = handle
+            self.element_info = SimpleNamespace(automation_id=root)
+
+        # intentionally NO is_top_level -> calling it raises AttributeError
+
+        def is_visible(self):
+            return True
+
+        def window_text(self):
+            return "logo1"
+
+        def process_id(self):
+            return os.getpid()
+
+        def rectangle(self):
+            return SimpleNamespace(left=0, top=0, right=800, bottom=600,
+                                    width=lambda: 800, height=lambda: 600)
+
+    windows = [NoTopLevelWindow(303, "EdrMainWindow")]
+    monkeypatch.setitem(sys.modules, "pywinauto", SimpleNamespace(
+        Desktop=lambda backend: SimpleNamespace(windows=lambda: windows),
+    ))
+
+    strict = WindowsPywinautoBackend._enumerate_top_windows_windows(strict=True)
+    assert [(item["handle"], item["root_control_id"]) for item in strict] == [
+        (303, "EdrMainWindow"),
+    ]
+    relaxed = WindowsPywinautoBackend._enumerate_top_windows_windows()
+    assert [item["handle"] for item in relaxed] == [303]
+
+
 def test_role_focus_connects_the_exact_native_window_after_root_resolution():
     product_policy.reset_for_tests()
     base = get_capability("windows_hisec", "windows_pywinauto")

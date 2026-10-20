@@ -886,12 +886,29 @@ class WindowsPywinautoBackend:
                 raise ValueError("window_inventory_unavailable") from exc
             return out
         for win in windows:
+            # is_top_level() is absent on some pywinauto UIAWrapper builds
+            # (0.6.x) — treat that as "top-level unknown, keep the window"
+            # (same documented fallback as list_windows), not an enumeration
+            # failure. A real exception on either probe is still fatal in
+            # strict mode and skips the window otherwise.
+            top_level = True
             try:
-                if not win.is_top_level() or not win.is_visible():
-                    continue
+                top_level = win.is_top_level()
+            except AttributeError:
+                pass
             except Exception:
                 if strict:
                     raise ValueError("window_inventory_unavailable")
+                continue
+            if not top_level:
+                continue
+            try:
+                visible = win.is_visible()
+            except Exception:
+                if strict:
+                    raise ValueError("window_inventory_unavailable")
+                continue
+            if not visible:
                 continue
             try:
                 handle = int(win.handle)
