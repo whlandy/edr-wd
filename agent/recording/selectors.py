@@ -24,10 +24,7 @@ def window_for_event(event: RawCaptureEvent) -> dict[str, Any]:
     recorded = event.evidence.get("window") if isinstance(event.evidence, Mapping) else None
     title = (recorded or {}).get("title")
     process = (recorded or {}).get("processName") or event.scope.process_name
-    window = {
-        "processName": process,
-        "titleRegex": f"^{re.escape(title)}$" if title else event.scope.window_title,
-    }
+    window = {"processName": process}
     # The title is the weakest identity this application offers: two of its
     # processes both title a window `logo1`, and one alternates between two
     # titles while running. The control tree's root names the window and does
@@ -38,6 +35,16 @@ def window_for_event(event: RawCaptureEvent) -> dict[str, Any]:
     )
     if root:
         window["rootAutomationId"] = str(root)
+    else:
+        # A root identity is stronger than a title and is sufficient on its
+        # own. Windows can process mouse-down and rename (or replace the
+        # contents of) a window before the recorder receives mouse-up.
+        # Persisting that post-action title beside the pre-action control root
+        # creates a selector for a window that never existed. Title remains
+        # the fallback for applications that expose no stable root.
+        window["titleRegex"] = (
+            f"^{re.escape(title)}$" if title else event.scope.window_title
+        )
     return window
 
 

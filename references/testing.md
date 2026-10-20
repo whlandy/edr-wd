@@ -125,11 +125,33 @@ the current runtime. When `--profile` is omitted, the target's configured app
 profile is used (EDRClient by default); an explicit override must still match
 the golden trace's binding:
 
-```bash
-python3 -m agent.cli --target TARGET replay \
-  recordings/policy-flow/golden-trace.json \
-  --trace-root result-report/replay-traces
-```
+> **回放就绪门槛**：一条 golden trace 可回放 ⟺ `golden.status == "ready"` **且** 每个 step
+> 都 `ready`（`replay.py` 的 `_run_golden_trace` 在此门槛上直接抛
+> `golden_trace_incomplete`，不会半跑）。`incomplete` 最常见来源是
+> `pointer.scroll` / `pointer.drag` **没有绑定的结果 verifier**：滚动/拖拽只有在
+> 它自己或同一目标的下一个步骤上绑定了内容/位置/结果断言（`steps.verifiers`
+> 非空，或 `_run_is_verified` 覆盖）后才会 `ready`。这是**有意**的安全门槛——
+> 一条「滚动/拖拽没产生可观测结果」的轨迹不该被回放成成功；不要用补模板或凑
+> verifier 的方式强扭。要让 scroll/drag 可回放，在动作后 `record assert` 补一条
+> 结果断言，再重编译。录制结束后先确认就绪状态再回放：
+>
+> ```bash
+> # 看 golden 状态的快速检查（ready / incomplete + 哪些 step、为何 incomplete）
+> python3 - <<'PY'
+> from agent.recording.models import GoldenTrace
+> import json, sys
+> g = GoldenTrace.from_dict(json.load(open(sys.argv[1])))
+> bad = [(s.step_id, s.action_id, tuple(s.issues))
+>        for s in (*g.steps, *g.cleanup) if s.status != "ready"]
+> if g.status == "ready":
+>     print("READY")
+> else:
+>     print(f"INCOMPLETE ({len(bad)} steps not ready):")
+>     for step_id, action, issues in bad:
+>         print(f"  {step_id} {action} issues={issues}")
+> PY
+> recordings/policy-flow/golden-trace.json
+> ```
 
 Use `--confirm-action ACTION_ID` for each action that requires out-of-band
 confirmation. `semantic_only` is the default replay mode;

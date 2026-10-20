@@ -929,7 +929,24 @@ class WindowsGUI:
             try:
                 control_type = str(ctrl.control_type())
             except Exception:
-                pass
+                try:
+                    control_type = str(ctrl.element_info.control_type or "")
+                except Exception:
+                    pass
+            checked = None
+            if (control_type or cls).lower() in {"checkbox", "radiobutton"}:
+                try:
+                    state = ctrl.get_toggle_state()
+                    # UIA's third state is indeterminate, not checked.
+                    if state in (0, 1):
+                        checked = bool(state)
+                except Exception:
+                    # Radio buttons normally expose SelectionItem rather
+                    # than Toggle. Preserve unknown when neither is available.
+                    try:
+                        checked = bool(ctrl.is_selected())
+                    except Exception:
+                        pass
             is_password = None
             try:
                 is_password = bool(ctrl.element_info.is_password)
@@ -950,6 +967,7 @@ class WindowsGUI:
                 "automation_id": automation_id,
                 "control_type": control_type,
                 "is_password": is_password,
+                "checked": checked,
             })
         except Exception:
             pass

@@ -206,6 +206,15 @@ optional `durationSeconds` replaces that default width. This is separate from
 the replay-clock `*_contains_time` strftime assertions. See
 `references/testing.md` for recording and replay requirements.
 
+A golden trace is replayable only when `status == "ready"` and every step is
+`ready`. `incomplete` traces are most often scroll/drag runs with **no bound
+result verifier**: a scroll'd or dragged run only becomes `ready` when a
+content/position/result assertion is bound to it (itself or a following
+same-target step), proving the movement changed state. This is an intentional
+safety gate — do not weaken it by fabricating a verifier. To make a scroll/drag
+replayable, use `record assert` after the gesture, then recompile. See
+`references/testing.md` for the readiness gate and the diagnostic command.
+
 ## MaaFramework Node Table
 
 Compilation also writes `trace.json` next to `golden-trace.json`: the same golden

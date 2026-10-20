@@ -734,8 +734,23 @@ def _persist_evaluation(path: Path, evaluation: ReplayEvaluation) -> None:
 
 def _run_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRunResult:
     if golden.status != "ready":
+        # 门槛本身不在这里改，只是把「为什么不能回放」说明白。incomplete 最常见
+        # 来源是 scroll/drag 没有绑定的结果 verifier —— 那不是补模板能解决的，
+        # 要补的是「证明移动产生了状态变化」的断言。
+        unready = [
+            (s.step_id, s.action_id)
+            for s in (*golden.steps, *golden.cleanup)
+            if s.status != "ready"
+        ]
+        hint = ""
+        if unready:
+            hint = (f"；{len(unready)} 个步骤未 ready，例如 {unready[:5]}。"
+                    "scroll/drag 通常缺绑定的结果 verifier：先用 record assert "
+                    "在动作后补一条内容/位置断言，再重编译。")
         raise RecordingModelError(
-            "golden_trace_incomplete", "only ready golden traces can replay", path="golden.status"
+            "golden_trace_incomplete",
+            f"only ready golden traces can replay (golden.status={golden.status!r}){hint}",
+            path="golden.status",
         )
     expected_version = golden.catalog.get("version")
     expected_digest = golden.catalog.get("digest")

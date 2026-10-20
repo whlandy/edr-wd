@@ -1469,6 +1469,11 @@ class WindowsUIACorrelator:
     @classmethod
     def _with_window(cls, event: RawCaptureEvent, window: Mapping[str, object]) -> RawCaptureEvent:
         """Stamp the event with the window it happened in."""
+        # Pointer actions may already carry the authoritative mouse-down
+        # window. Do not replace it with the possibly post-navigation window
+        # observed at mouse-up.
+        if isinstance(event.evidence.get("window"), Mapping):
+            return event
         title = window.get("windowTitle")
         if not isinstance(title, str) or not title:
             return event
@@ -1509,7 +1514,18 @@ class WindowsUIACorrelator:
         # Resolve the owning window once: this is a live window-server query
         # and doing it twice per packet doubled the correlation cost that the
         # worker pays for every keystroke.
-        foreground = self._window_for(packet)
+        press_window = (
+            (self._pending_press or {}).get("window")
+            if packet.kind == "pointer_up" else None
+        )
+        # A click belongs to where it began. The receiving HWND can change its
+        # title or content on mouse-down, before mouse-up reaches the queue;
+        # classifying the release against that new state can drop an otherwise
+        # valid click as out of scope.
+        foreground = (
+            press_window if isinstance(press_window, Mapping)
+            else self._window_for(packet)
+        )
         result = self._correlate(packet, scope, sequence, foreground)
         produced = (
             result if isinstance(result, tuple)
@@ -1708,6 +1724,10 @@ class WindowsUIACorrelator:
             self._note_rejection("target_outside_scope", packet, foreground, scope=scope)
             return None
         observed = self._observed(target_data)
+        if packet.kind == "pointer_up" and self._pending_press is not None:
+            press_observed = self._pending_press.get("observed")
+            if isinstance(press_observed, ObservedTarget):
+                observed = press_observed
 
         if self._scroll_continues(packet):
             pending = self._pending_scroll
@@ -1731,6 +1751,10 @@ class WindowsUIACorrelator:
                 "button": packet.button or "left",
                 "monotonic_ms": packet.monotonic_ms,
                 "observed": observed,
+                # Mouse-down is the last unambiguous source-window moment.
+                # The application may navigate or rename the same HWND before
+                # mouse-up is delivered.
+                "window": dict(foreground),
             }
             return pending_scroll
 
@@ -1834,6 +1858,8 @@ class WindowsUIACorrelator:
                     evidence={"foregroundPid": foreground.get("pid")},
                     causal_id="CAUSE-" + uuid.uuid4().hex,
                 )
+                if isinstance((press or {}).get("window"), Mapping):
+                    event = self._with_window(event, press["window"])
                 ordered = tuple(
                     x for x in (pending_scroll, pending_commit, event) if x is not None
                 )
@@ -1910,6 +1936,8 @@ class WindowsUIACorrelator:
             evidence=evidence,
             causal_id=self._causal_id(event_type, packet, observed),
         )
+        if packet.kind == "pointer_up" and isinstance((press or {}).get("window"), Mapping):
+            event = self._with_window(event, press["window"])
         return _emit(pending_scroll, pending_commit, event)
 
 

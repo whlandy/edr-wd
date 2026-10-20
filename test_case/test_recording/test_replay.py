@@ -418,6 +418,24 @@ def test_replay_rejects_incomplete_and_catalog_mismatch_before_execution():
     assert calls == []
 
 
+def test_incomplete_rejection_names_unready_steps_and_result_verifier():
+    """门槛拒绝时要把「哪几步、缺什么」说清楚 —— scroll/drag 缺的是绑定的结果
+    verifier，不是补模板。只断言报错文案，不弱化门槛本身。"""
+    runtime, _, calls = _runtime([])
+    scroll = RecordedStep(
+        "step-0001", "pointer.scroll", {"clicks": 1}, _selector(), status="incomplete",
+        issues=("compile_scroll_verifier_required",),
+    )
+    golden = _golden(scroll, status="incomplete")
+    with pytest.raises(RecordingModelError) as exc:
+        replay_golden_trace(runtime, golden)
+    assert exc.value.code == "golden_trace_incomplete"
+    message = str(exc.value)
+    assert "step-0001" in message and "pointer.scroll" in message
+    assert "结果 verifier" in message or "结果断言" in message
+    assert calls == []
+
+
 def test_recorded_cleanup_runs_through_same_executor_and_gates_success():
     main = RecordedStep("step-0001", "gui.click", {}, _selector())
     cleanup = RecordedStep("cleanup-0001", "gui.click", {}, _selector())

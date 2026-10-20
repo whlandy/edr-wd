@@ -317,15 +317,16 @@ def test_macos_focus_routes_through_exact_native_identity(monkeypatch):
     assert backend.connected == (202, 42)
 
 
-def test_product_window_inventory_is_path_owned_and_sees_unlocked_child():
+@pytest.mark.parametrize("log_title", ["日志中心", "Log Center"])
+def test_product_window_inventory_is_path_owned_and_sees_unlocked_child(log_title):
     cap = get_capability("windows_hisec", "windows_pywinauto")
     backend = FakeBackend()
     backend.windows.extend([
         {"handle": 2, "pid": 10, "process_name": "EDRClient.exe",
-         "title": "日志中心", "parent_native_id": "1",
+         "title": log_title, "parent_native_id": "1",
          "rect": {"left": 20, "top": 20, "right": 600, "bottom": 400}},
         {"handle": 3, "pid": 20, "process_name": "EDRClient.exe",
-         "title": "日志中心", "parent_native_id": "1",
+         "title": log_title, "parent_native_id": "1",
          "rect": {"left": 20, "top": 20, "right": 600, "bottom": 400}},
     ])
     session = WindowSession("s", "windows_pywinauto", backend)

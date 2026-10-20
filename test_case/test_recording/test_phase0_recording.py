@@ -218,6 +218,28 @@ def test_window_transition_binds_to_preceding_action_by_causal_id():
     }
 
 
+def test_root_identified_action_does_not_mix_post_action_title_into_selector():
+    click = _event(1, causal_id="cause-open-log")
+    click["scope"]["windowTitle"] = "^(logo1|Log Center)$"
+    click["observedTarget"]["automationId"] = "EdrMainWindow.openLog"
+    click["evidence"] = {"window": {
+        "title": "Log Center", "processName": "EDRClient.exe",
+        "handle": 101, "rootAutomationId": "EdrMainWindow",
+    }}
+    transition = _event(
+        2, "window_transition", causal_id="cause-open-log",
+        input_={"kind": "opened", "processName": "EDRClient.exe", "title": "Log Center"},
+    )
+    transition["observedTarget"] = None
+
+    step = compile_recording(_recording(click, transition)).golden.steps[0]
+
+    assert step.selector.window == {
+        "processName": "EDRClient.exe", "rootAutomationId": "EdrMainWindow",
+    }
+    assert step.verifiers[-1]["expected"]["title"] == "Log Center"
+
+
 def test_unbound_window_transition_remains_visible_and_incomplete():
     transition = _event(
         1, "window_transition", causal_id="orphan",

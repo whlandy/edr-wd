@@ -306,6 +306,36 @@ def test_windows_uia_correlator_builds_click_with_semantic_target():
     }
 
 
+def test_pointer_action_keeps_mouse_down_window_when_same_hwnd_changes_title():
+    resolver = _Resolver(title="EDRClient")
+    correlator = WindowsUIACorrelator(resolver)
+    down = HookPacket(
+        kind="pointer_down", monotonic_ms=100,
+        wall_time="2026-08-17T00:00:00.000Z", screen_point=(50, 40),
+        button="left", native={"window": {
+            "handle": 101, "pid": 42, "windowTitle": "EDRClient",
+            "processName": "EDRClient.exe",
+        }},
+    )
+    assert correlator.correlate(down, SCOPE, 1) is None
+    resolver.title = "Log Center"
+    up = HookPacket(
+        kind="pointer_up", monotonic_ms=120,
+        wall_time="2026-08-17T00:00:00.020Z", screen_point=(50, 40),
+        button="left", native={"window": {
+            "handle": 101, "pid": 42, "windowTitle": "Log Center",
+            "processName": "EDRClient.exe",
+        }},
+    )
+
+    event = correlator.correlate(up, SCOPE, 1)
+
+    assert event is not None
+    assert event.evidence["window"] == {
+        "title": "EDRClient", "processName": "EDRClient.exe", "handle": 101,
+    }
+
+
 def test_windows_correlator_groups_only_a_same_target_double_click_causally():
     correlator = WindowsUIACorrelator(_Resolver(), double_click_ms=650)
     first = correlator.correlate(_packet(monotonic_ms=100), SCOPE, 1)

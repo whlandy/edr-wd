@@ -17,7 +17,7 @@
           "windows": [
             {"role": "entry", "name": "华为智能终端安全系统", "names": ["华为智能终端安全系统", "logo1"], "window_path": "entry", "process_names": ["HisecEndpointAgent.exe"], "title_pattern": "^(华为智能终端安全系统|logo1)$"},
             {"role": "main", "name": "EDRClient 主窗口", "names": ["EDRClient", "华为HiSec Endpoint", "logo1"], "window_path": "main", "process_names": ["EDRClient.exe"], "title_pattern": "^(EDRClient|华为HiSec Endpoint|logo1)$"},
-            {"role": "log_center", "name": "日志中心", "names": ["日志中心"], "window_path": "main/log_center", "process_names": ["EDRClient.exe"], "title_pattern": "日志中心", "parent_role": "main"},
+            {"role": "log_center", "name": "日志中心", "names": ["日志中心", "Log Center"], "window_path": "main/log_center", "process_names": ["EDRClient.exe"], "title_pattern": "^(日志中心|Log Center)$", "parent_role": "main"},
             {"role": "dialog", "name": "对话框（动态标题）", "window_path": "main/dialog", "process_names": ["EDRClient.exe"], "parent_role": "main"}
           ],
           "allowed_action_ids": [

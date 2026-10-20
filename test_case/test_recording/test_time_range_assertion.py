@@ -156,8 +156,7 @@ def test_hotkey_authored_assertion_replays_in_its_actual_product_window(assertio
 
     assert golden.status == "ready"
     assert golden.steps[0].selector.window == {
-        "processName": "EDRClient.exe", "titleRegex": "^日志中心$",
-        "rootAutomationId": "LogCenterRoot",
+        "processName": "EDRClient.exe", "rootAutomationId": "LogCenterRoot",
     }
 
 

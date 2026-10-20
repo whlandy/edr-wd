@@ -1554,7 +1554,11 @@ def status() -> str:
         # `execution_provider == "server_inline"` and is implemented
         # inline in this module. The catalog is the single source of
         # truth — no override is applied here.
-        result["action_space"] = status_action_space(backend_name)
+        # `.backend` is the automation engine selected inside an adapter
+        # (for pywinauto this is `uia`), not the canonical backend kind
+        # understood by the action catalog. Keep it diagnostic, but query the
+        # catalog by the startup-resolved kind.
+        result["action_space"] = status_action_space(_backend_kind)
         if hasattr(_backend, "get_window_lock"):
             try:
                 result["window_lock"] = _backend.get_window_lock()

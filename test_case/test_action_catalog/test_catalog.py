@@ -658,6 +658,20 @@ def test_server_status_action_space_driven_by_catalog():
     assert payload["action_space"] == _load_fixture("status_windows_v0.json")["action_space"]
 
 
+def test_server_status_uses_canonical_kind_when_adapter_reports_uia():
+    server = _import_server()
+    backend = _make_stub_backend()
+    backend.backend = "uia"
+    server._backend = backend
+    server._backend_kind = "windows_pywinauto"
+
+    payload = json.loads(server.status())
+
+    assert payload["backend"] == "uia"
+    assert payload["backend_kind"] == "windows_pywinauto"
+    assert payload["action_space"] == status_action_space("windows_pywinauto")
+
+
 def test_server_get_action_catalog_tool_present_and_callable():
     server = _import_server()
     server._backend = _make_stub_backend()
@@ -712,9 +726,9 @@ def test_no_extra_tools_hack_in_server_status():
     for args in matches:
         # Strip newlines / extra whitespace
         args_norm = " ".join(args.split())
-        assert args_norm.startswith("backend_name") or args_norm == "backend_name", (
+        assert args_norm == "_backend_kind", (
             f"status_action_space call found with args={args!r}; "
-            f"expected only `backend_name`"
+            f"expected only `_backend_kind`"
         )
 
 

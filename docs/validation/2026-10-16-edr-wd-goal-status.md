@@ -952,3 +952,61 @@ Next round, once the session is back: start the server, run
 with per-run HWND/role/failure-code/assertion evidence), fix the
 `status` `'uia'` defect and the replay blocker with targeted
 regressions, and re-run the offline suite.
+
+Fifteenth 2026-10-21 round: cross-window golden replay gate PASSED on
+11.26 (operator restored the RDP session as `admin`; no shutdown dialog
+was confirmed). The operator-run acceptance also closed this session's
+open item: the original trace's alive-server failure (20:52) reproduced
+as `window_selector_not_found` on step one — recording had combined the
+post-click `Log Center` title with the pre-click main-window root
+`EdrMainWindow` into a selector for a window that never existed
+(`result-report/2026-10-21_00-52-29/original-golden-failure/probe.json`).
+
+Fixes landed (reviewed this round, regression-tested, now committed):
+(1) the correlator stamps the mouse-down window on pointer events and no
+longer reclassifies a release against a window that already changed
+title/content (`target/recording/windows.py`); (2) a root-identified
+window selector no longer carries the post-action title — title is a
+fallback only when no stable root exists
+(`agent/recording/selectors.py`); (3) the `log_center` role now matches
+the English build's `Log Center` title (`target/product_specs/apps.json`);
+(4) the control tree reports live `checked` state for CheckBox
+(toggle 0/1, indeterminate stays unknown) and RadioButton
+(selection fallback) (`target/pywinauto_client.py`); (5) the `status`
+tool queries the action catalog by the startup-resolved `_backend_kind`
+instead of the adapter's engine string, so the `unknown backend 'uia'`
+crash that killed both long-lived servers (documented in the fourteenth
+round) can no longer occur, with a dedicated regression
+(`test_server_status_uses_canonical_kind_when_adapter_reports_uia`);
+(6) `golden_trace_incomplete` now names the unready steps and the
+missing result verifier (docs in `SKILL.md` / `references/testing.md`).
+
+Acceptance (three independent runs, each closing Log Center first, then a
+fresh product run + replay of the recompiled golden trace): 2/2 steps
+and 4/4 assertions passed every run (`action_ok` x2, `window_open`,
+`control_checked_equals`), no failure codes, `taskSuccess=true`,
+`pathFidelity=1.0`, `cleanupPassed=true`. Main window HWND 917736 / role
+`main` / root `EdrMainWindow` in all three; Log Center HWND 262368 /
+393982 / 524628 per run (role `log_center`, root `LogCenterWindow`),
+matching the close-and-reopen precondition. Per-run call logs and HTML
+reports: `result-report/2026-10-21_00-52-29/acceptance-{1,2,3}/`,
+summary `acceptance-summary.md`. Note the coverage boundary stated in
+the summary: this validates the recorded "open Log Center -> check
+operation log" path, not full EDRClient functionality; window regions
+outside the RDP viewport limit screenshot coverage while semantic
+assertions ran on the live UIA tree.
+
+Offline: the selected marker suite reports **2625 passed, 28
+deselected** (baseline 2615 + 10 new regressions); the operator's
+default full run reported 2040 passed / 613 deselected
+(`offline-tests.xml`).
+
+Live gate status: 跨窗录制与回放 ✓ (recorded, compiled, replayed 3x
+with per-run evidence); 组件ID回放稳定性 ✓ live (semantic
+component-ID dispatch in all three runs); 时间前缀/持续时间断言 remain
+captured in the assertion-only recording `live_edr_20261020b` — live
+replay of a time-range assertion still pending; 图像模板 (visual) replay
+not re-probed live this round; 端云一致性 still blocked on an
+authenticated Browser Use session (operator item); 实时视觉候选 not
+re-probed live. The `status` tool is safe again: the server no longer
+crashes on a status call with a connected backend.

@@ -25,6 +25,41 @@ def _client_class():
     return module.WindowsGUI
 
 
+@pytest.mark.parametrize("control_type, pattern, state, expected", [
+    ("CheckBox", "toggle", 1, True),
+    ("CheckBox", "toggle", 0, False),
+    ("CheckBox", "toggle", 2, None),
+    ("RadioButton", "selection", True, True),
+    ("RadioButton", "selection", False, False),
+    ("RadioButton", "unsupported", None, None),
+])
+def test_control_tree_reports_live_check_state(control_type, pattern, state, expected):
+    class Control:
+        element_info = types.SimpleNamespace(control_type=control_type, is_password=False)
+
+        def friendly_class_name(self):
+            return control_type
+
+        def children(self):
+            return []
+
+        def get_toggle_state(self):
+            if pattern != "toggle":
+                raise NotImplementedError
+            return state
+
+        def is_selected(self):
+            if pattern != "selection":
+                raise NotImplementedError
+            return state
+
+    gui = _client_class()()
+    control = gui._build_tree(Control())[0]
+
+    assert control["control_type"] == control_type
+    assert control["checked"] is expected
+
+
 class _Client:
     """Enough of the client to drive activate_edr's three steps."""
 
