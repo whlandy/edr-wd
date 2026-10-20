@@ -8,7 +8,7 @@ deployed to a live target.
 
 Command: `python3 -m pytest -q -m 'unit or regression'`
 
-Latest result: **2489 passed, 28 deselected** (38.01 s). `python3 -m compileall -q
+Latest result: **2615 passed, 28 deselected** (39.44 s). `python3 -m compileall -q
 agent target` and `git diff --check` both exit 0. This rerun includes the
 generic-product activation failure-code check and macOS window resolution tests.
 The latter now cover bundle/app-name connection through an actual native
@@ -859,3 +859,96 @@ live EDRClient record/replay, live time-assertion checks, and the
 deployment upload/import evidence all need Python 3.11 installed on
 11.26 (operator action, still pending). The tree is clean and in sync
 with `origin/hermes-remote`. No new code work this round.
+
+Fourteenth 2026-10-20 round: live environment bring-up and replay
+failure diagnosis (diagnosis only, no code fix this round).
+
+First, the stale `python_not_found` conclusion is corrected: 11.26
+now has **Python 3.11.9** installed at
+`C:\Users\admin\AppData\Local\Programs\Python\Python311\python.exe`
+(silent install exit 0, version verified) with the full offline
+dependency bundle (82 packages; 75 pure-Python wheels reused, 7
+cp311 wheels re-fetched at the same pinned versions; imports of
+fastmcp / pywinauto 0.6.9 / psutil / PIL verified), in addition to
+the existing Python 3.15. The target `config.json` pins
+`server.python_path` to the 3.11 interpreter, and the MCP server was
+confirmed running under it (process `PID 8876`, `server.py
+--http --host 0.0.0.0 --port 8765`). This round also landed and
+deployed commit `ae051fa` (pywinauto 0.6.x `UIAWrapper` has no
+`is_top_level()`; the shared top-window enumeration now tolerates the
+missing method instead of silently enumerating zero windows — the
+cause of the earlier `window_inventory_unavailable` and the fail-
+closed guard's `native window disappeared or owner changed`);
+live-verified on the restarted 3.11 server: `begin_product_run` →
+`focus_window_role(main)` bound logo1 HWND 459530, and
+`observe_window_bundle(capture_image=true)` returned a window-scoped
+source-redacted observation with **44 controls** and origin
+`[259, 0]`.
+
+Replay status: the cross-window golden trace
+(`live_edr_xwin_20261020/golden-trace.json`, status `ready`, 2
+steps) **still has not passed** — `taskSuccess: false`, 0/2 steps,
+both blocked `backend_unavailable`. Diagnosis via the exact CLI
+pipeline (driver `diag_replay_probe.py`, kept) plus target-side
+forensics established the failure **stage is connection**, with this
+causal chain, all from 11.26's own logs:
+
+1. The live server (3.11, started 20:51:28) died at **20:58:59** and
+   the 3.15 predecessor (started 19:45:10) died the same way at
+   **20:49:44**: `logs\server.*.log.stderr` carries the unhandled
+   `ValueError: unknown backend 'uia'; expected one of
+   ['macos_accessibility', 'windows_pywinauto']` raised in the
+   `status` tool — `server.py` reads `_backend.backend`
+   (`WindowsPywinautoBackend.backend` → pywinauto GUI string `'uia'`)
+   and passes it to `status_action_space()`, which only accepts the
+   registry kinds. The defect only arms once the backend has a
+   connected window (`_gui` set); before that the property raises
+   `AttributeError`, the `except` swallows it, and the safe default
+   survives. Defect recorded; fix deferred (diagnosis-only round).
+2. After the crash, the `StartEDRMCP` task could not restart the
+   server: `schtasks /Run` reports success but `lastRun=` stays
+   empty, because the task principal is `logonType=Interactive` and
+   `query user` now returns **no users** — the target's RDP session
+   has ended (a "Shut Down Windows" dialog was present earlier; the
+   machine did not shut down). A manual start from an SSH (session
+   0) context died within seconds with 0-byte server logs — the
+   server cannot initialize without an interactive desktop.
+3. Consequently every MCP call this round reached a dead port:
+   `tools_list()` returns 0 tools, and the replay pipeline's probe
+   reports `backend_unavailable` at the connection stage (the
+   earlier `product_window_selector_unavailable` raised by the
+   driver's tool check is a symptom of the same dead server, not a
+   separate cause). One residual question remains: the **20:52**
+   replay run failed with the server alive (2.4 s, both steps
+   blocked) and is not yet explained at stage level; the probe
+   driver is staged to capture the full tool-call sequence and raw
+   exception on the next live attempt.
+
+Commands used this round (all read-only or environment restoration,
+no dependency reinstall, no target-config overwrite): Python 3.11
+installer fetched on the Mac (size-verified against python.org
+content-length, SHA-256 matching the published 3.11.9 value) and
+scp'd; silent per-user install; offline `pip install --no-index
+--no-deps` of the 82-file bundle into 3.11; `config.json`
+`server.python_path` written once (still in place, except the target
+file was later found empty by a read probe — recorded, not
+overwritten); server restarts via the lifecycle `restart`/task and
+one manual `start_server.ps1` run (failed, session-0); SSH-based
+process/port/log/session forensics via `C:\Users\admin\diag_*.ps1`
+(kept on the target). Local diagnostic driver:
+`diag_replay_probe.py` (untracked, kept).
+
+Live gate status after this round: 部署完整性 ✓ (live ops incl.
+3.11 switch); 跨窗录制 ✓ recorded + artifacts (replay still pending);
+时间前缀/组件ID+图像模板 replay gates pending (environment down);
+端云一致性 still blocked on an authenticated Browser Use session;
+实时视觉候选 not re-probed live this round.
+
+Operator action required: re-establish the interactive RDP session to
+11.26 (logon as `admin`); do **not** confirm any shutdown dialog.
+Next round, once the session is back: start the server, run
+`diag_replay_probe.py` to capture the raw replay-path exception
+(first the 20:52-style live failure, then the full 3-run acceptance
+with per-run HWND/role/failure-code/assertion evidence), fix the
+`status` `'uia'` defect and the replay blocker with targeted
+regressions, and re-run the offline suite.
