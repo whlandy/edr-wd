@@ -1061,3 +1061,45 @@ Live gate status: 时间前缀/持续时间断言 ✓ live-verified (this round)
 live (semantic); 图像模板 (visual) replay not re-probed live; 端云一致性
 still blocked on an authenticated Browser Use session (operator item);
 实时视觉候选 not re-probed live.
+
+On 2026-10-21 the cloud recorder's assertion layer was upgraded in the
+sibling repo `edr-cloud-recorder` (branch `maa-dp`), per explicit request:
+assertions had to become human-friendly and precisely specifiable — time,
+count, presence/absence, and exact expected content. The new spec separates
+**what** is checked from **how** it is compared, aligned with the operator
+sets of mature systems (Playwright `expect`, Katalon verify keywords):
+
+- comparison operators for text/value/attribute assertions — equals
+  (default; old recordings carry no `op` field and replay byte-compatibly),
+  not-equals, contains/not-contains, starts/ends with, regex full-match,
+  blank/non-blank; numeric greater/less for input values (fails closed on
+  non-numeric instead of falling back to string order);
+- element-count assertions (equals / at least / at most) via
+  `locator.count()` — hidden elements count, so absence is asserted with
+  visibility=false, not count=0;
+- a third time kind, `timerange`: start `HH:MM` covers the whole minute,
+  `HH:MM:SS` + `durationSeconds` a half-open interval with midnight wrap —
+  the same semantics the desktop `window_text_time_range` assertions were
+  live-verified against in the sixteenth round, so both recorders now speak
+  one time-assertion language;
+- the right-click menu gained an operator select, the count type, and the
+  time-range type with a live interval preview; blank ops need no expected
+  value;
+- `assets/rec_assert.py` is now the single comparison core shared by the
+  replay runtime and the generated pytest specs, so both judge identically;
+  malformed op/shape fails fast at replay with the requirement in the
+  message instead of a vague failure after the timeout.
+
+Evidence: **347 passed** in the cloud-recorder suite, including 39 new
+tests — operator/time-range boundary units, fake-page replay tests,
+real-Chromium end-to-end replay of the new assertion kinds, and real
+right-click menu tests (operator list, integer validation, timerange
+prefix/duration/preview). Commits `1dc5be8` (pre-existing working-tree
+keyboard/Enter recording fix, committed as its own change at the operator's
+choice) and `1775283` (the assertion spec), pushed
+`0db1f67..1775283`. Left untouched in the working tree: an in-flight
+`mcp_server.py` change plus `test/test_replay_check_mcp.py` (parallel
+work, deliberately not committed). edr-wd product code was not changed this
+round; its suites remain at the sixteenth-round numbers. 端云一致性 stays
+blocked on an authenticated Browser Use session (operator item); the
+upgraded web assertions are what that gate will replay once unblocked.
