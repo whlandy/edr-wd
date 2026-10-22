@@ -890,6 +890,7 @@ class WindowsUIACorrelator:
             automation_id=target_data.get("automationId"),
             identifier=target_data.get("identifier"),
             text=target_data.get("text"),
+            value=target_data.get("value"),
             rect=tuple(target_data["rect"]) if target_data.get("rect") else None,
             ancestry=tuple(
                 {

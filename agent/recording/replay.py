@@ -376,6 +376,22 @@ def _recorded_to_atomic(recorded: RecordedStep, step_no: int) -> AtomicTestStep:
     )
 
 
+class ResolutionEvidenceSink:
+    """Single-slot holder for the latest visual resolution evidence.
+
+    The materializer writes the provenance of every visual fallback
+    resolution (evidence mapping when an opted-in text confirmation ran,
+    ``None`` for a pure pixel resolution); the action dispatch reads and
+    clears it once when it emits the ``action_requested`` event, so the
+    real trace records which evidence channel actually decided the
+    coordinates. Purely in-process wiring — the dispatched tool payload
+    is never extended.
+    """
+
+    def __init__(self) -> None:
+        self.latest: dict[str, Any] | None = None
+
+
 class GoldenStepMaterializer:
     def __init__(
         self,
@@ -388,6 +404,7 @@ class GoldenStepMaterializer:
         trace_case_id: str | None = None,
         evidence_recorder: "ReplayEvidenceRecorder | None" = None,
         window_focus: "Callable[[str, str, str], Any] | None" = None,
+        resolution_evidence: "ResolutionEvidenceSink | None" = None,
     ) -> None:
         if replay_mode not in {"semantic_only", "semantic_first", "visual_only"}:
             raise RecordingModelError(
@@ -416,6 +433,27 @@ class GoldenStepMaterializer:
         self._evidence_recorder = evidence_recorder
         self._window_focus = window_focus
         self._focused_window: tuple[str, str, str] | None = None
+        self._resolution_evidence = resolution_evidence
+
+    def _record_resolution_evidence(self, step_id: str, action_id: str,
+                                    resolution: Any) -> None:
+        """Publish the resolution's evidence provenance for the trace.
+
+        The envelope binds the evidence to the materialized step and
+        action: the dispatch consumes it only for a matching action, and
+        every materialization entry clears the slot first — so a
+        confirmation-refused or otherwise undispatched action can never
+        lend its provenance to a later one. Purely in-process wiring; the
+        dispatched tool payload is never extended.
+        """
+        if self._resolution_evidence is None:
+            return
+        evidence = getattr(resolution, "evidence", None)
+        self._resolution_evidence.latest = (
+            {"step_id": step_id, "action_id": action_id,
+             "evidence": dict(evidence)}
+            if evidence else None
+        )
 
     def _focus_for(self, selector: ReplaySelector | None, observation: Any) -> Any:
         """Bring the step's own window forward, observing it afresh."""
@@ -495,6 +533,13 @@ class GoldenStepMaterializer:
                 case_id=self.trace_case_id,
                 step_id=step.step_id,
             )
+        if self._resolution_evidence is not None:
+            # Evidence lifecycle: every materialization entry — semantic,
+            # assertion, cleanup, retry or failure path — drops whatever
+            # evidence an earlier step left unpublished, so a
+            # confirmation-refused or otherwise undispatched action can
+            # never lend its provenance to a later one.
+            self._resolution_evidence.latest = None
         selector = self._selectors.get(step.step_id)
         observation = self._focus_for(selector, observation)
         if self._evidence_recorder is not None:
@@ -519,11 +564,14 @@ class GoldenStepMaterializer:
                     raise StepMaterializationError(
                         "visual_template_missing", "visual_only replay requires a visual selector"
                     )
+                # Strict pixel evaluation: no text confirmation opt-in, so a
+                # visual_only outcome can never depend on UIA/semantic data.
                 fallback = self._visual_resolver.resolve(step.action_id, selector, observation)
                 action_id = fallback.action_id
                 visual_args = dict(fallback.args)
                 target_ref = None
                 self.visual_fallbacks += 1
+                self._record_resolution_evidence(step.step_id, action_id, fallback)
             elif (self._replay_mode == "semantic_first" and
                   self._visual_resolver is not None and selector.visual is not None):
                 visual_evidence = self._visual_resolver.collect_evidence(selector, observation)
@@ -555,11 +603,19 @@ class GoldenStepMaterializer:
                     raise StepMaterializationError(code, str(exc),
                                                    details={"candidate_count": exc.candidate_count}) from exc
                 if fused.candidate is None:
-                    fallback = self._visual_resolver.resolve(step.action_id, selector, observation)
+                    # semantic_first already allows semantic sources, so this
+                    # is the one place the text confirmation may assist the
+                    # refused pixel margin; the resolution records its actual
+                    # evidence channel.
+                    fallback = self._visual_resolver.resolve(
+                        step.action_id, selector, observation,
+                        allow_text_confirmation=True,
+                    )
                     action_id = fallback.action_id
                     visual_args = dict(fallback.args)
                     target_ref = None
                     self.visual_fallbacks += 1
+                    self._record_resolution_evidence(step.step_id, action_id, fallback)
                 else:
                     item = fused.candidate
                     target_ref = TargetRef(
@@ -581,11 +637,15 @@ class GoldenStepMaterializer:
                         or selector.visual is None
                     ):
                         raise
-                    fallback = self._visual_resolver.resolve(step.action_id, selector, observation)
+                    fallback = self._visual_resolver.resolve(
+                        step.action_id, selector, observation,
+                        allow_text_confirmation=True,
+                    )
                     action_id = fallback.action_id
                     visual_args = dict(fallback.args)
                     target_ref = None
                     self.visual_fallbacks += 1
+                    self._record_resolution_evidence(step.step_id, action_id, fallback)
                 else:
                     self.semantic_resolutions += 1
                     candidate = next(
@@ -689,6 +749,9 @@ class ReplayRuntime:
     #: redact are refused rather than written.
     persist_replay_screenshots: bool = False
     end_product_run: Callable[[], None] | None = None
+    #: Carries each visual fallback resolution's evidence provenance from
+    #: the materializer to the action dispatch's real action_requested event.
+    resolution_evidence: ResolutionEvidenceSink | None = None
 
 
 @dataclass(frozen=True)
@@ -788,6 +851,7 @@ def _run_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRunRe
                 else None
             ),
             window_focus=target.window_focus,
+            resolution_evidence=target.resolution_evidence,
         )
 
     materializer = make_materializer(main_case.case_id)

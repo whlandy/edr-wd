@@ -447,11 +447,13 @@ class MCPActionDispatch:
         trace_store: TraceStore | None = None,
         timeout: float | None = None,
         run_token: str | None = None,
+        resolution_evidence: Any | None = None,
     ) -> None:
         self._agent = agent
         self._trace_store = trace_store
         self._timeout = timeout
         self._run_token = run_token
+        self._resolution_evidence = resolution_evidence
 
     def __call__(
         self,
@@ -463,19 +465,34 @@ class MCPActionDispatch:
         request_id: str,
     ) -> ActionReceipt:
         if self._trace_store is not None:
+            # Consume the materializer's pending resolution provenance
+            # exactly once, and only when it belongs to THIS action: a
+            # confirmation-refused or otherwise undispatched step must
+            # never lend its evidence channel to a later action's event.
+            entry = None
+            if self._resolution_evidence is not None:
+                entry = self._resolution_evidence.latest
+                self._resolution_evidence.latest = None
+            payload = {
+                "action_id": action_id,
+                "request_id": request_id,
+                "argument_keys": sorted(args),
+                "target_ref": dict(target_ref or {}),
+                "resolution": (
+                    "semantic" if target_ref
+                    else "visual" if action_id == "pointer.click_window"
+                    else "none"
+                ),
+            }
+            if entry and entry.get("action_id") == action_id and entry.get("evidence"):
+                payload["resolution_evidence"] = {
+                    **entry["evidence"],
+                    "step_id": entry.get("step_id"),
+                    "action_id": entry.get("action_id"),
+                }
             self._trace_store.append_dict(
                 EventType.ACTION_REQUESTED,
-                payload={
-                    "action_id": action_id,
-                    "request_id": request_id,
-                    "argument_keys": sorted(args),
-                    "target_ref": dict(target_ref or {}),
-                    "resolution": (
-                        "semantic" if target_ref
-                        else "visual" if action_id == "pointer.click_window"
-                        else "none"
-                    ),
-                },
+                payload=payload,
                 call_id=request_id,
             )
         payload = {

@@ -17,6 +17,16 @@ from .models import CaptureScope, RecordingModelError
 RECORDER_UI_MARKER = "[recorder_ui=true]"
 
 
+def _expected_default(target: Mapping[str, Any]) -> str:
+    """断言编辑器 expected 的预填默认值。
+
+    取被选组件的当前取值 `value` —— 即「抓内容再设断言」。读不到就空串，
+    行为与旧版一致（期望值仍可手填/改写）。
+    """
+    value = target.get("value") if isinstance(target, Mapping) else None
+    return str(value) if value is not None else ""
+
+
 @dataclass(frozen=True)
 class IndicatorCallbacks:
     pause: Callable[[], Any]
@@ -194,7 +204,8 @@ class TkRecordingIndicator:
         # Time ranges accept HH:MM or HH:MM:SS; durationSeconds overrides the
         # default minute/second precision. strftime assertions remain separate.
         fields = [
-            ("assertion", "text_equals"), ("expected", ""),
+            ("assertion", "text_equals"),
+            ("expected", _expected_default(self._assertion_target)),
             ("timeoutSeconds", "10"),
             ("durationSeconds", ""),
             ("automationId", self._assertion_target.get("automationId") or ""),
@@ -227,6 +238,8 @@ class TkRecordingIndicator:
                 payload.pop("durationSeconds")
             payload["expected"] = expected
             payload["bindPrevious"] = bool(bind_previous.get())
+            # 把编辑器抓到的当前取值一并带上，让 add_assertion 记进观测。
+            payload["value"] = (self._assertion_target or {}).get("value")
             if expected == "" and not self._messagebox.askyesno(
                 "Confirm empty expected", "Use an explicit empty-string expected value?", parent=dialog
             ):

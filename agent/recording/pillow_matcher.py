@@ -30,6 +30,24 @@ def _iou(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> f
 
 
 class PillowTemplateMatcher:
+    # A unique exact match is a strict local maximum of the coarse score
+    # grid: an offset of one stride costs the metric sharply, while a
+    # plateau of near-identical decoy tiles yields at most one maximum per
+    # tile. Local maxima are seeded in addition to the score-ordered seeds
+    # so that a unique target is refined even when globally outranked decoys
+    # own the score cap (2026-10-21 live diagnosis: true target coarse
+    # rank 217/770, full score 1.0 never reached). Final dedup, confidence,
+    # margin, and scale gates are unchanged; at most max_candidates extra
+    # seeds per scale, so worst-case cost is bounded to ~2x.
+    # GUARANTEE BOUND (verified condition, 2026-10-22): a unique exact
+    # match is refined only while fewer than max_candidates decoy/noise
+    # local maxima outscore its coarse-grid point. Beyond that (pinned by
+    # test_visual_seed_coverage::test_local_maxima_cap_starves_target_is_
+    # safe_failure) the target is starved again; the failure stays safe
+    # (no candidate reaches min_confidence, the resolver refuses, nothing
+    # is clicked).
+    LOCAL_MAX_EPSILON = 1e-4
+
     def __init__(
         self,
         *,
@@ -89,7 +107,14 @@ class PillowTemplateMatcher:
             if width > screenshot.width or height > screenshot.height:
                 continue
             template = template_source.resize((width, height), Image.Resampling.LANCZOS)
-            stride = max(2, min(width, height) // 4)
+            # Stride of min(w,h)//8 (not //4): the confidence metric is steep
+            # around sharp glyphs — an offset of one old stride already costs
+            # ~0.07, so a 4/8-sparse coarse grid could put no point near
+            # enough a unique optimum to seed it (2026-10-21 live frame).
+            # The refinement window (±stride) shrinks with the stride, so
+            # per-seed cost drops ~4x while the coarse grid grows 4x cheap
+            # points; worst-case total cost stays below the pre-fix level.
+            stride = max(2, min(width, height) // 8)
             coarse = []
             for y in range(0, screenshot.height - height + 1, stride):
                 for x in range(0, screenshot.width - width + 1, stride):
@@ -106,6 +131,34 @@ class PillowTemplateMatcher:
                 seeds.append((score, x, y, rect))
                 if len(seeds) >= self.max_candidates:
                     break
+            # Local-maxima coverage pass: seed every strict local maximum
+            # of the coarse grid (highest-scoring first, capped at
+            # max_candidates) that the score-ordered pass did not already
+            # seed. A decoy plateau contributes at most one maximum per
+            # tile, while a unique exact match always does, so a starved
+            # target is guaranteed a refined candidate whenever no decoy
+            # grid point inside its stride neighbourhood outranks it.
+            grid = {(x, y): score for score, x, y in coarse}
+            local_maxima = []
+            for (x, y), score in grid.items():
+                neighbours = [
+                    grid.get((x + dx, y + dy))
+                    for dx in (-stride, 0, stride)
+                    for dy in (-stride, 0, stride)
+                    if (dx, dy) != (0, 0)
+                ]
+                if all(
+                    score > neighbour + self.LOCAL_MAX_EPSILON
+                    for neighbour in neighbours
+                    if neighbour is not None
+                ):
+                    local_maxima.append((score, x, y))
+            local_maxima.sort(reverse=True)
+            for score, bx, by in local_maxima[: self.max_candidates]:
+                if any(bx == px and by == py for _, px, py, _ in seeds):
+                    continue
+                rect = (bx, by, bx + width, by + height)
+                seeds.append((score, bx, by, rect))
             for _, coarse_x, coarse_y, _ in seeds:
                 x_start, x_end = max(0, coarse_x - stride), min(screenshot.width - width, coarse_x + stride)
                 y_start, y_end = max(0, coarse_y - stride), min(screenshot.height - height, coarse_y + stride)

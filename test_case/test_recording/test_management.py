@@ -598,6 +598,7 @@ def test_assertion_editor_prefills_last_semantic_target():
     assert indicator.calls[-1] == ("assert", {
         "automationId": "btnApply", "identifier": None,
         "controlType": "Button", "name": "应用",
+        "value": None,
     })
     service.stop()
 
@@ -625,6 +626,7 @@ def test_assertion_editor_prefers_current_hover_target_over_last_event():
     assert indicator.calls[-1] == ("assert", {
         "automationId": "backupEnabled", "identifier": None,
         "controlType": "CheckBox", "name": "启用备份",
+        "value": None,   # 命中测试未读到组件取值时缺省为 None（value 预填）
     })
     service.stop()
 

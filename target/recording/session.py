@@ -69,6 +69,23 @@ class NullCaptureSource:
     def stop(self) -> None: pass
 
 
+def _assertion_default(target: ObservedTarget | None) -> dict:
+    """把选中组件映射成断言编辑器要预填的字段。
+
+    现在会带上组件的当前取值 `value`：让编辑器把「当前内容」预填进 expected，
+    正好是「选组件 → 抓内容 → 再设断言」。读不到 value 就缺省 None。
+    """
+    if not isinstance(target, ObservedTarget):
+        return {}
+    return {
+        "automationId": target.automation_id,
+        "identifier": target.identifier,
+        "controlType": target.control_type,
+        "name": target.text,
+        "value": target.value,
+    }
+
+
 class RecordingSession:
     def __init__(
         self,
@@ -313,14 +330,8 @@ class RecordingSession:
         target = current_target() if callable(current_target) else None
         if not isinstance(target, ObservedTarget):
             target = getattr(self._source, "last_observed_target", None)
-        default = None
-        if isinstance(target, ObservedTarget):
-            default = {
-                "automationId": target.automation_id,
-                "identifier": target.identifier,
-                "controlType": target.control_type,
-                "name": target.text,
-            }
+        # _assertion_default 会把组件的当前取值 value 一并带给编辑器预填。
+        default = _assertion_default(target) if isinstance(target, ObservedTarget) else None
         self._indicator.open_assertion_editor(default)
 
     def add_assertion(self, payload: Mapping[str, Any]) -> SessionReceipt:
@@ -479,6 +490,9 @@ class RecordingSession:
                 automation_id=identity["automationId"],
                 identifier=identity["identifier"],
                 text=identity["text"],
+                # 编辑器抓到的「当前内容」原样记进观测，与编辑器里看到的取值一致。
+                # 不参与 identity/fingerprint，不影响 golden 契约。
+                value=payload.get("value"),
                 protected=False,
             )
         event = RawCaptureEvent(

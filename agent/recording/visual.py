@@ -24,6 +24,15 @@ class VisualResolution:
     args: Mapping[str, Any]
     confidence: float
     margin: float
+    # True only when an explicitly opted-in text confirmation selected among
+    # the pixel candidates after the margin gate refused. The pure visual
+    # fallback (visual_only replay) never sets it. False for every legacy
+    # (pixel-margin-passed) resolution.
+    text_confirmed: bool = False
+    # Evidence provenance for the resolution: source, frame/window references
+    # and the refused margin when text_confirmed is True; None otherwise.
+    # Never carries the control text itself.
+    evidence: Mapping[str, Any] | None = None
 
 
 class SafeVisualResolver:
@@ -130,11 +139,117 @@ class SafeVisualResolver:
                             if self._valid_confidence(candidate)]
         return sorted(elements, key=lambda candidate: candidate.confidence, reverse=True)
 
+    @staticmethod
+    def _same_position(rect_a: tuple[int, int, int, int],
+                       rect_b: tuple[int, int, int, int]) -> bool:
+        """True when each rect's centre lies inside the other. Tolerates a
+        few pixels of matcher refinement offset; rejects side-by-side
+        neighbours of repeated icons."""
+        cx_a, cy_a = (rect_a[0] + rect_a[2]) // 2, (rect_a[1] + rect_a[3]) // 2
+        cx_b, cy_b = (rect_b[0] + rect_b[2]) // 2, (rect_b[1] + rect_b[3]) // 2
+        return (rect_b[0] <= cx_a < rect_b[2] and rect_b[1] <= cy_a < rect_b[3]
+                and rect_a[0] <= cx_b < rect_a[2] and rect_a[1] <= cy_b < rect_a[3])
+
+    def _text_confirmed_candidate(
+        self,
+        selector: ReplaySelector,
+        observation: Any,
+        candidates: list[VisualCandidate],
+        window_rect: tuple[int, int, int, int],
+        margin: float,
+    ) -> tuple[VisualCandidate | None, dict[str, Any] | None]:
+        """Opt-in fail-closed assist for a refused pixel margin.
+
+        Enabled only by an explicit policy that already allows semantic
+        sources (e.g. the semantic_first replay fallback); the pure
+        ``visual_only`` mode never calls it, so its outcome cannot depend
+        on UIA data. The recorded control text
+        (``selector.control.name``) must appear on exactly one control of
+        the fresh window-scoped observation, that control must lie inside
+        the locked window, and it must confirm exactly one candidate at or
+        above ``min_confidence``. Every missing, duplicated, or malformed
+        signal (including a malformed control rectangle) returns
+        ``(None, None)`` and the ambiguity stands. This never weakens a
+        pixel gate: candidates still need ``min_confidence``; the text
+        only selects among candidates the pixel path already produced.
+        The returned evidence mapping carries the actual source, the
+        frame/window references and the refused margin — never the
+        control text itself.
+        """
+        control = selector.control if isinstance(selector.control, Mapping) else {}
+        recorded = control.get("name")
+        if not isinstance(recorded, str) or not recorded.strip():
+            return None, None
+        controls = observation.get("controls") if isinstance(observation, Mapping) else None
+        if not isinstance(controls, (list, tuple)) or not controls:
+            return None, None
+        named = []
+        for item in controls:
+            if not isinstance(item, Mapping):
+                return None, None
+            if str(item.get("text") or "") != recorded:
+                continue
+            rect = item.get("rect") or item.get("rectangle")
+            if (not isinstance(rect, (list, tuple)) or len(rect) != 4
+                    or not all(isinstance(value, (int, float))
+                               and not isinstance(value, bool)
+                               and math.isfinite(value) for value in rect)):
+                return None, None
+            control_rect = tuple(int(value) for value in rect)
+            if not (control_rect[0] < control_rect[2]
+                    and control_rect[1] < control_rect[3]):
+                return None, None
+            named.append((control_rect, item))
+        if len(named) != 1:
+            return None, None
+        wx0, wy0, wx1, wy1 = window_rect
+        control_rect, control_item = named[0]
+        if not (wx0 <= control_rect[0] < control_rect[2] <= wx1
+                and wy0 <= control_rect[1] < control_rect[3] <= wy1):
+            return None, None
+        confirmed = [candidate for candidate in candidates
+                     if self._valid_confidence(candidate)
+                     and candidate.confidence >= self.min_confidence
+                     and self._same_position(candidate.rect, control_rect)]
+        if len(confirmed) != 1:
+            return None, None
+        active = observation.get("active_window")
+        active = active if isinstance(active, Mapping) else {}
+        identity = observation.get("window_identity")
+        identity = identity if isinstance(identity, Mapping) else {}
+        evidence = {
+            "text_confirmed": True,
+            "source": "uia_control_text",
+            "margin": margin,
+            "frame": {
+                "snapshot_id": (observation.get("snapshot_id")
+                                or observation.get("observation_id")),
+                "sha256": observation.get("screenshot_sha256"),
+                "origin": observation.get("screenshot_origin"),
+                "scope": observation.get("screenshot_scope"),
+            },
+            "window": {
+                "native_id": str(identity.get("native_id") or "legacy"),
+                "process_name": active.get("process_name",
+                                           active.get("processName")),
+                "pid": active.get("pid"),
+                "rect": active.get("rect") or active.get("rectangle"),
+            },
+            "control": {
+                "automation_id": (control_item.get("automationId")
+                                  or control_item.get("automation_id")),
+                "rect": list(control_rect),
+            },
+        }
+        return confirmed[0], evidence
+
     def resolve(
         self,
         action_id: str,
         selector: ReplaySelector,
         observation: Any,
+        *,
+        allow_text_confirmation: bool = False,
     ) -> VisualResolution:
         visual = selector.visual or {}
         screenshot_scope = (
@@ -184,12 +299,32 @@ class SafeVisualResolver:
             )
         second_confidence = candidates[1].confidence if len(candidates) > 1 else 0.0
         margin = best.confidence - second_confidence
+        text_confirmed = False
+        evidence: dict[str, Any] | None = None
         if len(candidates) > 1 and margin < self.min_margin:
-            raise StepMaterializationError(
-                "visual_match_ambiguous",
-                "best and second visual candidates are too close",
-                details={"candidate_count": len(candidates), "margin": margin},
-            )
+            # Strict pixel-margin refusal: the pure visual_only replay must
+            # stay independent of any UIA/semantic signal, so the text
+            # confirmation exists only behind an explicit opt-in from a
+            # policy that already allows semantic sources.
+            confirmed: VisualCandidate | None = None
+            if allow_text_confirmation:
+                confirmed, evidence = self._text_confirmed_candidate(
+                    selector, observation, candidates, window_rect, margin)
+            if confirmed is None:
+                raise StepMaterializationError(
+                    "visual_match_ambiguous",
+                    "best and second visual candidates are too close",
+                    details={"candidate_count": len(candidates), "margin": margin},
+                )
+            best = confirmed
+            # The confirmed candidate is a different (lower-confidence) pixel
+            # match; it must still satisfy the scale policy itself.
+            if not self.min_scale <= best.scale <= self.max_scale:
+                raise StepMaterializationError(
+                    "visual_scale_unsupported",
+                    f"visual match scale {best.scale} is outside policy",
+                )
+            text_confirmed = True
         x0, y0, x1, y1 = best.rect
         wx0, wy0, wx1, wy1 = window_rect
         if not (wx0 <= x0 < x1 <= wx1 and wy0 <= y0 < y1 <= wy1):
@@ -219,6 +354,8 @@ class SafeVisualResolver:
             },
             confidence=best.confidence,
             margin=margin,
+            text_confirmed=text_confirmed,
+            evidence=evidence,
         )
 
     def collect_evidence(self, selector: ReplaySelector, observation: Any) -> tuple[dict, ...]:

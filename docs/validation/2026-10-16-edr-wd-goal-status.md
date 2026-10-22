@@ -1103,3 +1103,435 @@ work, deliberately not committed). edr-wd product code was not changed this
 round; its suites remain at the sixteenth-round numbers. 端云一致性 stays
 blocked on an authenticated Browser Use session (operator item); the
 upgraded web assertions are what that gate will replay once unblocked.
+
+Eighteenth 2026-10-21 round: cloud-side assertion acceptance defects D1–D5
+fixed (minimal-fix round, P1×4 + P2×1) in `edr-cloud-recorder` (branch
+`maa-dp`), working tree deliberately left uncommitted for independent
+re-verification.
+
+The 2026-10-21 acceptance review (`doc/dsh-acceptance-20261021.md`, against
+`1775283`) ruled the upgraded assertion layer "not passing yet" with five
+reproducible defects. Each was fixed with a failing regression first:
+
+- **D1 (P1) read failures entered the comparison** — `count()` throwing fed
+  `-1` into the compare, so "at most 0" passed; `input_value()` /
+  `get_attribute()` throwing fed the exception string in, so
+  `not_equals` / `is_not_blank` passed on the error message. Fixed in
+  `rec_assert.py` (all three helpers + the three time poll loops) and in
+  `replay_trace.py` (count branch + readers loop): a failed read only sets
+  the last error and retries within budget; on timeout the assertion fails
+  carrying the last exception in the message (diagnostic, never an observed
+  value).
+- **D2 (P1) generated `to_contain` / `not_to_contain`** — attributes that do
+  not exist on Playwright `LocatorAssertions` (AttributeError in real
+  Chromium). Live API probe established this version has
+  `to_contain_text` / `not_to_contain_text` (normalized substring), so
+  `generate_spec.py` now emits those. Verification was upgraded from
+  "renders/compiles" to **executing the generated pytest function in real
+  Chromium**.
+- **D3 (P1) regex semantics split** — `to_have_text(re)` matches the raw,
+  unnormalized text with SEARCH semantics (live-proven: `re.compile("abc")`
+  passed on "prefix abc suffix"), so anchored wraps still diverged from the
+  replay chain (`re.fullmatch` on rendered inner_text). Fix: text ops
+  starts_with / ends_with / matches / is_blank / is_not_blank no longer use
+  Playwright regex at all — the generated spec polls
+  `matches_assert(locator.inner_text(), expected, op)`, the exact same pure
+  function and the same read the replay chain uses. One fullmatch
+  definition, one text source, both chains judge identically.
+- **D4 (P1) value/attribute over-normalization** — the new core normalized
+  whitespace for every assertion type, so input value `"a  b"` vs expected
+  `"a b"` passed (old behavior: strict), and `None`→`""` erased the
+  missing-attribute vs empty-attribute distinction. Fix:
+  `matches_assert(strict=True)` — text keeps whitespace normalization;
+  value/attribute/visible/checked compare strictly (no normalization,
+  `None` ≠ `""`); the explicit extension ops (contains/starts/ends/matches)
+  on value/attribute are declared separately (raw-string compare, `None`
+  treated as "not contained"). Old recordings without `op` remain
+  byte-compatible; the reviewer's split case now fails on both chains.
+- **D5 (P2) timerange missing duration rendered an empty positional
+  argument** (`expect_time_range(loc, "12:00", , read="value")` →
+  SyntaxError). Fix: omit the argument when `durationSeconds` is absent;
+  invalid durations (0 / float / bool / out of 1..86400) are rejected at
+  generation (`SpecGenerationError`) and fail fast at replay
+  (`TraceReplayError`) instead of silently defaulting.
+
+Evidence: the reviewer's own repro script
+(`output/dsh-review-20261021/reproduce.py`) re-run — all four read-error
+entries flipped from `RETURNED_SUCCESS` to `AssertionError … RuntimeError:
+detached`; `contains`/`not_contains` now succeed on both chains in real
+Chromium; the `matches` negative and the value `equals` negative now fail on
+both chains; the default timerange compiles **and executes** successfully.
+Full cloud-recorder suite **392 passed** (was 347; +45 regressions),
+including the new `test/test_generated_execution.py` — 36/36 same-recording
+dual-chain agreement cases (positive, negative, read-exception,
+missing-element, invalid-config) executed against a real Chromium page, not
+rendered strings. Full evidence and re-verification commands:
+`output/dsh-fix-20261021.md`.
+
+Constraints held this round: minimal fixes only; no baseline re-freeze;
+no product changes in edr-wd, trace-eval, or the ZCode orchestration
+(`scripts/mcp_server.py` + `test/test_replay_check_mcp.py` left untouched);
+no deploy, no new schedules, **no commit or push** — the mixed working
+tree is handed back for independent re-verification. Live gate status
+unchanged: 端云一致性 still blocked on an authenticated Browser Use session
+(operator item); the repaired web assertions are what that gate will replay
+once unblocked.
+
+Independent re-verification of the D1–D5 fix round: **passed** (fresh
+context, adversarial, reviewer ran everything itself). Its own probes,
+all outside the repo: old recordings without `op` through the real
+`to_v2` path + real Chromium dual chain 6/6 (legacy semantics fully
+restored); 30 boundary cases on `matches_assert` (strict ops vs `None`,
+non-str expected, unknown op raises in both modes); all invalid
+timerange durations rejected at generation and fail-fast at replay;
+regex-metachar dual-chain agreement 6/6 (the old search-semantics false
+pass on `[0-9]+` vs `"abc123"` is gone); every example line in the
+updated `references/assertions.md` executed verbatim in real Chromium.
+Full suite re-run: **392 passed**. Change-surface confirmed: the six
+fix-round files only; ZCode's in-flight `mcp_server.py` /
+`test_replay_check_mcp.py` untouched. One non-blocking P3 (doc example
+two `poll_until` lines shared one element class) corrected in the same
+pass. Commit/push still withheld per the round instruction — the mixed
+working tree stays as-is for the operator.
+
+Nineteenth 2026-10-21 round: D6 (P1) minimal-fix round in
+`edr-cloud-recorder`, after the second independent re-verification of the
+D1–D5 fix round passed but found a residual split: the four native text
+branches (`to_have_text` / `not_to_have_text` / `to_contain_text` /
+`not_to_contain_text`) compare Playwright's default `textContent` — which
+includes `display:none` descendants — while the replay chain reads
+`inner_text`. Reviewer's real-Chromium repro: on
+`<div>shown<span style=display:none>hidden</span></div>` the generated
+spec passed `contains "hidden"` (false pass) and failed `equals "shown"`,
+both opposite of the Trace.
+
+Fix (per the reviewer's minimal suggestion, keeping the Trace
+`inner_text` semantics as the single source of truth): all four generated
+text branches now pass `use_inner_text=True` (verified present on all four
+methods in this Playwright version; with it, the assertions read exactly
+what `inner_text` returns, so both chains judge the same text, with the
+retry budget and "read errors never enter the comparison" rules from D1
+intact). No replay-side change — the replay already read `inner_text`.
+
+Regressions first, then fix: the dual-chain matrix
+(`test/test_generated_execution.py`) gained 7 cases — hidden-descendant
+× the four text ops (before the fix: all five hidden-text expectations
+diverged, exactly the D6 repro), plus visible-control and dynamic
+show/hide (a `display:none` span un-hidden 150 ms after load) so the
+polling semantics stay proven on both chains. The reviewer's own
+`output/joint-acceptance-20261021/dsh-hidden-text.py` re-run:
+`contains "hidden"` → generated `AssertionError` + trace `failed`
+(both fail, agree); `equals "shown"` → both `success` (agree). One
+generated-shape assertion in `test/test_verify.py` was updated to pin the
+post-fix form (it asserted the old, D6-buggy rendering).
+`references/assertions.md` now documents the inner_text rule and shows the
+`use_inner_text=True` examples.
+
+Full cloud-recorder suite: **399 passed** (392 + 7 new D6 cases).
+Working tree still uncommitted by instruction; ZCode's in-flight
+`mcp_server.py` / `test_replay_check_mcp.py` untouched. Handed back for
+independent re-verification.
+
+Independent re-verification of the D6 fix: **passed** (fresh context,
+adversarial, all run by itself). Reviewer's original hidden-text repro now
+agrees on both chains (`contains "hidden"` both fail, `equals "shown"`
+both pass); full suite re-run **399 passed** (392 + the 7 D6 cases,
+accounts close); 13 adversarial probes over real Chromium dual chain:
+hidden-mechanism variants (visibility:hidden, whole-block, nested
+display:none, blank hidden span) all agree and match inner_text intent;
+dynamic show/hide at 400 ms passes both chains and at 9 s fails both
+(6 s sits inside the generated chain's window after its ~2 s goto/setup
+offset — a real pass, a pre-existing budget-window difference, not a D6
+defect); whitespace normalization and missing-element equality both agree
+with the D1 direction. Change surface confirmed: only the four
+`use_inner_text=True` branches plus the documented test/doc updates;
+replay-side text read untouched; ZCode in-flight files uncontaminated.
+The cloud-side assertion thread (D1–D6) is fully fixed and re-verified.
+
+Twentieth 2026-10-21 round: live re-probe of the 实时视觉候选 /
+image-template replay gates on 11.26 (now that the environment is back up),
+plus one P2 CLI error-contract defect found and fixed during the probe.
+Full evidence: `result-report/2026-10-21_live-visual/ROUND20-evidence.md`.
+
+Environment: tunnel/MCP/GUI all healthy, but **EDRClient.exe was not
+running** — the lone `logo1` window belonged to `HiSecEndpointAgent.exe`
+(root control `SafraUIMainWindow`, the documented two-process same-title
+case), so the xwin golden's `focus_window_selector(EDRClient.exe,
+EdrMainWindow)` returned `window_selector_not_found` and the replay
+pre-flight probe failed in ~70 ms (`backend_unavailable`, 0/2; two failed
+traces retained). Recovered through the designed `open-edr` /
+`activate_edr` path: EDRClient relaunched (pid 1964, HWND 1573628, same
+259,149 / 922x602 geometry and 44-control main page as round 14).
+
+Run A (semantic): the 15th-round cross-window golden
+(`live_edr_xwin_20261020`, Log Center open → Scan Log toggle) **replayed
+live: 2/2 steps, pathFidelity 1.0, `window_open` + `checked` verifiers,
+cleanup + trace integrity** (`TR-01a15e2c51de00000669`) — the cross-window
+replay pipeline re-verified after an application restart.
+
+Runs B/C (`visual_only`, the only ready goldens with click templates,
+`hisec_flow` / `hisec_scroll`): the **live visual candidate pipeline ran
+end-to-end** — window-scoped redacted frame → scale-aware match → 32 live
+candidates (cap) → best/second margins 0.0011 / 0.0008 below the policy
+threshold → `visual_match_ambiguous` → **refused, no click** (the
+ambiguity-rejection safety property held live; traces
+`TR-01a15e33578900009179`, `TR-01a15e34b26b0000456b`). Offline re-scoring
+of the captured live frame with the same `PillowTemplateMatcher` explains
+the margin: those goldens were recorded on the **Chinese-UI** state (control
+text `日志中心`), the live UI is now **English** (`Log Center`), and the
+true button region (window x 51–156) scored below the top-32 floor while
+all 32 candidates sit in the look-alike tile grid at x ≥ 283. Verdict:
+template-vs-live **state drift**, not a matcher/policy defect; a
+task-complete visual replay needs goldens re-recorded under the current
+English-UI state (next-round candidate, new recording assets).
+
+Defect (P2, agent-side CLI): the `replay` handler caught
+`RecordingModelError` from `build_replay_runtime` **without importing the
+name** → any local validation error crashed with a raw `NameError`
+traceback + exit 1 instead of the JSON error contract (reproduced live
+during Run B). Fixed with a one-line import; regression
+`test_case/test_cli_replay_errors.py` (pre-fix: exact NameError; post-fix:
+clean `{"ok": false, "code": "visual_template_missing", ...}` + exit 1,
+and no remote action dispatched — only the `recording_status` pre-flight).
+Post-fix live re-run of the crashing command returns the clean JSON.
+
+Suites: focused CLI/replay contracts **96 passed**; full offline suite
+**2026 passed, 613 deselected**. Working-tree surface this round:
+`agent/cli.py` (+1/−1) and the new test file only; parallel-thread WIP
+untouched; workspace uncommitted by instruction.
+
+Twenty-first 2026-10-21 round: 跨窗录制 + 实时视觉候选 under the current
+**English UI** on 11.26 — recorded a fresh two-step Log Center cross-window
+golden with real pre-action visual templates and result verifiers, replayed
+it `visual_only` twice (second time from a freshly relaunched window state),
+and diagnosed the recurring `visual_match_ambiguous` block down to a
+minimal reproducible gap. Full evidence:
+`result-report/2026-10-21_live-visual/ROUND21-evidence.md` (RUN traces
+`TR-01a15ec56b8b0000ee8c`, `TR-01a15ed999ef0000cc0d`).
+
+Recording (the new gap the round-20 diagnosis pointed at — Chinese-UI
+templates vs English live UI) is **closed**: golden
+`recordings/live-visual-20261021/live_edr_visual_20261021` (session
+`REC-4da074d8…`), 2 steps, `status: ready`, English control text
+(`Log Center`, `Scan Log`):
+
+- step-0001 `gui.click` on `…operationWidget.logCenterBtn`, window scope
+  `EDRClient.exe`/root `EdrMainWindow`, visual template
+  `assets/step-0001-element.png` (105×98) + context (201×194),
+  `redacted: true`, element/context sha256-bound, verifier
+  `window_open` (exists, `EDRClient.exe`, title `Log Center`, 5 s);
+- step-0002 `gui.click` on
+  `LogCenterWindow.mainWidget.topWidget.virusScanLogBtn`, window scope
+  root `LogCenterWindow` (cross-window ✓), template 70×27 + context
+  166×123 same structure, verifier `checked` = true.
+
+Event chain: `pointer_click` → `window_transition` opened (causal-bound to
+step 1) → `toggle_change` value=true (step 2). captureDiagnostics all
+zero; three CAP-*.png persisted under `assets/observations/`; catalog
+1.0.1 digest and `windows_hisec`/`windows_pywinauto` bindings intact.
+
+Replay: both `visual_only` runs were **refused by the ambiguity gate**
+(no click dispatched, no threshold touched): RUN 1 margin 0.000424 (32
+candidates), RUN 2 margin 0.000344 from the fresh state (main window
+closed via its own `closeBtn`, relaunched with `activate_edr`; note the
+process survives window close — a full process restart is not reachable
+with current privileges, `taskkill` was access-denied, documented in the
+evidence). Cross-launch reproducibility confirmed.
+
+Offline re-scoring (same matcher + resolver parameters, live frame after
+RUN 2, `/tmp/live21_main_frame.png`) localizes the block to **candidate
+ranking, not template, not state drift**: the true button region is
+pixel-identical to the template (mean abs diff 0.0, full-precision score
+1.000000) — zero drift — but its nearest coarse-grid point ranks 217/770
+because 216 grid points in the look-alike icon cluster score higher
+(0.9567 at frame (216,216) etc.); the top-32 seed cap starves the true
+position before refinement, and the context path (which would have
+constrained the search) is discarded by design when its own best-second
+margin (0.0246) is below 0.03. Minimal reproducible gap:
+`PillowTemplateMatcher()(step-0001-element.png, 922×602 frame @ origin
+[259,10])` → true position absent from top-32; coarse rank 217/770.
+
+Gate status: 跨窗录制 re-established under the English UI (recording
+milestone replicated); 实时视觉候选 ambiguity-refusal property re-verified
+live twice; task-complete visual replay remains gated on the matcher
+ranking defect. No threshold/assertion/matcher code was changed this
+round; no commit/push; protected cloud-side and ZCode files untouched;
+workspace uncommitted. Next-round candidate (not done here, outside the
+record/replay+docs mandate): matcher search-side fix (per-cluster seed
+retention and/or context-anchored element seeding) with an offline
+regression using this golden + live frame as the fixture.
+
+Twenty-second 2026-10-22 round: 实时视觉候选 minimal matcher search fix.
+Turned the round-21 coarse-grid top-32 seed starvation into a repeatable
+offline failing regression (synthetic dense same-family cluster + off-grid
+unique target, no /tmp dependency:
+`test_case/test_recording/test_visual_seed_coverage.py`, RED confirmed
+against `git show HEAD:agent/recording/pillow_matcher.py`, GREEN on the
+fixed tree). Fix (only `agent/recording/pillow_matcher.py`, +47/-1):
+seed the strict local maxima of the coarse score grid (highest first,
+capped) alongside the score-ordered seeds — a unique exact match is always
+a local maximum, a look-alike plateau at most one per tile — plus stride
+min(w,h)//4 → //8 (the steep metric made the old funnel miss unique
+optima; the ±stride refinement window shrinks, net cost drops). Final
+dedup/cap and every resolver gate unchanged (0.92/0.05/0.03,
+redacted/window/digest checks, duplicate-icon ambiguity refusal, no
+full-frame brute force, no silent first-pick). Counterexamples pinned:
+truly repeated target → ambiguous refusal; dense identical family →
+refusal; context tie → context dropped, element path decides; 1.25×
+scale accepted; 0.6× scale → visual_scale_unsupported. Performance bound
+recorded: live frame element 46s→26.4s (0.57×), context 158s→116.7s
+(0.74×), 922×602 synthetic 21.9s (<90s bound test, @pytest.mark.regression);
+construction bound ≤2×. Suites: test_recording 514 passed; full offline
+2643 passed / 28 deselected / 0 failed. Offline comparison on the real
+English golden + 11.26 live frame: true position now enters refinement
+and is top-1 at conf 1.0 (element), but margin 0.0431 < 0.05 vs the
+near-duplicate tile family (0.9569) and context margin 0.0246 < 0.03 →
+the gates still correctly block. Live visual_only replay RUN3 (trace
+TR-01a15f44053e0000d8d1, Log Center path, no business writes, window
+normalized to (259,10) via MoveWindow after live-state check): step-0001
+blocked visual_match_ambiguous with margin 0.0431489421165292 — identical
+to offline — 32 candidates, step-0002 skipped_after_abort, 8 events, zero
+clicks dispatched, window-scoped redacted captures (sha only),
+traceIntegrity true, two-step verifiers not reached (block precedes
+verification). Gap recorded (not relaxed): the real UI's near-duplicate
+tile/radio families keep the true margin below the safety gates — a
+UI-level discriminability gap, no longer a search gap. Task-level visual
+replay remains BLOCKED by design. Protected: ZCode root/trace-eval and
+cloud-side WIP untouched (edr-cloud-recorder tree identical to the
+hand-back set), no commit/push/deploy/re-freeze. Evidence:
+result-report/2026-10-21_live-visual/ROUND22-evidence.md.
+
+Twenty-third 2026-10-22 round: 实时视觉候选 minimal discriminability fix.
+Read-only survey found no OCR engine anywhere; the empty `ocr_boxes`
+channel (agent-side plumbing exists, target produces nothing) and the
+existing `ocr_text` precedent in the semantic_first fused-locator path.
+The safe source that does separate the real UI neighbours is the fresh
+window-scoped observation's verified UIA control tree: in the RUN3
+snapshot "Log Center" is unique tree-wide with rect == the true candidate
+rect, while every look-alike tile carries different text ("Quarantine &
+Blocking Area", "Trusted List", "Quick Scan"). Minimal resolver extension
+(`agent/recording/visual.py` only): at the refused pixel-margin gate and
+NOWHERE else, a fail-closed text confirmation — the recorded
+`selector.control.name` must equal the text of exactly one control inside
+the locked window, which must confirm exactly one candidate at/above
+min_confidence; missing/duplicate/near-text/out-of-window signals leave
+the refusal standing. No threshold touched (both live steps still refuse
+at pixel margin 0.0431/~0.003 < 0.05), no new candidates, no silent
+first-pick, no verifier bypass; `VisualResolution.text_confirmed` exposes
+when the rescue ran. R22 guarantee bounded as instructed: docstring now
+states the unique-match refinement guarantee holds only while fewer than
+max_candidates decoy local maxima outrank it, pinned by a new
+counterexample (34 decoy peaks > cap → target starved again → safe
+visual_match_ambiguous refusal). Tests: 10 new text-confirmation cases
+(positive rescue; same-name/near-text/missing-tree/no-text/out-of-window/
+no-recorded-name/duplicate-candidate refusals; selected-state radio
+refused at the confidence gate; missing template refused at the model
+layer; legacy margin-pass behaviour unchanged) + the cap counterexample;
+test_recording 525 passed, full offline 2654 passed / 28 deselected.
+Offline re-verification on real material (RUN3 control tree + live frame
++ golden selector with runtime digest verification): text_confirmed=True,
+confidence 1.0, margin 0.0431, click (103,451) == true button centre.
+Live visual_only replays on the no-business-write Log Center path:
+RUN4 (TR-01a15f8b5bd700001d94, no token) — visual resolution succeeded,
+blocked pre-dispatch by the profile confirmation gate
+(confirmation_required, risk=high, gui_mutation), zero dispatches;
+RUN5 (TR-01a15f91143a0000d68e, operator token --confirm-action
+pointer.click_window as authorized) — taskSuccess=true, 2/2 steps passed,
+both resolved via the pure visual path, clicks landed exactly on the true
+Log Center button (362,461) and Scan Log radio (594,298), window_open and
+control_checked_equals verifiers passed, extraActionCount=0,
+traceIntegrity=true. Residual live state (Log Center open, radio checked)
+matches the round-21 post-recording state; no further GUI actions taken.
+Protected: ZCode root/trace-eval and cloud-side WIP untouched; no
+commit/push/deploy/re-freeze. Evidence:
+result-report/2026-10-21_live-visual/ROUND23-evidence.md.
+
+Twenty-fourth 2026-10-22 round: round-23 review fixes (V1/P1 + V2/P2).
+The independent acceptance correctly showed that round-23's UIA-text
+disambiguation silently changed the pure visual_only replay contract:
+with identical pixels (1.0/0.99) and an identical observation, only the
+recorded control name decided whether a refused-margin step materialized
+(30,30) vs (120,30) or refused, and `text_confirmed` never reached the
+real trace events. Fixes, all inside edr-wd locator routing/evidence:
+(1) visual_only restored to the strict pixel-margin refusal — the text
+confirmation is now an explicit opt-in (`allow_text_confirmation=False`
+by default) that the visual_only call site never sets, so its outcome is
+byte-equivalent to the accepted round-22 behaviour (refused margin stays
+`visual_match_ambiguous`, as live-demonstrated by RUN1–RUN3);
+(2) the assist is enabled only in the explicitly semantic semantic_first
+visual fallbacks, keeps every fail-closed refusal (same-name, missing
+source, near-text, out-of-window, duplicate candidates, malformed
+signals), and records its actual evidence channel — source
+"uia_control_text", frame sha256/origin/scope, window process/pid/rect,
+control automation_id/rect and the refused margin, never the control
+text — into the real action_requested event via a consume-once
+ResolutionEvidenceSink (`resolution_evidence` payload field; the
+dispatched tool args are untouched);
+(3) V2: a named control's rectangle is validated (four finite numbers,
+no booleans, positive area) before conversion; malformed data keeps the
+structured `visual_match_ambiguous` refusal instead of raising
+ValueError/TypeError.
+Regressions added first, per the review: materializer level (the
+supervisor's exact counterexample — three recorded names, all refused,
+zero visual fallbacks; a pure-pixel visual_only resolution publishes no
+evidence) and trace level (semantic_first assist hits the real event
+with the evidence channel and (30,30); name "Wrong Window" refuses with
+zero dispatches) plus ten malformed-rect parameterized refusals.
+test_recording 530 passed; full offline suite green. The supervision
+reproduce script re-run after the fix prints refusals for every name
+variant and structured errors for malformed rects; the RUN4/RUN5 chains
+are read-only intact. ROUND23-evidence.md now carries a dated erratum
+reclassifying RUN5 as template+UIA-assisted navigation and correcting
+the "pure visual" / "gates unchanged" wording; the old runs and events
+are preserved untouched. No live replay this round: the fix restores the
+already twice-demonstrated pure-pixel refusal path, so a new live run
+adds no information (pure visual remains blocked on this material).
+Protected: ZCode root/trace-eval and cloud-side WIP untouched; no
+commit/push/deploy; thresholds 0.92/0.05/0.03 unchanged in value and the
+visual_only refusal semantics restored.
+
+Twenty-fifth 2026-10-22 round: resolution-evidence lifecycle fix (V3/P2).
+The independent review reproduced a cross-step attribution flaw: the
+confirmation gate runs after materialization and before dispatch, so an
+assisted main action refused with `confirmation_required` (zero
+dispatches) left its evidence in the single-slot sink, and the following
+pure-semantic cleanup dispatch consumed it unconditionally — its real
+action_requested event (resolution=semantic, snapshot OBS-FRESH-4) then
+carried the main step's uia_control_text/text_confirmed/margin, a pure
+audit-provenance distortion (no mis-click, no gate bypass). Minimal
+lifecycle fix per the review's suggestion, all inside edr-wd evidence
+routing: (1) every materialization entry — semantic, assertion, cleanup,
+retry and failure paths — clears the slot first, so a confirmation-
+refused or otherwise undispatched action can never lend its provenance
+to a later one; (2) the published envelope now binds the evidence to its
+materialized `{step_id, action_id}`; (3) the dispatch consumes the slot
+exactly once and writes `resolution_evidence` only when the pending
+entry's action matches the action actually being dispatched (otherwise
+the event stays clean); (4) the evidence gains a traceable current
+observation/snapshot reference (`frame.snapshot_id`) and a stable window
+reference (`window.native_id`, locator-consistent "legacy" default),
+still redacted with no control text. Regressions mirror the review's
+matrix: the exact confirmation-blocked-main → semantic-cleanup flow
+(main zero dispatches; cleanup event carries no resolution_evidence), a
+matcher-refused main variant, two consecutive assisted steps each
+carrying their own step_id/margin, a no-trace-store dispatch, and
+extended integration assertions for the new references. The supervision
+reproduce script now prints zero `resolution_evidence` occurrences;
+the round-23 script's visual_only isolation and malformed-rect refusals
+are unchanged. test_recording 534 passed; full offline suite green;
+RUN4/RUN5 events remain untouched. Protected: ZCode root/trace-eval and
+cloud-side WIP untouched; no commit/push/deploy; thresholds and
+verifiers unchanged.
+
+Closeout 2026-10-22: handover summary created at
+`/Users/edr-test/ai-projects/doc/dsh-closeout-20261022.md` (facts only; no
+new implementation, live action, commit, push, deploy, re-freeze or
+automation). One erratum to the twenty-fifth-round entry above: its
+"test_recording 534 passed" is a counting-expression slip — the suite
+collected 534 items of which 533 passed and 1 was deselected, exactly as
+the independent round-7 verification reported; the full-offline figure
+"2663 passed / 28 deselected" in the same entry remains a self-reported
+result and has not been independently re-run. Nothing else in the round
+entries is withdrawn; the RUN5 "pure visual" wording was already
+corrected by the twenty-fourth-round erratum and re-confirmed
+independently.

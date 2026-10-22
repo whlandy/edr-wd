@@ -307,6 +307,10 @@ class ObservedTarget:
     rect: tuple[int, int, int, int] | None = None
     ancestry: tuple[Mapping[str, str], ...] = ()
     protected: bool | None = None
+    # 组件当前的「内容/取值」（编辑框文本、状态文本、选中项等），与 text
+    # （辅助功能名/标签）区分。给 record assert 编辑器预填 expected 用；
+    # 读不到就是 None，绝不因此炸录制。不参与 golden schema。
+    value: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("snapshot_id", "target_id", "fingerprint"):
@@ -317,7 +321,7 @@ class ObservedTarget:
                     path=f"observedTarget.{field_name}",
                 )
         for field_name in (
-            "control_type", "automation_id", "identifier", "text",
+            "control_type", "automation_id", "identifier", "text", "value",
         ):
             value = getattr(self, field_name)
             if value is not None and not isinstance(value, str):

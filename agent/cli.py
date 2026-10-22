@@ -33,7 +33,7 @@ from agent.interaction.runtime import execute_intent
 from agent.trace.events import EventType
 from agent.subagent.target_agent import TargetSubAgent
 from agent.target_config import TargetConfig, add_config_arguments, run_config_command
-from target.recording.models import RawRecording
+from target.recording.models import RawRecording, RecordingModelError
 from target.action_catalog import ACTIONS_V1, CATALOG_VERSION, catalog_digest, get_spec
 from target.product_profiles import BUILTIN_CAPABILITIES, DEFAULT_APP_ID, INSTALLED_APPS
 

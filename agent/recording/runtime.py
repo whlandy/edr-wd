@@ -27,7 +27,7 @@ from target.recording.models import RecordingModelError
 from .mcp_runtime import MCPActionDispatch, MCPObservationProvider
 from .models import GoldenTrace
 from .pillow_matcher import PillowTemplateMatcher
-from .replay import ReplayRuntime
+from .replay import ReplayRuntime, ResolutionEvidenceSink
 from .visual import SafeVisualResolver
 
 
@@ -288,9 +288,11 @@ def build_replay_runtime(
         if replay_mode != "semantic_only":
             resolver = build_visual_resolver(Path(asset_root).expanduser().resolve())
 
+        resolution_evidence = ResolutionEvidenceSink()
         executor = AtomicExecutor(
             dispatch=MCPActionDispatch(agent, trace_store=trace_store, timeout=timeout,
-                                       run_token=run_token),
+                                       run_token=run_token,
+                                       resolution_evidence=resolution_evidence),
             observation_provider=observations,
             confirmation_gate=ConfirmationGate(),
             risk_lookup=_risk_lookup,
@@ -307,6 +309,7 @@ def build_replay_runtime(
             replay_mode=replay_mode,
             visual_resolver=resolver,
             persist_replay_screenshots=persist_screenshots,
+            resolution_evidence=resolution_evidence,
             window_focus=lambda process_name, title_regex, root="": (
                 observations.get_snapshot(
                     observations.focus_window(process_name, title_regex, root)
