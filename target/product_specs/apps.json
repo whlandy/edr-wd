@@ -15,85 +15,20 @@
             "entry_path": "C:\\Program Files\\HiSec-Endpoint\\core\\safra\\HisecEndpointAgent.exe"
           },
           "windows": [
-            {
-              "role": "entry",
-              "name": "华为智能终端安全系统",
-              "names": [
-                "华为智能终端安全系统",
-                "logo1"
-              ],
-              "window_path": "entry",
-              "process_names": [
-                "HisecEndpointAgent.exe"
-              ],
-              "title_pattern": "^(华为智能终端安全系统|logo1)$"
-            },
-            {
-              "role": "main",
-              "name": "EDRClient 主窗口",
-              "names": [
-                "EDRClient",
-                "华为HiSec Endpoint",
-                "logo1"
-              ],
-              "window_path": "main",
-              "process_names": [
-                "EDRClient.exe"
-              ],
-              "title_pattern": "^(EDRClient|华为HiSec Endpoint|logo1)$"
-            },
-            {
-              "role": "log_center",
-              "name": "日志中心",
-              "names": [
-                "日志中心",
-                "Log Center"
-              ],
-              "window_path": "main/log_center",
-              "process_names": [
-                "EDRClient.exe"
-              ],
-              "title_pattern": "^(日志中心|Log Center)$",
-              "parent_role": "main"
-            },
-            {
-              "role": "dialog",
-              "name": "对话框（动态标题）",
-              "window_path": "main/dialog",
-              "process_names": [
-                "EDRClient.exe"
-              ],
-              "parent_role": "main"
-            }
+            {"role": "entry", "name": "华为智能终端安全系统", "names": ["华为智能终端安全系统", "logo1"], "window_path": "entry", "process_names": ["HisecEndpointAgent.exe"], "title_pattern": "^(华为智能终端安全系统|logo1)$"},
+            {"role": "main", "name": "EDRClient 主窗口", "names": ["EDRClient", "华为HiSec Endpoint", "logo1"], "window_path": "main", "process_names": ["EDRClient.exe"], "title_pattern": "^(EDRClient|华为HiSec Endpoint|logo1)$"},
+            {"role": "log_center", "name": "日志中心", "names": ["日志中心", "Log Center"], "window_path": "main/log_center", "process_names": ["EDRClient.exe"], "title_pattern": "^(日志中心|Log Center)$", "parent_role": "main"},
+            {"role": "dialog", "name": "对话框（动态标题）", "window_path": "main/dialog", "process_names": ["EDRClient.exe"], "parent_role": "main"}
           ],
           "allowed_action_ids": [
-            "app.activate",
-            "gui.click",
-            "gui.click_target",
-            "gui.select",
-            "gui.type_text",
-            "hisec.activate_edr",
-            "hisec.restore_edr",
-            "observe.control_text",
-            "observe.control_tree",
-            "observe.find_control",
-            "observe.screenshot",
-            "observe.wait_window",
-            "observe.window_lock",
-            "observe.window_open",
-            "observe.windows",
-            "pointer.click_screen",
-            "pointer.click_window",
-            "pointer.double_click",
-            "pointer.drag",
-            "pointer.hover",
-            "pointer.middle_click",
-            "pointer.right_click",
-            "pointer.scroll",
-            "session.connect",
-            "session.window_lock.clear",
-            "session.window_lock.set",
-            "session.window_lock.verify"
+            "app.activate", "gui.click", "gui.click_target", "gui.select", "gui.type_text",
+            "hisec.activate_edr", "hisec.restore_edr", "observe.control_text",
+            "observe.control_tree", "observe.find_control", "observe.screenshot",
+            "observe.wait_window", "observe.window_lock", "observe.window_open",
+            "observe.windows", "pointer.click_screen", "pointer.click_window",
+            "pointer.double_click", "pointer.drag", "pointer.hover", "pointer.middle_click",
+            "pointer.right_click", "pointer.scroll", "session.connect",
+            "session.window_lock.clear", "session.window_lock.set", "session.window_lock.verify"
           ],
           "intents": {}
         },
@@ -106,75 +41,19 @@
             "entry_path": "/Applications/HiSecEndpoint.app/Contents/MacOS/safra/HiSecEndpointAgent"
           },
           "windows": [
-            {
-              "role": "entry",
-              "name": "华为智能终端安全系统",
-              "names": [
-                "华为智能终端安全系统"
-              ],
-              "window_path": "entry",
-              "process_names": [
-                "HisecEndpointAgent"
-              ]
-            },
-            {
-              "role": "main",
-              "name": "EDRClient 主窗口",
-              "names": [
-                "华为HiSec Endpoint"
-              ],
-              "window_path": "main",
-              "process_names": [
-                "EDRClient"
-              ]
-            },
-            {
-              "role": "log_center",
-              "name": "日志中心",
-              "names": [
-                "日志中心"
-              ],
-              "window_path": "main/log_center",
-              "process_names": [
-                "EDRClient"
-              ],
-              "title_pattern": "日志中心",
-              "parent_role": "main"
-            },
-            {
-              "role": "dialog",
-              "name": "对话框（动态标题）",
-              "window_path": "main/dialog",
-              "process_names": [
-                "EDRClient"
-              ],
-              "parent_role": "main"
-            }
+            {"role": "entry", "name": "华为智能终端安全系统", "names": ["华为智能终端安全系统"], "window_path": "entry", "process_names": ["HisecEndpointAgent"]},
+            {"role": "main", "name": "EDRClient 主窗口", "names": ["华为HiSec Endpoint"], "window_path": "main", "process_names": ["EDRClient"]},
+            {"role": "log_center", "name": "日志中心", "names": ["日志中心"], "window_path": "main/log_center", "process_names": ["EDRClient"], "title_pattern": "日志中心", "parent_role": "main"},
+            {"role": "dialog", "name": "对话框（动态标题）", "window_path": "main/dialog", "process_names": ["EDRClient"], "parent_role": "main"}
           ],
           "allowed_action_ids": [
-            "app.activate",
-            "gui.click",
-            "gui.click_target",
-            "hisec.activate_edr",
-            "hisec.restore_edr",
-            "observe.control_tree",
-            "observe.find_control",
-            "observe.screenshot",
-            "observe.wait_window",
-            "observe.window_lock",
-            "observe.window_open",
-            "observe.windows",
-            "pointer.click_screen",
-            "pointer.click_window",
-            "pointer.double_click",
-            "pointer.drag",
-            "pointer.hover",
-            "pointer.middle_click",
-            "pointer.right_click",
-            "pointer.scroll",
-            "session.connect",
-            "session.window_lock.clear",
-            "session.window_lock.set",
+            "app.activate", "gui.click", "gui.click_target", "hisec.activate_edr",
+            "hisec.restore_edr", "observe.control_tree", "observe.find_control",
+            "observe.screenshot", "observe.wait_window", "observe.window_lock",
+            "observe.window_open", "observe.windows", "pointer.click_screen",
+            "pointer.click_window", "pointer.double_click", "pointer.drag", "pointer.hover",
+            "pointer.middle_click", "pointer.right_click", "pointer.scroll",
+            "session.connect", "session.window_lock.clear", "session.window_lock.set",
             "session.window_lock.verify"
           ],
           "intents": {}
@@ -189,51 +68,17 @@
           "profile_id": "windows_notepad",
           "version": "1",
           "backend": "windows_pywinauto",
-          "application": {
-            "path": "C:\\Windows\\System32\\notepad.exe"
-          },
+          "application": {"path": "C:\\Windows\\System32\\notepad.exe"},
           "windows": [
-            {
-              "role": "main",
-              "name": "记事本主窗口",
-              "names": [
-                "记事本",
-                "Notepad"
-              ],
-              "window_path": "main",
-              "process_names": [
-                "Notepad.exe"
-              ],
-              "title_pattern": ".*(记事本|Notepad).*"
-            },
-            {
-              "role": "dialog",
-              "name": "记事本对话框（动态标题）",
-              "window_path": "main/dialog",
-              "process_names": [
-                "Notepad.exe"
-              ],
-              "parent_role": "main"
-            }
+            {"role": "main", "name": "记事本主窗口", "names": ["记事本", "Notepad"], "window_path": "main", "process_names": ["Notepad.exe"], "title_pattern": ".*(记事本|Notepad).*"},
+            {"role": "dialog", "name": "记事本对话框（动态标题）", "window_path": "main/dialog", "process_names": ["Notepad.exe"], "parent_role": "main"}
           ],
           "allowed_action_ids": [
-            "session.connect",
-            "session.window_lock.set",
-            "session.window_lock.clear",
-            "session.window_lock.verify",
-            "observe.window_lock",
-            "observe.windows",
-            "observe.window_open",
-            "observe.wait_window",
-            "observe.control_tree",
-            "observe.find_control",
-            "observe.screenshot",
-            "gui.click",
-            "gui.click_target",
-            "gui.type_text",
-            "pointer.click_window",
-            "pointer.drag",
-            "pointer.scroll"
+            "session.connect", "session.window_lock.set", "session.window_lock.clear",
+            "session.window_lock.verify", "observe.window_lock", "observe.windows",
+            "observe.window_open", "observe.wait_window", "observe.control_tree",
+            "observe.find_control", "observe.screenshot", "gui.click", "gui.click_target",
+            "gui.type_text", "pointer.click_window", "pointer.drag", "pointer.scroll"
           ],
           "intents": {}
         }
@@ -253,47 +98,43 @@
             "bundle_id": "com.apple.calculator"
           },
           "windows": [
-            {
-              "role": "main",
-              "name": "计算器主窗口",
-              "names": [
-                "计算器",
-                "Calculator"
-              ],
-              "window_path": "main",
-              "process_names": [
-                "Calculator"
-              ],
-              "title_pattern": "^(计算器|Calculator)$"
-            },
-            {
-              "role": "dialog",
-              "name": "计算器对话框（动态标题）",
-              "window_path": "main/dialog",
-              "process_names": [
-                "Calculator"
-              ],
-              "parent_role": "main"
-            }
+            {"role": "main", "name": "计算器主窗口", "names": ["计算器", "Calculator"], "window_path": "main", "process_names": ["Calculator"], "title_pattern": "^(计算器|Calculator)$"},
+            {"role": "dialog", "name": "计算器对话框（动态标题）", "window_path": "main/dialog", "process_names": ["Calculator"], "parent_role": "main"}
           ],
           "allowed_action_ids": [
-            "session.connect",
-            "session.window_lock.set",
-            "session.window_lock.clear",
-            "session.window_lock.verify",
-            "observe.window_lock",
-            "observe.windows",
-            "observe.window_open",
-            "observe.wait_window",
-            "observe.control_tree",
-            "observe.find_control",
-            "observe.screenshot",
-            "gui.click",
-            "gui.click_target",
-            "pointer.click_window",
-            "pointer.drag",
-            "pointer.scroll"
+            "session.connect", "session.window_lock.set", "session.window_lock.clear",
+            "session.window_lock.verify", "observe.window_lock", "observe.windows",
+            "observe.window_open", "observe.wait_window", "observe.control_tree",
+            "observe.find_control", "observe.screenshot", "gui.click", "gui.click_target",
+            "pointer.click_window", "pointer.drag", "pointer.scroll"
           ],
+          "intents": {}
+        }
+      ]
+    },
+    {
+      "app_id": "qa_recording_fixture",
+      "name": "EDR-WD 录制 QA 隔离 fixture（powershell WinForms 窗口，非 EDR 产品）",
+      "profiles": [
+        {
+          "profile_id": "qa_recording_fixture",
+          "version": "1",
+          "backend": "windows_pywinauto",
+          "application": {
+            "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+          },
+          "windows": [
+            {
+              "role": "main",
+              "name": "录制 QA 固定窗口（唯一标题，root=RecordingFixture）",
+              "names": ["EDR-WD Native Recording QA [qa-dsh-fixed-1025]"],
+              "window_path": "main",
+              "process_names": ["powershell.exe"],
+              "title_pattern": "^EDR-WD Native Recording QA \\[qa-dsh-fixed-1025\\]$",
+              "root_control_ids": ["RecordingFixture"]
+            }
+          ],
+          "allowed_action_ids": ["gui.click", "gui.type_text"],
           "intents": {}
         }
       ]
@@ -311,36 +152,15 @@
             "bundle_id": "com.hisec.endpointext"
           },
           "windows": [
-            {
-              "role": "main",
-              "name": "HiSecEndpointExtApp 主窗口（如有）",
-              "window_path": "main",
-              "process_names": [
-                "HiSecEndpointExtApp"
-              ],
-              "title_pattern": ".*"
-            },
-            {
-              "role": "background",
-              "name": "系统扩展宿主进程（无 GUI 窗口）",
-              "window_path": "background",
-              "process_names": [
-                "com.hisec.endpointext"
-              ]
-            }
+            {"role": "main", "name": "HiSecEndpointExtApp 主窗口（如有）", "window_path": "main", "process_names": ["HiSecEndpointExtApp"], "title_pattern": ".*"},
+            {"role": "background", "name": "系统扩展宿主进程（无 GUI 窗口）", "window_path": "background", "process_names": ["com.hisec.endpointext"]}
           ],
           "allowed_action_ids": [
-            "observe.control_tree",
-            "observe.find_control",
-            "observe.screenshot",
-            "observe.wait_window",
-            "observe.window_lock",
-            "observe.window_open",
-            "observe.windows",
-            "session.connect",
-            "session.window_lock.clear",
-            "session.window_lock.set",
-            "session.window_lock.verify",
+            "observe.control_tree", "observe.find_control",
+            "observe.screenshot", "observe.wait_window", "observe.window_lock",
+            "observe.window_open", "observe.windows",
+            "session.connect", "session.window_lock.clear",
+            "session.window_lock.set", "session.window_lock.verify",
             "app.activate"
           ],
           "intents": {}
