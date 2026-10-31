@@ -313,11 +313,11 @@ def check_server_health(name: Optional[str] = None) -> dict:
         # TCP reachability — does NOT need SSH auth.
         cfg_light = tc.get_target(target_name)
         mcp_cfg = cfg_light["mcp"]
-        ssh_cfg = cfg_light["ssh"]
+        ssh_cfg = cfg_light.get("ssh") or {}
 
         connect_mode = mcp_cfg["connect_mode"]
         if connect_mode == "direct":
-            check_host = ssh_cfg["host"]
+            check_host = ssh_cfg.get("host")
             check_port = mcp_cfg["port"]
         elif connect_mode == "local":
             check_host = "127.0.0.1"
@@ -466,11 +466,11 @@ def ensure_server_running(name: Optional[str] = None, *, repair: bool = False) -
 
         cfg_light = tc.get_target(target_name)
         mcp_cfg = cfg_light["mcp"]
-        ssh_cfg = cfg_light["ssh"]
+        ssh_cfg = cfg_light.get("ssh") or {}
 
         connect_mode = mcp_cfg["connect_mode"]
         if connect_mode == "direct":
-            check_host = ssh_cfg["host"]
+            check_host = ssh_cfg.get("host")
             check_port = mcp_cfg["port"]
         elif connect_mode == "local":
             check_host = "127.0.0.1"
