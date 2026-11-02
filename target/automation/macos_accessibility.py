@@ -46,7 +46,7 @@ from typing import Optional, Any
 
 import pyautogui
 
-from .base import lock_criteria_mismatch
+from .base import lock_criteria_mismatch, release_window_lock_if_window_changed
 
 try:
     from artifacts import screenshot_path
@@ -91,6 +91,57 @@ def _applescript_string(value: str) -> str:
 def _run_osascript(script: str, timeout: float = 10.0) -> tuple[int, str]:
     """Run an osascript -e invocation."""
     return _run(["osascript", "-e", script], timeout=timeout)
+
+
+def _parse_system_events_window_triple(out: str, app_name: str) -> list[dict]:
+    """解析单进程窗口查询的扁平输出为标准窗口条目。
+
+    AppleScript 把 {names, positions, sizes, pidStr} 展平成逗号分隔序列：
+    "标题, x, y, w, h, pid"（每窗口 5 个字段，标题可能含逗号——从尾部固定
+    偏移反解 x/y/w/h 与 pid，其余为标题）。逐窗口组装，与完整枚举的条目
+    形状保持一致。
+    """
+    fields = [f.strip().strip('"') for f in out.split(",") if f.strip() != ""]
+    if len(fields) < 5:
+        return []
+    try:
+        owner_pid = int(fields[-1])
+    except ValueError:
+        return []
+    body = fields[:-1]
+    # 标题可能自身含逗号：从尾部取 4 个数字（x, y, w, h），其余为标题
+    nums: list[int] = []
+    cut = len(body)
+    while cut > 0 and len(nums) < 4:
+        cut -= 1
+        try:
+            nums.insert(0, int(body[cut]))
+        except ValueError:
+            break
+    if len(nums) < 4:
+        return []
+    titles = [", ".join(body[:cut])]
+    x, y, w, h = nums
+
+    windows = []
+    for title in titles:
+        rect = {"x": x, "y": y, "w": w, "h": h}
+        windows.append({
+            "app_name": app_name,
+            "bundle_id": None,
+            "window_title": str(title or ""),
+            "pid": None,
+            "title": str(title or ""),
+            "class_name": app_name,
+            "processName": app_name,
+            "process_name": app_name,
+            "handle": None,
+            "process_id": owner_pid,
+            "rectangle": rect,
+            "visible": True,
+            "enabled": True,
+        })
+    return windows
 
 
 def _allow_real_mouse_actions() -> bool:
@@ -508,7 +559,16 @@ class MacOSAccessibilityBackend:
         if activate:
             self._activate_locked_window()
         verify = self.verify_window_lock(activate=activate)
-        return {"ok": verify.get("ok") is True, "lock": lock, "verify": verify}
+        if verify.get("ok") is not True:
+            # A refused verification means this lock was never confirmed by
+            # the caller; keeping it in backend state would let
+            # get_window_lock report an unverified lock and could resurrect
+            # it on a later verify once the foreground happens to match.
+            # The attempted identity stays in the response for diagnosis.
+            self._window_lock = None
+            return {"ok": False, "code": verify.get("code"),
+                    "error": verify.get("error"), "lock": lock, "verify": verify}
+        return {"ok": True, "lock": lock, "verify": verify}
 
     def unlock_window(self) -> dict:
         previous = getattr(self, "_window_lock", None)
@@ -654,6 +714,14 @@ class MacOSAccessibilityBackend:
         except Exception as exc:
             return {"ok": False, "error": f"CoreGraphics screenshot failed: {exc}"}
 
+    def process_name_for_pid(self, pid: int):
+        """Real owning process name for a pid via psutil (declared dep)."""
+        try:
+            import psutil
+            return psutil.Process(int(pid)).name()
+        except Exception:
+            return None
+
     def list_windows(self) -> dict:
         """
         Enumerate visible application windows via System Events.
@@ -689,8 +757,15 @@ class MacOSAccessibilityBackend:
             '  return out\n'
             'end tell\n'
         )
-        rc, out = _run_osascript(script, timeout=15)
+        rc, out = _run_osascript(script, timeout=120)
         if rc != 0:
+            # R6①：超时降级到逐进程超时隔离查询（partial/skippedProcesses）；
+            # 权限拒绝（-25211）等非超时失败仍立即如实返回。
+            if "timeout" in (out or ""):
+                fallback = self._list_windows_per_process()
+                if fallback.get("ok"):
+                    fallback["degraded"] = "system_events_full_enumeration_timeout"
+                    return fallback
             return {
                 "ok": False,
                 "error": (
@@ -773,6 +848,53 @@ class MacOSAccessibilityBackend:
                 windows.extend(cg_group)
 
         return {"ok": True, "windows": windows, "count": len(windows)}
+
+    def _list_windows_per_process(self) -> dict:
+        """超时隔离的降级枚举：逐进程独立 osascript 查询（各 12s，超时跳过
+        计入 partial/skippedProcesses），单进程挂起不拖垮整体。"""
+        windows: list[dict] = []
+        skipped: list[str] = []
+        procs_script = (
+            'tell application "System Events"\n'
+            '  set out to ""\n'
+            '  repeat with p in (every process whose visible is true)\n'
+            '    set out to out & (name of p) & "\\n"\n'
+            '  end repeat\n'
+            '  return out\n'
+            'end tell\n'
+        )
+        rc, out = _run_osascript(procs_script, timeout=15)
+        if rc != 0:
+            return {"ok": False,
+                    "error": f"osascript process enumeration failed (rc={rc}): {out.strip()}"}
+        for proc_name in [ln.strip() for ln in out.splitlines() if ln.strip()]:
+            per_script = (
+                'tell application "System Events"\n'
+                f'  set pidStr to unix id of process "{proc_name}" as string\n'
+                f'  tell process "{proc_name}"\n'
+                '    set names to name of every window\n'
+                '    set positions to position of every window\n'
+                '    set sizes to size of every window\n'
+                '    return {names, positions, sizes, pidStr}\n'
+                '  end tell\n'
+                'end tell\n'
+            )
+            try:
+                rc, out = _run_osascript(per_script, timeout=12)
+            except Exception:
+                skipped.append(proc_name)
+                continue
+            if rc != 0:
+                skipped.append(proc_name)
+                continue
+            windows.extend(_parse_system_events_window_triple(out, proc_name))
+        result = {"ok": True, "count": len(windows), "windows": windows}
+        if skipped:
+            result["partial"] = True
+            result["skippedProcesses"] = skipped
+        return result
+
+
 
     def _list_windows_cg(self, *, strict: bool = False) -> list[dict]:
         """Best-effort visible window enumeration through CGWindowList.
@@ -1145,6 +1267,28 @@ print(String(data: data, encoding: .utf8) ?? "[]")
         }
 
     def activate_edr(
+        self,
+        exe_path: Optional[str] = None,
+        wait: bool = True,
+        timeout: float = 15.0,
+        edr_widget_auto_id: Optional[str] = None,
+    ) -> dict:
+        # activate_edr rewrites the session's connected state directly
+        # (_mark_edr_client_connected / swift helper). A window lock left
+        # over from before describes the old window and must not survive
+        # the rebind; an already-open path reconnecting the same window
+        # keeps its ownership chain.
+        result = self._activate_edr_impl(
+            exe_path=exe_path, wait=wait, timeout=timeout,
+            edr_widget_auto_id=edr_widget_auto_id,
+        )
+        released = release_window_lock_if_window_changed(self)
+        if released is not None:
+            result = dict(result)
+            result["released_window_lock"] = released
+        return result
+
+    def _activate_edr_impl(
         self,
         exe_path: Optional[str] = None,
         wait: bool = True,
@@ -2023,6 +2167,46 @@ print(String(data: data, encoding: .utf8) ?? "[]")
         Matchers (first one wins):
           pid, bundle_id, process_name, app_name, title_re
         """
+        # connect rebinds the session to a new window; a lock left by a
+        # previous session (crash recovery, caller abandoned after lock_window)
+        # belongs to the old identity and must not survive the rebind.  With no
+        # lock present, pointer injection is fail-closed at the guard boundary,
+        # so clearing here never widens authorization.  A failed connect
+        # attempt restores the lock — only a real rebind drops it.
+        released = getattr(self, "_window_lock", None)
+        if released is not None:
+            self._window_lock = None
+        try:
+            result = self._connect_dispatch(
+                title_re=title_re, process_name=process_name, pid=pid,
+                app_name=app_name, bundle_id=bundle_id, timeout=timeout,
+                auto_activate=auto_activate,
+            )
+        except BaseException:
+            if released is not None:
+                self._window_lock = released
+            raise
+        if released is None:
+            return result
+        if result.get("ok") is True:
+            result["released_window_lock"] = {
+                key: released.get(key) for key in ("handle", "pid", "title_re", "process_name")
+            }
+        else:
+            self._window_lock = released
+        return result
+
+    def _connect_dispatch(
+        self,
+        title_re: Optional[str] = None,
+        process_name: Optional[str] = None,
+        pid: Optional[int] = None,
+        app_name: Optional[str] = None,
+        bundle_id: Optional[str] = None,
+        timeout: float = 10.0,
+        auto_activate: bool = False,
+    ) -> dict:
+        """Original connect dispatch, extracted unchanged."""
         if pid:
             listed = self.list_windows()
             if not listed.get("ok"):
@@ -2254,15 +2438,24 @@ on describeElement(e, depth, pathText, controlId, windowName)
     set yText to ""
     set wText to ""
     set hText to ""
+    -- Qt panel windows (e.g. HiSecEndpointAgent) reject `position/size of
+    -- <item specifier>` resolved outside a System Events tell with -1700,
+    -- while an explicit tell reads them fine. Without this wrapper the AX
+    -- root loses its rectangle and dump_tree cannot bind the tree to the
+    -- connected CG window (window_control_scope_unavailable).
     try
-        set posValue to position of e
-        set xText to (item 1 of posValue) as text
-        set yText to (item 2 of posValue) as text
+        tell application "System Events"
+            set posValue to position of e
+            set xText to (item 1 of posValue) as text
+            set yText to (item 2 of posValue) as text
+        end tell
     end try
     try
-        set sizeValue to size of e
-        set wText to (item 1 of sizeValue) as text
-        set hText to (item 2 of sizeValue) as text
+        tell application "System Events"
+            set sizeValue to size of e
+            set wText to (item 1 of sizeValue) as text
+            set hText to (item 2 of sizeValue) as text
+        end tell
     end try
     return (controlId as text) & tab & (depth as text) & tab & cleanText(windowName) & tab & roleText & tab & subroleText & tab & titleText & tab & descText & tab & valueText & tab & identifierText & tab & enabledText & tab & xText & tab & yText & tab & wText & tab & hText & tab & focusedText & tab & selectedText & tab & pathText
 end describeElement
@@ -2857,7 +3050,12 @@ return outText
         text: str,
         control_id: Optional[int] = None,
         class_name: Optional[str] = None,
+        string: Optional[str] = None,
+        automation_id: Optional[str] = None,
+        control_type: Optional[str] = None,
     ) -> dict:
+        # 统一 backend 契约的兼容签名：接受新定位 kwargs（automation_id /
+        # control_type）与 MCP legacy `string`，行为保持 v1 不支持错误。
         return {
             "ok": False,
             "error": (

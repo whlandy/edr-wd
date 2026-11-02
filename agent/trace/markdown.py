@@ -56,9 +56,15 @@ from .projections import project_step_results
 #   `[`/`]` -> links; `<`/`>` -> autolinks + raw HTML;
 #   `*` -> emphasis; `~` -> strikethrough;
 #   `` ` `` -> code span; `!` -> image syntax.
-# We do NOT escape `\` itself: only chars that change rendering
-# need escaping, and `\\` only matters when it precedes a
-# special char (the output of *this* function).
+# Additionally (structure-safe contract, shared with
+# markdown_escape.escape_markdown):
+#   `|` breaks table rows; `\` doubles so an attacker-supplied
+#   backslash cannot consume the renderer's own escape prefix;
+#   CR/LF collapse to a space so a multi-line window_title or
+#   diagnostic cannot inject headings/table rows; other C0
+#   control chars are stripped.
+# `<`/`>` never reach the prefix loop: html.escape turns them
+# into entities first.
 _MARKDOWN_SPECIALS = "`*[]<>~"
 
 
@@ -66,7 +72,11 @@ def _escape_markdown(text: str) -> str:
     """Escape Markdown special chars + HTML entities.
 
     HTML escape first to neutralise `<script>` etc., then prefix
-    each Markdown special with a backslash.
+    each Markdown special with a backslash. Backslashes in the
+    input are doubled so they cannot swallow the escape prefixes
+    added here. Pipes are escaped (table cells), CR/LF collapses
+    to a single space (line/row injection), and non-whitespace
+    C0 control chars are stripped.
     """
     if text is None:
         return ""
@@ -75,9 +85,21 @@ def _escape_markdown(text: str) -> str:
     for ch in escaped:
         if ch in _MARKDOWN_SPECIALS:
             out.append("\\" + ch)
+        elif ch == "|":
+            out.append("\\|")
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ord(ch) <= 0x1F and ch not in ("\t", "\n", "\r"):
+            continue
         else:
             out.append(ch)
-    return "".join(out)
+    # CRLF first so one line break becomes a single space.
+    return (
+        "".join(out)
+        .replace("\r\n", " ")
+        .replace("\n", " ")
+        .replace("\r", " ")
+    )
 
 
 # ---------------------------------------------------------------------------

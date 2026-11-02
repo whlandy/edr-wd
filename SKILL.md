@@ -34,7 +34,7 @@ before executing GUI/PowerShell actions.
 | Execute atomic tests / inspect evidence | `agent/execution/`, `agent/trace/` | `references/testing.md` |
 | Add fixed product verification | `sops/INDEX.md` | `sops/TEMPLATE.md` |
 | Plan/evaluate action sequences | `agent/planner/`, `agent/eval/` | `references/mcp-tools.md`, `references/testing.md` |
-| Record, assert, generate golden trace, replay | `edr-wd record start` | `references/testing.md` |
+| Record, assert, generate golden trace, replay | `edr-wd record start` | `references/recording.md`, `references/testing.md` |
 | Compare end/client and cloud state | Browser Use cloud observation + EDR-WD client observation | `references/end-cloud-consistency.md` |
 | Use CHM manuals / RAG / action knowledge | separate `edr-rag` repo | `docs/requirements/EDR-RAG-INTEGRATION.md` |
 
@@ -281,6 +281,8 @@ skipped.
 - `references/activate-edr.md`: HiSec entry/client activation internals.
 - `references/window-detection.md`: window verification and diagnostics.
 - `references/testing.md`: test tiers, traces, reports, failure triage.
+- `references/recording.md`: recording, assertion editor, compile honesty
+  gates, replay modes, and live acceptance for desktop record/replay.
 - `references/end-cloud-consistency.md`: Browser Use / EDR-WD snapshot contract,
   device-policy-time correlation, synchronization polling, and diff evidence.
 - `docs/requirements/EDR-RAG-INTEGRATION.md`: boundary between `edr-wd` and

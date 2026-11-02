@@ -75,6 +75,42 @@ class SafeVisualResolver:
         return (isinstance(value, (int, float)) and not isinstance(value, bool)
                 and math.isfinite(value) and 0 <= value <= 1)
 
+    # The target-side bundle contract permits this much skew between the
+    # UIA window rectangle and the capture origin (UIA can exclude the
+    # invisible Win32 frame the capture includes).
+    _MAX_ORIGIN_SKEW = 32
+
+    @classmethod
+    def _verify_frame_origin(cls, observation: Any,
+                             window_rect: tuple[int, int, int, int]) -> None:
+        """Refuse a frame that was not captured from the reported window.
+
+        ``screenshot_origin`` is the frame's capture-time top-left; the
+        locked ``window_rect`` is current. A stale frame from before a
+        window move projects candidates to positions that can still fall
+        inside the moved window — the gate refuses the whole resolution
+        instead of clicking stale coordinates. No origin at all keeps the
+        legacy contract (rejected later if malformed).
+        """
+        origin = (
+            observation.get("screenshot_origin")
+            if isinstance(observation, Mapping)
+            else getattr(observation, "screenshot_origin", None)
+        )
+        if not isinstance(origin, (list, tuple)) or len(origin) != 2:
+            return
+        if not all(isinstance(value, int) and not isinstance(value, bool)
+                   for value in origin):
+            return
+        if (abs(origin[0] - window_rect[0]) > cls._MAX_ORIGIN_SKEW
+                or abs(origin[1] - window_rect[1]) > cls._MAX_ORIGIN_SKEW):
+            raise StepMaterializationError(
+                "visual_frame_window_mismatch",
+                "screenshot origin does not match the locked window; the frame may be stale",
+                details={"frame_origin": [int(origin[0]), int(origin[1])],
+                         "window_origin": [int(window_rect[0]), int(window_rect[1])]},
+            )
+
     def _matched_candidates(
         self, visual: Mapping[str, Any], observation: Any,
         window_rect: tuple[int, int, int, int],
@@ -285,6 +321,7 @@ class SafeVisualResolver:
             raise StepMaterializationError(
                 "visual_window_unverified", "fresh observation has no verified window rectangle"
             )
+        self._verify_frame_origin(observation, window_rect)
         candidates = self._matched_candidates(visual, observation, window_rect)
         if not candidates or candidates[0].confidence < self.min_confidence:
             raise StepMaterializationError(
@@ -372,6 +409,7 @@ class SafeVisualResolver:
         window_rect = self._window_rect(observation)
         if window_rect is None:
             raise StepMaterializationError("visual_window_unverified", "window rectangle is unavailable")
+        self._verify_frame_origin(observation, window_rect)
         observation_id = (observation.get("observation_id") or observation.get("snapshot_id")) if isinstance(observation, Mapping) else (getattr(observation, "observation_id", None) or getattr(observation, "snapshot_id", None))
         identity = observation.get("window_identity") if isinstance(observation, Mapping) else getattr(observation, "window_identity", None)
         native_id = str((identity or {}).get("native_id") or "legacy") if isinstance(identity, Mapping) or identity is None else str(getattr(identity, "native_id", "legacy"))

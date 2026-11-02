@@ -40,6 +40,8 @@ _CONTROL_FIELDS = (
     ("is_password", "protected"),
 )
 
+_STATE_FIELDS = ("checked", "selected", "value")
+
 #: Content-identity fields. A window that merely moved or resized is not new
 #: material — the generated trace resolves controls by identity, not by
 #: coordinate — so geometry is recorded but does not trigger a new snapshot.
@@ -70,11 +72,31 @@ def normalize_controls(controls: object) -> list[dict[str, Any]]:
             if value in (None, ""):
                 continue
             control[key] = value
+        # Ancestry (nearest parent first) is how a weak-identity control is
+        # disambiguated from its same-name siblings at replay. The compiler's
+        # honest ready/incomplete gate counts full-tree candidates with the
+        # replay locator's field semantics; dropping it here would make every
+        # weak-identity step look unresolvable and silently over-block it.
+        # Preserve only a non-empty chain -- an empty list adds no signal.
+        raw_ancestry = source.get("ancestry")
+        if isinstance(raw_ancestry, (list, tuple)) and raw_ancestry:
+            control["ancestry"] = [
+                dict(item) if isinstance(item, Mapping) else item
+                for item in raw_ancestry
+            ]
+        # Backends use different protection keys. Apply protection before
+        # projecting readable state, including an explicitly empty value.
+        if source.get("protected") is True or source.get("is_password") is True:
+            control["protected"] = True
         if control.get("protected"):
             # A password field's contents must not reach the recording
             # document. The control is still listed — a generated script has
             # to be able to name the field it types into.
             control.pop("text", None)
+        else:
+            for key in _STATE_FIELDS:
+                if key in source and source[key] is not None:
+                    control[key] = source[key]
         rect = _rect(source.get("rectangle") or source.get("rect"))
         if rect is not None:
             control["rect"] = rect
@@ -87,8 +109,29 @@ def normalize_controls(controls: object) -> list[dict[str, Any]]:
 
 
 def content_hash(controls: list[Mapping[str, Any]]) -> str:
+    # Ancestry is part of content identity: the compiler proves a weak
+    # selector's uniqueness against these snapshots using the same ancestry
+    # the replay locator matches on. A hierarchy-only change must not be
+    # deduplicated as "unchanged" or the compiler proves uniqueness against
+    # stale structure.
     payload = [
-        {key: control.get(key) for key in _IDENTITY_FIELDS if key in control}
+        {
+            key: control.get(key)
+            for key in (*_IDENTITY_FIELDS, "ancestry")
+            if key in control
+        }
+        for control in controls
+    ]
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    return "sha256:" + digest
+
+
+def state_hash(controls: list[Mapping[str, Any]]) -> str:
+    """Hash observed state separately from the legacy content identity."""
+    payload = [
+        {key: control[key] for key in _STATE_FIELDS if key in control}
         for control in controls
     ]
     digest = hashlib.sha256(
@@ -147,7 +190,7 @@ class ControlInventory:
         self._stopping = False
         self._counter = 0
         self._snapshots: list[dict[str, Any]] = []
-        self._hashes: dict[str, str] = {}
+        self._hashes: dict[str, tuple[str, str]] = {}
         #: Walks that were asked for but never taken, and why. A snapshot
         #: table that is simply short is indistinguishable from a flow that
         #: visited fewer windows, which is exactly the ambiguity that made the
@@ -284,10 +327,14 @@ class ControlInventory:
             self._skip("no_controls")
             return
         digest = content_hash(controls)
+        observed_state_digest = state_hash(controls)
         root = _root_identity(controls)
-        key = root or f"handle:{int(request['handle'])}"
+        # Dedup key must include the recording-time handle: two windows may
+        # share a root/title but be distinct (the compiler binds snapshots to
+        # the event's exact handle). Keying only on root would collapse them.
+        key = f"handle:{int(request['handle'])}:{root or ''}"
         with self._lock:
-            if self._hashes.get(key) == digest:
+            if self._hashes.get(key) == (digest, observed_state_digest):
                 # Unchanged since the last walk of this window. The earlier
                 # snapshot still describes it, so consumers joining by time
                 # keep resolving to that one.
@@ -296,7 +343,7 @@ class ControlInventory:
             if len(self._snapshots) >= self._max_snapshots:
                 self._skip("snapshot_limit")
                 return
-            self._hashes[key] = digest
+            self._hashes[key] = (digest, observed_state_digest)
             self._counter += 1
             window: dict[str, Any] = {
                 "handle": int(request["handle"]),
@@ -312,7 +359,15 @@ class ControlInventory:
                 "durationMs": int((time.monotonic() - started) * 1000),
                 "window": window,
                 "contentHash": digest,
+                "stateHash": observed_state_digest,
                 "controlCount": len(controls),
+                "truncated": bool(tree.get("truncated")) if isinstance(tree, Mapping) else False,
+                # Positive integrity flag: `complete` is True only when the
+                # producer provably walked the full tree (no depth/child-count
+                # cap, no children() exception, no unloaded-virtualization
+                # doubt). Absent or non-True means the tree cannot vouch for a
+                # weak-identity uniqueness decision.
+                "complete": tree.get("complete") is True if isinstance(tree, Mapping) else False,
                 "controls": controls,
             })
 
@@ -330,4 +385,4 @@ class ControlInventory:
             }
 
 
-__all__ = ["ControlInventory", "normalize_controls", "content_hash"]
+__all__ = ["ControlInventory", "normalize_controls", "content_hash", "state_hash"]

@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import time
+import threading
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -166,6 +167,15 @@ def _forward(client_sock: socket.socket, transport, remote_port: int) -> None:
         client_sock.close()
 
 
+def _start_forward(client_sock, transport, remote_port):
+    """Do not let a persistent SSE connection block other MCP requests."""
+    worker = threading.Thread(
+        target=_forward, args=(client_sock, transport, remote_port), daemon=True,
+    )
+    worker.start()
+    return worker
+
+
 def serve(args: argparse.Namespace) -> int:
     target = _target_name(args.target)
     ssh_cfg, local_port, remote_port = _cfg(target)
@@ -187,9 +197,7 @@ def serve(args: argparse.Namespace) -> int:
     try:
         while True:
             client_sock, _addr = server.accept()
-            # MCP traffic is low-volume. Handle one accepted connection at a
-            # time to keep the tunnel process simple and deterministic.
-            _forward(client_sock, transport, remote_port)
+            _start_forward(client_sock, transport, remote_port)
     finally:
         server.close()
         client.close()

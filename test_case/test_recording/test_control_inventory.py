@@ -11,6 +11,7 @@ from target.recording.inventory import (
     ControlInventory,
     content_hash,
     normalize_controls,
+    state_hash,
 )
 from target.recording.models import CaptureScope, RawRecording, RecordingModelError
 from target.recording.windows import WindowsUIACorrelator, WindowsUIAResolver
@@ -299,6 +300,58 @@ def test_a_password_field_is_listed_but_its_contents_never_are():
     assert "hunter2" not in str(controls)
 
 
+def test_backend_control_state_survives_projection_without_inventing_unknowns():
+    windows = normalize_controls([_control("W.check", checked=False)])
+    macos = normalize_controls([{
+        "automation_id": "M.value", "class_name": "AXTextField",
+        "text": "Search", "value": "", "checked": None,
+        "selected": False, "protected": False,
+    }])
+    assert windows[0]["checked"] is False
+    assert "value" not in windows[0]
+    assert macos[0]["value"] == ""
+    assert macos[0]["selected"] is False
+    assert "checked" not in macos[0]
+
+
+def test_macos_protected_value_and_text_do_not_enter_snapshot():
+    controls = normalize_controls([{
+        "automation_id": "M.password", "class_name": "AXSecureTextField",
+        "text": "secret", "value": "secret", "protected": True,
+    }])
+    assert controls[0]["protected"] is True
+    assert "text" not in controls[0]
+    assert "value" not in controls[0]
+    assert "secret" not in str(controls)
+
+
+def test_state_hash_changes_without_changing_legacy_content_hash():
+    before = normalize_controls([_control("W.check", checked=False)])
+    after = normalize_controls([_control("W.check", checked=True)])
+    assert content_hash(before) == content_hash(after)
+    assert state_hash(before) != state_hash(after)
+
+
+def test_state_change_creates_a_new_snapshot_without_changing_content_identity():
+    resolver = _Resolver({}, "root")
+    resolver.trees[7] = _tree(_control("W.check", checked=False))
+    inventory = ControlInventory(resolver, debounce_ms=0)
+    inventory.start()
+    try:
+        inventory.request(handle=7, reason="window_changed")
+        _drain(inventory, expected=1)
+        resolver.trees[7] = _tree(_control("W.check", checked=True))
+        inventory.request(handle=7, reason="window_changed")
+        _drain(inventory, expected=2)
+        snapshots = inventory.snapshots
+    finally:
+        inventory.stop()
+    assert len(snapshots) == 2
+    assert snapshots[0]["contentHash"] == snapshots[1]["contentHash"]
+    assert snapshots[0]["stateHash"] != snapshots[1]["stateHash"]
+    assert snapshots[1]["controls"][0]["checked"] is True
+
+
 def test_content_identity_ignores_geometry_but_not_text():
     a = normalize_controls([_control("W.a", "确定")])
     b = normalize_controls([_control("W.a", "取消")])
@@ -348,6 +401,15 @@ def test_duplicate_snapshot_ids_are_rejected():
     }
     with pytest.raises(RecordingModelError, match="unique"):
         _recording(control_snapshots=(snapshot, dict(snapshot)))
+
+
+def test_inventory_state_hash_round_trip_and_type_validation():
+    snapshot = {"snapshotId": "CS-state", "capturedAtMs": 1, "window": {},
+                "contentHash": "sha256:a", "stateHash": "sha256:b", "controls": []}
+    document = _recording(control_snapshots=(snapshot,)).to_dict()
+    assert RawRecording.from_dict(document).control_snapshots[0]["stateHash"] == "sha256:b"
+    with pytest.raises(RecordingModelError):
+        _recording(control_snapshots=({**snapshot, "stateHash": 123},))
 
 
 # --- wiring ---------------------------------------------------------------

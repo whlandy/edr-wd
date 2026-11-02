@@ -375,10 +375,11 @@ def test_trace_md_integrity_section_reports_failure(tmp_path: Path):
         ("[click](http://evil)", "\\[click\\]", "[click]("),
         ("*bold*", "\\*bold\\*", None),
         ("`code`", "\\`code\\`", None),
-        # backslash input preserved as data (escape does not
-        # touch a stray backslash that isn't followed by a
-        # special char)
-        ("plain\\text", "plain\\text", None),
+        # backslash is doubled (§6r contract change): an input
+        # backslash must not be able to consume the escape prefix
+        # this function adds to the next special char
+        ("plain\\text", "plain\\\\text", None),
+        ("a\\*b", "a\\\\\\*b", None),
         # benign text untouched
         ("hello world", "hello world", None),
     ],
@@ -389,6 +390,7 @@ def test_trace_md_integrity_section_reports_failure(tmp_path: Path):
         "md-em",
         "md-code",
         "literal-backslash",
+        "backslash-before-special",
         "benign-text",
     ],
 )

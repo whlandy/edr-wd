@@ -23,7 +23,7 @@ from typing import Optional, Any
 
 import pyautogui
 
-from .base import lock_criteria_mismatch
+from .base import lock_criteria_mismatch, release_window_lock_if_window_changed
 
 # pywinauto_client is Windows-only and depends on pywinauto + psutil, which
 # are NOT installed on macOS targets. We import it lazily inside __init__
@@ -292,7 +292,16 @@ class WindowsPywinautoBackend:
         if activate:
             self._activate_locked_window()
         verify = self.verify_window_lock(activate=activate)
-        return {"ok": verify.get("ok") is True, "lock": lock, "verify": verify}
+        if verify.get("ok") is not True:
+            # A refused verification means this lock was never confirmed by
+            # the caller; keeping it in backend state would let
+            # get_window_lock report an unverified lock and could resurrect
+            # it on a later verify once the foreground happens to match.
+            # The attempted identity stays in the response for diagnosis.
+            self._window_lock = None
+            return {"ok": False, "code": verify.get("code"),
+                    "error": verify.get("error"), "lock": lock, "verify": verify}
+        return {"ok": True, "lock": lock, "verify": verify}
 
     def unlock_window(self) -> dict:
         previous = self._window_lock
@@ -633,6 +642,9 @@ class WindowsPywinautoBackend:
     def list_windows(self) -> dict:
         return self._gui.list_windows()
 
+    def process_name_for_pid(self, pid: int) -> Optional[str]:
+        return self._gui.process_name_for_pid(pid)
+
     def is_window_open(
         self,
         title_re: Optional[str] = None,
@@ -652,6 +664,30 @@ class WindowsPywinautoBackend:
         return self._gui.wait_window(
             title_re, process_name, class_name, timeout, interval,  # type: ignore[arg-type]
         )
+
+    def focus_existing_window(self, *, handle: int, pid: int, title: str,
+                              process_name: str) -> dict:
+        """Focus the selected live HWND; never resolve or launch an application."""
+        try:
+            from pywinauto import Desktop
+            window = Desktop(backend="uia").window(handle=int(handle)).wrapper_object()
+            def same_identity():
+                return (window.process_id() == int(pid)
+                        and window.window_text() == title
+                        and (self.process_name_for_pid(pid) or "").casefold()
+                        == process_name.casefold())
+            if not same_identity():
+                return {"ok": False, "code": "recording_window_stale",
+                        "error": "所选窗口身份已变化，请刷新后重新选择"}
+            window.set_focus()
+            if not same_identity():
+                return {"ok": False, "code": "recording_window_stale",
+                        "error": "聚焦期间窗口身份已变化，请重新选择"}
+            return {"ok": True, "method": "focus_existing_window", "handle": handle,
+                    "pid": pid}
+        except Exception as exc:
+            return {"ok": False, "code": "recording_window_focus_failed",
+                    "error": str(exc)}
 
     def activate_app(
         self,
@@ -1118,17 +1154,36 @@ class WindowsPywinautoBackend:
         ]
         if not given:
             return {"ok": False, "error": "Must specify title_re, process_name, pid, or app_name"}
+        # connect rebinds the session to a new window; a lock left by a
+        # previous session (crash recovery, caller abandoned after lock_window)
+        # belongs to the old identity and must not survive the rebind.  With no
+        # lock present, pointer injection is fail-closed at the WindowGuard
+        # boundary, so clearing here never widens authorization.  A failed
+        # connect attempt restores the lock — only a real rebind drops it.
+        released = getattr(self, "_window_lock", None)
+        if released is not None:
+            self._window_lock = None
         if len(given) > 1:
             # Every supplied criterion must hold.  Dispatching on the first one
             # and ignoring the rest silently connects to a same-titled window
             # of a different process, which later shows up as a window lock
             # whose recorded identity contradicts its handle.
-            return self._connect_matching_all(title_re, process, pid, timeout)
-        if title_re:
-            return self._gui.connect_by_title(title_re, timeout)
-        if process:
-            return self._gui.connect_by_process(process, timeout)
-        return self._gui.connect_by_pid(pid)
+            result = self._connect_matching_all(title_re, process, pid, timeout)
+        elif title_re:
+            result = self._gui.connect_by_title(title_re, timeout)
+        elif process:
+            result = self._gui.connect_by_process(process, timeout)
+        else:
+            result = self._gui.connect_by_pid(pid)
+        if released is None:
+            return result
+        if result.get("ok") is True:
+            result["released_window_lock"] = {
+                key: released.get(key) for key in ("handle", "pid", "title_re", "process_name")
+            }
+        else:
+            self._window_lock = released
+        return result
 
     def _connect_matching_all(
         self,
@@ -1317,11 +1372,34 @@ class WindowsPywinautoBackend:
 
     def type_text(
         self,
-        text: str,
+        text: Optional[str] = None,
         control_id: Optional[int] = None,
         class_name: Optional[str] = None,
+        string: Optional[str] = None,
+        automation_id: Optional[str] = None,
+        control_type: Optional[str] = None,
     ) -> dict:
-        return self._gui.type_text(control_id, text, class_name, text)  # type: ignore[arg-type]
+        """统一 backend 契约：`text` 是待写入的输入值（dispatch args.text）。
+
+        MCP legacy 经 server 层以 kwargs 传入：`string`=输入值、`text`=定位文本。
+        定位条件 = automation_id / control_type / control_id / class_name
+        （外加 MCP legacy 路径的定位 text）。待写入值绝不兼作控件名称筛选：
+        仅当不存在任何其它定位条件时（旧 golden 无 automation 身份）才按
+        既有行为以 `text` 兜底定位。
+        """
+        if string is not None:
+            input_value, locator_text = string, text
+        else:
+            input_value = text
+            has_locator = any(
+                value not in (None, "")
+                for value in (automation_id, control_type, control_id, class_name)
+            )
+            locator_text = None if has_locator else text
+        return self._gui.type_text(  # type: ignore[arg-type]
+            control_id, locator_text, class_name, input_value,
+            automation_id=automation_id, control_type=control_type,
+        )
 
     def select(
         self,
@@ -1341,6 +1419,23 @@ class WindowsPywinautoBackend:
     ) -> dict:
         return self._gui.get_text(control_id, text, class_name)  # type: ignore[arg-type]
 
+    # ── Region / container-row observation (region_query assertions) ────────
+    # Real implementation, pending on-machine verification (offline semantics
+    # are covered by unit tests with stub providers).
+
+    def query_container_rows(
+        self,
+        container: Optional[dict] = None,
+        fields: Optional[list] = None,
+    ) -> dict:
+        return self._gui.query_container_rows(container, fields)
+
+    def read_component_values(
+        self,
+        components: Optional[list] = None,
+    ) -> dict:
+        return self._gui.read_component_values(components)
+
     # ── Windows HiSec EDR specific (not in AutomationBackend protocol) ─────
 
     def activate_edr(
@@ -1355,17 +1450,53 @@ class WindowsPywinautoBackend:
         EDRClient target window are visible. Not part of the cross-platform
         protocol.
         """
-        return self._gui.activate_edr(  # type: ignore[call-overload]
+        result = self._gui.activate_edr(  # type: ignore[call-overload]
             exe_path=exe_path, wait=wait, timeout=timeout,
             edr_widget_auto_id=edr_widget_auto_id,
         )
+        # activate_edr rebinds the session's connected window inside the GUI
+        # layer (agent fallback, client hand-off). A window lock left over
+        # from before the rebind describes the old window and must not
+        # survive into the new session's ownership context.
+        released = release_window_lock_if_window_changed(self)
+        if released is not None:
+            result = dict(result)
+            result["released_window_lock"] = released
+        return result
 
     # Legacy aliases used by some external callers
     def connect_by_title(self, title_re: str, timeout: float = 10.0) -> dict:
-        return self._gui.connect_by_title(title_re, timeout)
+        # These aliases rebind the connected window without connect()'s
+        # stale-lock accounting (§7h); apply the same clear-on-success /
+        # restore-on-failure shape here.
+        released = getattr(self, "_window_lock", None)
+        if released is not None:
+            self._window_lock = None
+        result = self._gui.connect_by_title(title_re, timeout)
+        return self._alias_connect_result(result, released)
 
     def connect_by_process(self, process_name: str, timeout: float = 10.0) -> dict:
-        return self._gui.connect_by_process(process_name, timeout)
+        released = getattr(self, "_window_lock", None)
+        if released is not None:
+            self._window_lock = None
+        result = self._gui.connect_by_process(process_name, timeout)
+        return self._alias_connect_result(result, released)
 
     def connect_by_pid(self, pid: int) -> dict:
-        return self._gui.connect_by_pid(pid)
+        released = getattr(self, "_window_lock", None)
+        if released is not None:
+            self._window_lock = None
+        result = self._gui.connect_by_pid(pid)
+        return self._alias_connect_result(result, released)
+
+    def _alias_connect_result(self, result: dict, released) -> dict:
+        if released is None:
+            return result
+        if result.get("ok") is True:
+            result = dict(result)
+            result["released_window_lock"] = {
+                key: released.get(key) for key in ("handle", "pid", "title_re", "process_name")
+            }
+        else:
+            self._window_lock = released
+        return result

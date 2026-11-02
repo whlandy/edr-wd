@@ -7,6 +7,7 @@ import os
 import queue
 import sys
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
 
@@ -33,6 +34,9 @@ class IndicatorCallbacks:
     resume: Callable[[], Any]
     stop: Callable[[], Any]
     add_assertion: Callable[[Mapping[str, Any]], Any]
+    # Read the component currently under the pointer for the wizard's
+    # "立即试验" — read-only, never a click.  None disables the trial button.
+    read_target: Callable[[], Any] | None = None
 
 
 class RecordingIndicator(Protocol):
@@ -42,6 +46,8 @@ class RecordingIndicator(Protocol):
     def update_count(self, count: int) -> None: ...
     def open_assertion_editor(self, target: Mapping[str, Any] | None = None) -> None: ...
     def stop(self) -> None: ...
+    def hide_for_region_selection(self) -> dict[str, Any]: ...
+    def restore_after_region_selection(self) -> dict[str, Any]: ...
 
 
 class NullRecordingIndicator:
@@ -51,6 +57,11 @@ class NullRecordingIndicator:
     def update_count(self, count: int) -> None: pass
     def open_assertion_editor(self, target: Mapping[str, Any] | None = None) -> None: pass
     def stop(self) -> None: pass
+    def hide_for_region_selection(self) -> dict[str, Any]:
+        return {"ok": True, "hidden": False}
+
+    def restore_after_region_selection(self) -> dict[str, Any]:
+        return {"ok": True, "restored": False}
 
 
 class TkRecordingIndicator:
@@ -77,6 +88,10 @@ class TkRecordingIndicator:
         self._pause_button = None
         self._paused = False
         self._assertion_target: Mapping[str, Any] = {}
+        # 区域选区让位状态（06 §2）：隐藏前是否可见由 _region_previous_state
+        # 记忆，恢复时按记忆还原；从未隐藏则恢复是安全 no-op。
+        self._region_hidden = False
+        self._region_previous_state: str | None = None
 
     @staticmethod
     def _async(callback: Callable, *args) -> None:
@@ -116,10 +131,12 @@ class TkRecordingIndicator:
             self._count_label.grid(row=2, column=1, sticky="w")
             self._pause_button = ttk.Button(frame, text="Pause", command=self._toggle_pause)
             self._pause_button.grid(row=3, column=0)
-            ttk.Button(frame, text="Add assertion", command=self._show_assertion_editor).grid(row=3, column=1)
+            # 06 §1：浮窗上的断言按钮已移除——Ctrl+Alt+Q 是唯一断言
+            # 入口（绕过会话准备的直连编辑器入口不再存在）。断言编辑器本身
+            # 保留：仍用于渲染服务侧冻结草稿（"assert" 命令 / 兼容路径）。
             ttk.Button(
                 frame, text="Stop", command=lambda: self._async(self.callbacks.stop)
-            ).grid(row=3, column=2)
+            ).grid(row=3, column=1)
 
             def poll() -> None:
                 while True:
@@ -134,6 +151,12 @@ class TkRecordingIndicator:
                     elif command == "assert":
                         self._assertion_target = value or {}
                         self._show_assertion_editor()
+                    elif command == "assert_ack":
+                        self._apply_assert_ack(value)
+                    elif command == "hide_for_region":
+                        self._apply_hide_for_region()
+                    elif command == "restore_after_region":
+                        self._apply_restore_after_region()
                     elif command == "stop":
                         root.destroy()
                         return
@@ -162,6 +185,7 @@ class TkRecordingIndicator:
             self._state_label = None
             self._count_label = None
             self._pause_button = None
+            self._assertion_dialog = None
 
     @staticmethod
     def _place_clear_of_default_windows(root) -> None:  # pragma: no cover - live UI
@@ -196,58 +220,235 @@ class TkRecordingIndicator:
         self._async(self.callbacks.pause if self._paused else self.callbacks.resume)
 
     def _show_assertion_editor(self) -> None:  # pragma: no cover - live UI
+        """中文类型化断言向导：类型 → 期望 → 摘要 → 试验 → 保存。
+
+        默认路径不出现组件 ID 与 JSON：身份来自冻结草稿，期望控件按类型
+        渲染（布尔是/否、文本单行）；读取失败如实披露，不预填空值冒充观测。
+        保存带 draftId（requestId），成功 ACK 后关闭并计数，失败保留表单。
+        """
         if self._root is None:
             return
+        from .assertion_draft import (
+            available_assertion_types, render_assertion_summary,
+            validate_assertion_draft, preview_assertion,
+        )
+        draft = dict(self._assertion_target or {})
+        observed = draft.get("observed") or {}
         dialog = self._tk.Toplevel(self._root)
-        dialog.title("Add explicit assertion")
+        dialog.title("添加断言")
         dialog.attributes("-topmost", True)
-        # Time ranges accept HH:MM or HH:MM:SS; durationSeconds overrides the
-        # default minute/second precision. strftime assertions remain separate.
-        fields = [
-            ("assertion", "text_equals"),
-            ("expected", _expected_default(self._assertion_target)),
-            ("timeoutSeconds", "10"),
-            ("durationSeconds", ""),
-            ("automationId", self._assertion_target.get("automationId") or ""),
-            ("identifier", self._assertion_target.get("identifier") or ""),
-            ("controlType", self._assertion_target.get("controlType") or "Text"),
-            ("name", self._assertion_target.get("name") or ""),
-        ]
         entries = {}
-        for row, (field, default) in enumerate(fields):
-            self._ttk.Label(dialog, text=field).grid(row=row, column=0, sticky="w")
-            entry = self._ttk.Entry(dialog, width=40)
-            entry.insert(0, default)
-            entry.grid(row=row, column=1)
-            entries[field] = entry
+
+        ttk = self._ttk
+        row = 0
+        read_status = str(draft.get("readStatus") or "unknown")
+        current_value = (observed or {}).get("value")
+        if read_status == "ok" and current_value is not None:
+            ttk.Label(dialog, text=f"当前值：{current_value}", foreground="#1b5e20").grid(
+                row=row, column=0, columnspan=2, sticky="w")
+        else:
+            reason = draft.get("readError") or "未能读取当前值"
+            ttk.Label(dialog, text=f"当前值：未能读取（{reason}）——可手填期望",
+                      foreground="#b26a00").grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
+        choices = available_assertion_types(observed or None)
+        ttk.Label(dialog, text="验证方式").grid(row=row, column=0, sticky="w")
+        type_var = self._tk.StringVar()
+        type_box = ttk.Combobox(dialog, state="readonly", width=24,
+                                textvariable=type_var,
+                                values=[f"{c['label']} ({c['type']})" for c in choices])
+        type_box.current(0)
+        type_box.grid(row=row, column=1, sticky="w")
+        row += 1
+
+        ttk.Label(dialog, text="期望结果").grid(row=row, column=0, sticky="w")
+        kind_by_label = {f"{c['label']} ({c['type']})": c for c in choices}
+        expected_entry = ttk.Entry(dialog, width=32)
+        expected_bool = self._tk.StringVar(value="是")
+        bool_box = ttk.Combobox(dialog, state="readonly", width=8,
+                                textvariable=expected_bool, values=["是", "否"])
+        initial = choices[0]
+        if initial["valueKind"] == "bool":
+            expected_bool.set("是" if draft.get("typedExpected") is True else "否")
+            bool_box.grid(row=row, column=1, sticky="w")
+        else:
+            expected_entry.insert(0, str(draft.get("typedExpected") or ""))
+            expected_entry.grid(row=row, column=1, sticky="w")
+        entries["expected_entry"], entries["expected_bool"] = expected_entry, expected_bool
+        entries["expect_row"] = row
+        row += 1
+
+        summary_var = self._tk.StringVar()
+        summary_label = ttk.Label(dialog, textvariable=summary_var, foreground="#333",
+                                  wraplength=420, justify="left")
+        summary_label.grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
+        def _current_choice():
+            return kind_by_label.get(type_var.get()) or choices[0]
+
+        def _typed_expected(choice):
+            return (True if expected_bool.get() == "是" else False) \
+                if choice["valueKind"] == "bool" \
+                else entries["expected_entry"].get()
+
+        def _refresh_summary(*_):
+            choice = _current_choice()
+            probe = {**draft, "assertionType": choice["type"],
+                     "typedExpected": _typed_expected(choice)}
+            summary_var.set(render_assertion_summary(_draft_from(probe)))
+
+        def _switch_editor(*_):
+            """类型变更必须切换实际输入控件：布尔显示是/否，文本显示输入框。"""
+            choice = _current_choice()
+            if choice["valueKind"] == "bool":
+                expected_entry.grid_remove()
+                bool_box.grid(row=entries["expect_row"], column=1, sticky="w")
+                expected_bool.set("是" if draft.get("typedExpected") is True else "否")
+            else:
+                bool_box.grid_remove()
+                expected_entry.grid(row=entries["expect_row"], column=1, sticky="w")
+                expected_entry.delete(0, len(expected_entry.get()))
+                expected_entry.insert(0, str(draft.get("typedExpected") or ""))
+            _refresh_summary()
+        type_box.bind("<<ComboboxSelected>>", _switch_editor)
+        expected_entry.bind("<KeyRelease>", _refresh_summary)
+        expected_bool.trace_add("write", lambda *_: _refresh_summary())
+
+        def _draft_from(probe):
+            from .assertion_draft import AssertionDraft
+            return AssertionDraft(
+                draft_id=str(probe.get("draftId") or ""),
+                assertion_type=probe.get("assertionType"),
+                typed_expected=probe.get("typedExpected"),
+                observed=dict(probe.get("observed") or {}),
+                read_status=str(probe.get("readStatus") or "unknown"),
+                read_error=probe.get("readError"),
+                protection_status=probe.get("protectionStatus"),
+                timeout_seconds=float(probe.get("timeoutSeconds") or 10),
+                binding=tuple(probe["binding"]) if probe.get("binding") else None,
+                expected_was_edited=bool(probe.get("expectedWasEdited")),
+                window=dict(probe.get("window") or {}),
+            )
+
+        def _run_trial():
+            """预演基于冻结观测（draft.observed），只读、不点击、不保存。
+            对冻结组件的实时重读未实现——如需重读需窗口锁定，另行走回放链。"""
+            choice = _current_choice()
+            probe = {**draft, "assertionType": choice["type"],
+                     "typedExpected": _typed_expected(choice)}
+            d = _draft_from(probe)
+            observed = d.observed or {}
+            if probe.get("readStatus") != "ok":
+                self._messagebox.showinfo(
+                    "立即试验", "冻结时未能读取当前值，无法预演；期望仍可保存。",
+                    parent=dialog)
+                return
+            result = preview_assertion(d, lambda: ("ok", observed.get("value")))
+            text = {"pass": "满足 ✅", "fail": "不满足（可按此期望保存）",
+                    "undetermined": "不可判定/读取失败"}[result["result"]]
+            self._messagebox.showinfo(
+                "立即试验", f"预演结果（基于冻结观测）：{text}\n"
+                f"冻结值：{observed.get('value')!r}", parent=dialog)
+
+        trial_button = ttk.Button(dialog, text="立即试验", command=_run_trial)
+        trial_button.grid(row=row, column=0, sticky="w")
+        row += 1
+
         bind_previous = self._tk.BooleanVar(value=False)
-        self._ttk.Checkbutton(
-            dialog,
-            text="bind as the previous action's result verifier",
-            variable=bind_previous,
-        ).grid(row=len(fields), column=1, sticky="w")
+        bind_check = ttk.Checkbutton(
+            dialog, text="作为上一个动作的结果验证", variable=bind_previous,
+        )
+        if draft.get("binding"):
+            bind_check.configure(state="disabled")   # 显式绑定优先，见 confirm()
+        bind_check.grid(row=row, column=1, sticky="w")
+        row += 1
 
         def confirm() -> None:
-            raw_expected = entries["expected"].get()
+            choice = _current_choice()
+            probe = {**draft, "assertionType": choice["type"],
+                     "typedExpected": _typed_expected(choice)}
             try:
-                expected = json.loads(raw_expected)
-            except json.JSONDecodeError:
-                expected = raw_expected
-            payload = {field: entry.get() for field, entry in entries.items()}
-            if not payload["durationSeconds"].strip():
-                payload.pop("durationSeconds")
-            payload["expected"] = expected
-            payload["bindPrevious"] = bool(bind_previous.get())
-            # 把编辑器抓到的当前取值一并带上，让 add_assertion 记进观测。
-            payload["value"] = (self._assertion_target or {}).get("value")
-            if expected == "" and not self._messagebox.askyesno(
-                "Confirm empty expected", "Use an explicit empty-string expected value?", parent=dialog
+                payload = validate_assertion_draft(_draft_from(probe))
+            except Exception as exc:  # noqa: BLE001 - validation errors stay in form
+                self._messagebox.showerror("无法保存", str(exc), parent=dialog)
+                return
+            if payload["expected"] == "" and not self._messagebox.askyesno(
+                "确认空期望", "使用空字符串作为期望值？", parent=dialog
             ):
                 return
-            self._async(self.callbacks.add_assertion, payload)
-            dialog.destroy()
+            if draft.get("binding"):
+                # 从“为该动作添加验证”进入：绑定已经显式指定（bindCausalId），
+                # last-action 勾选不得覆盖它 —— 提交前移除该键。
+                payload.pop("bindPrevious", None)
+            else:
+                payload["bindPrevious"] = bool(bind_previous.get())
+            submit_button.configure(state="disabled")
+            self._async(self._submit_assertion, payload, dialog)
 
-        self._ttk.Button(dialog, text="Confirm", command=confirm).grid(row=len(fields) + 1, column=1)
+        submit_button = ttk.Button(dialog, text="保存", command=confirm)
+        submit_button.grid(row=row, column=1, sticky="w")
+        # The ack lands on the poll thread, so the form must be reachable from
+        # there: success destroys it, failure keeps it open with the error.
+        self._assertion_dialog = {
+            "dialog": dialog, "submit_button": submit_button, "entries": entries,
+        }
+        _refresh_summary()
+
+    def _submit_assertion(self, payload: Mapping[str, Any], dialog) -> None:
+        """把保存请求交给回调；成功/失败 ACK 只认**父进程的真实提交回执**。
+
+        子进程模式下回调只是把请求 emit 给父进程（返回 None）—— None 不是
+        成功，表单保持 pending，直到父进程按同一 requestId 回 ack。同进程
+        直连（callbacks 返回 dict）才有立即的本地结果。
+        """
+        request_id = payload.get("requestId")
+        if self._assertion_dialog is not None:
+            # requestId 记在表单记录（外层 dict）上，ack 匹配用它。
+            self._assertion_dialog["requestId"] = request_id
+        try:
+            result = self.callbacks.add_assertion(payload)
+        except Exception as exc:  # noqa: BLE001 - the form must show the error
+            self._commands.put(("assert_ack", {
+                "ok": False, "error": str(exc), "requestId": request_id}))
+            return
+        if isinstance(result, Mapping):
+            # 同进程直连：会话提交的真实回执，按 requestId 回表单。
+            self._commands.put(("assert_ack", {
+                **dict(result), "requestId": request_id}))
+        # emit/IPC 路径（result is None）：不发任何 ack —— 表单停在
+        # pending，成功/失败都等父进程的实际提交回执。
+
+    def _apply_assert_ack(self, ack: Mapping[str, Any]) -> None:
+        """仅当 ACK 的 requestId 匹配当前表单时才生效；错 ID 不关表单。"""
+        dialog = self._assertion_dialog
+        if dialog is None:
+            return
+        current = dialog.get("requestId") if isinstance(dialog, Mapping) else None
+        if current is None:
+            current = getattr(self, "_assertion_dialog_request_id", None)
+        if current is not None and ack.get("requestId") not in (None, current):
+            return   # 别的请求的回执，不作用于正在编辑的表单
+        if ack.get("ok") is True:
+            sequence = ack.get("sequence")
+            saved = f"已保存 1 条断言（sequence {sequence}）" if sequence else "已保存 1 条断言"
+            if self._count_label is not None:
+                self._count_label.configure(text=saved)
+            dialog["dialog"].destroy()
+            self._assertion_dialog = None
+            return
+        button = dialog.get("submit_button")
+        if button is not None:
+            try:
+                button.configure(state="normal")
+            except Exception:
+                pass
+        message = str(ack.get("error") or "保存失败")
+        try:
+            self._messagebox.showerror("保存失败", message, parent=dialog["dialog"])
+        except Exception:
+            pass
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="edr-wd-recording-indicator", daemon=True)
@@ -272,6 +473,62 @@ class TkRecordingIndicator:
 
     def open_assertion_editor(self, target: Mapping[str, Any] | None = None) -> None:
         self._commands.put(("assert", dict(target or {})))
+
+    def hide_for_region_selection(self) -> dict[str, Any]:
+        """为区域选区让位：隐藏浮窗（经命令队列转 Tk 线程执行）。
+
+        会话在持有锁时调用本方法——这里只入队，绝不做 Tk 调用、绝不把
+        异常抛回录制主流程。
+        """
+        try:
+            self._commands.put(("hide_for_region", None))
+            return {"ok": True, "hidden": True}
+        except Exception as exc:  # noqa: BLE001 - never raise into session lock
+            return {"ok": False, "error": str(exc)}
+
+    def restore_after_region_selection(self) -> dict[str, Any]:
+        """区域选区结束后按记忆状态恢复浮窗；未隐藏过则是安全 no-op。"""
+        try:
+            self._commands.put(("restore_after_region", None))
+            return {"ok": True}
+        except Exception as exc:  # noqa: BLE001 - never raise into session lock
+            return {"ok": False, "error": str(exc)}
+
+    def _apply_hide_for_region(self) -> dict[str, Any]:
+        """Tk 线程内执行：记住隐藏前状态并收起浮窗。"""
+        root = self._root
+        if root is None:
+            return {"ok": False, "error": "indicator window is gone"}
+        try:
+            if not self._region_hidden:
+                try:
+                    self._region_previous_state = str(root.state())
+                except Exception:
+                    self._region_previous_state = "normal"
+                root.withdraw()
+                self._region_hidden = True
+            return {"ok": True, "hidden": True,
+                    "previousState": self._region_previous_state}
+        except Exception as exc:  # noqa: BLE001 - surfaced, not raised
+            return {"ok": False, "error": str(exc)}
+
+    def _apply_restore_after_region(self) -> dict[str, Any]:
+        """Tk 线程内执行：按记忆恢复；隐藏前本就收起则维持收起。"""
+        root = self._root
+        if not self._region_hidden:
+            return {"ok": True, "restored": False}
+        if root is None:
+            self._region_hidden = False
+            return {"ok": False, "error": "indicator window is gone"}
+        try:
+            previous = self._region_previous_state or "normal"
+            if previous != "withdrawn":
+                root.deiconify()
+            self._region_hidden = False
+            self._region_previous_state = None
+            return {"ok": True, "restored": True, "previousState": previous}
+        except Exception as exc:  # noqa: BLE001 - surfaced, not raised
+            return {"ok": False, "error": str(exc)}
 
     def stop(self) -> None:
         self._commands.put(("stop", None))
@@ -341,14 +598,41 @@ class SubprocessTkIndicator:
                 continue
             callback = message.get("callback")
             payload = message.get("payload")
-            if callback == "pause":
-                self.callbacks.pause()
-            elif callback == "resume":
-                self.callbacks.resume()
-            elif callback == "stop":
-                self.callbacks.stop()
-            elif callback == "add_assertion":
-                self.callbacks.add_assertion(payload or {})
+            # One raising callback must not kill the reader thread: the
+            # session refuses stale button reports (recording_state_invalid)
+            # the moment it settles, and a dead reader leaves the child's
+            # window up with every button dead and no ack ever sent — a
+            # live-looking orphan the session's own teardown cannot rescue
+            # (the child only self-terminates on stdin EOF).  Same hazard
+            # class as the batch-18 EOF orphan, different root cause.
+            try:
+                if callback == "pause":
+                    self.callbacks.pause()
+                elif callback == "resume":
+                    self.callbacks.resume()
+                elif callback == "stop":
+                    self.callbacks.stop()
+                elif callback == "add_assertion":
+                    try:
+                        result = self.callbacks.add_assertion(payload or {})
+                    except Exception as exc:  # noqa: BLE001 - form must show the error
+                        ack = {"ok": False, "error": str(exc)}
+                    else:
+                        if not isinstance(result, Mapping):
+                            # 回调没有返回提交结果（emit/误接线返回 None）：
+                            # 这不是成功 —— 发失败 ACK，表单保留给真实回执。
+                            ack = {"ok": False,
+                                   "error": "assertion submission returned no receipt "
+                                            "(callback returned None)"}
+                        else:
+                            ack = dict(result)
+                            ack.setdefault("ok", False)
+                    # 双向 ACK：带同一 requestId 回给子进程表单 —— 成功才关表单，
+                    # 失败保留表单；错 ID 的回执不会误关正在编辑的表单。
+                    ack["requestId"] = (payload or {}).get("requestId")
+                    self._send("assert_ack", ack)
+            except Exception:
+                continue
 
     def start(self) -> None:
         import subprocess
@@ -419,6 +703,22 @@ class SubprocessTkIndicator:
     def open_assertion_editor(self, target: Mapping[str, Any] | None = None) -> None:
         self._send("assert", dict(target or {}))
 
+    def hide_for_region_selection(self) -> dict[str, Any]:
+        """转发给子进程浮窗：隐藏并记忆（子进程内 Tk 线程执行）。"""
+        try:
+            self._send("hide_for_region", None)
+            return {"ok": True, "hidden": True}
+        except Exception as exc:  # noqa: BLE001 - never raise into session lock
+            return {"ok": False, "error": str(exc)}
+
+    def restore_after_region_selection(self) -> dict[str, Any]:
+        """转发给子进程浮窗：按记忆恢复；未隐藏过子进程侧安全 no-op。"""
+        try:
+            self._send("restore_after_region", None)
+            return {"ok": True}
+        except Exception as exc:  # noqa: BLE001 - never raise into session lock
+            return {"ok": False, "error": str(exc)}
+
     def stop(self) -> None:
         self._send("stop", None)
         process = self._process
@@ -430,12 +730,42 @@ class SubprocessTkIndicator:
         self._terminate()
 
 
-def _indicator_child_main() -> None:  # pragma: no cover - child process entry
-    """Child entry point: own the main thread and run the Tk indicator on it."""
-    config = json.loads(sys.stdin.readline())
-    scope = CaptureScope.from_dict(config["scope"])
+def _child_callbacks(
+    indicator: TkRecordingIndicator,
+    emit: Callable[..., bool],
+) -> IndicatorCallbacks:
+    """Child-side callbacks.
 
-    def emit(kind: str, payload: Any = None) -> None:
+    The Stop button reports to the parent, which owns recording state and
+    answers by sending the "stop" command back down.  When the report cannot
+    be delivered the parent is gone — nobody will ever send that command —
+    so the child enqueues its own stop: the window closes instead of sitting
+    there as an always-on-top orphan that cannot even be dismissed.
+    """
+
+    def on_stop() -> None:
+        if not emit("stop"):
+            indicator._commands.put(("stop", None))
+
+    def on_assert(payload: Any) -> None:
+        emit("add_assertion", payload)
+
+    return IndicatorCallbacks(
+        pause=lambda: emit("pause"),
+        resume=lambda: emit("resume"),
+        stop=on_stop,
+        add_assertion=on_assert,
+    )
+
+
+def _child_emit() -> Callable[..., bool]:
+    """Child-side stdout emitter; returns whether the report was delivered.
+
+    The return value is the dead-parent signal for the stop path: a report
+    that cannot be flushed means the parent is gone.
+    """
+
+    def emit(kind: str, payload: Any = None) -> bool:
         # The parent can exit first — a session that ends for any other reason
         # tears down this pipe while the Tk loop is still alive.  A button
         # press afterwards must not raise out of the Tk callback thread.
@@ -443,18 +773,30 @@ def _indicator_child_main() -> None:  # pragma: no cover - child process entry
             sys.stdout.write(json.dumps({"callback": kind, "payload": payload}) + "\n")
             sys.stdout.flush()
         except (BrokenPipeError, ValueError):
-            pass
+            return False
+        return True
+
+    return emit
+
+
+def _indicator_child_main() -> None:  # pragma: no cover - child process entry
+    """Child entry point: own the main thread and run the Tk indicator on it."""
+    config = json.loads(sys.stdin.readline())
+    scope = CaptureScope.from_dict(config["scope"])
+    emit = _child_emit()
 
     indicator = TkRecordingIndicator(
         config["name"],
         scope,
         IndicatorCallbacks(
-            pause=lambda: emit("pause"),
-            resume=lambda: emit("resume"),
-            stop=lambda: emit("stop"),
-            add_assertion=lambda payload: emit("add_assertion", payload),
+            pause=lambda: None, resume=lambda: None,
+            stop=lambda: None, add_assertion=lambda payload: None,
         ),
     )
+    # Real callbacks need the indicator (dead-pipe stop self-terminates via
+    # its command queue); _run() has not started yet, so rebinding here is
+    # race-free.
+    indicator.callbacks = _child_callbacks(indicator, emit)
 
     def announce() -> None:
         indicator._ready.wait()
@@ -489,6 +831,11 @@ def _indicator_child_main() -> None:  # pragma: no cover - child process entry
             except ValueError:
                 continue
             indicator._commands.put((message.get("command"), message.get("value")))
+        # stdin EOF: the parent process is gone (crash, kill, teardown).  No
+        # one will ever send "stop" again, so the child terminates itself —
+        # the alternative is an always-on-top orphan window that cannot be
+        # dismissed (its own buttons only report to the dead pipe).
+        indicator._commands.put(("stop", None))
 
     threading.Thread(target=announce, daemon=True).start()
     threading.Thread(target=pump, daemon=True).start()

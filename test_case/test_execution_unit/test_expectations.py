@@ -77,6 +77,8 @@ def test_registry_has_every_documented_evaluator():
             "control_text_time_range",
             "window_text_time_range",
         "visual_evidence_captured",
+        # 06 §5：region_query 期望由区域断言编译产生（region/multi-component batch 1）。
+        "region_query",
     }
     assert set(EXPECTATION_REGISTRY.keys()) == expected
 

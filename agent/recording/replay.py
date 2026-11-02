@@ -14,7 +14,8 @@ from agent.execution import AtomicExecutor, CaseRunResult, StepMaterializationEr
 from agent.locator import HybridLocator, LocatorError, LocatorRequest, LocatorPolicy
 from agent.execution.confirmation import ExecutionContext
 from agent.trace.events import EventType
-from agent.trace.evidence import EvidenceRecord, persist_screenshot
+from agent.redaction import RedactionRegistry, default_registry
+from agent.trace.evidence import EvidenceIntegrityError, EvidenceRecord, persist_screenshot
 from agent.trace.store import TraceStore
 from target.protocol_models import AtomicTestStep, Expectation, TargetRef, TestCase
 from target.recording.models import RecordingModelError
@@ -108,6 +109,35 @@ def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
+def _replay_remediation(control: Mapping, code: str, candidate_count: int) -> str:
+    """Data-grounded, fail-closed guidance when a step cannot materialize.
+
+    Never suggests a silent coordinate: an ambiguous multi-candidate target has
+    no safe winner here, and a zero-candidate result means the recorded identity
+    does not match the current window tree. Both require operator action, so the
+    message says what to change rather than attempting a guess.
+    """
+    control = control or {}
+    weak = not (control.get("automationId") or control.get("identifier"))
+    if code == "replay_target_not_found":
+        return (
+            "未从当前窗口树解析出该控件；请确认目标窗口处于录制时的视图/状态后重试，"
+            "或该控件的祖先链/身份与录制时已不一致。"
+        )
+    if candidate_count > 1:
+        if weak:
+            return (
+                "解析出多个同名候选（candidate_count=%d），无法安全唯一定位；"
+                "该控件缺少稳定自动化ID。请为动作录制/确认一个语义唯一的目标"
+                "（如稳定行键/行内容），或将该步骤声明为不支持回放。" % candidate_count
+            )
+        return (
+            "解析出多个候选（candidate_count=%d），无法安全唯一定位；"
+            "它们共享相同的身份字段。请确认一个语义唯一的目标。" % candidate_count
+        )
+    return "回放目标未解析成功，请检查目标窗口状态与录制身份一致性。"
+
+
 def resolve_replay_selector(selector: ReplaySelector, observation: Any) -> TargetRef:
     """Resolve exactly one current target; never reuse a recorded target ID."""
     snapshot_id = _snapshot_id(observation)
@@ -128,11 +158,19 @@ def resolve_replay_selector(selector: ReplaySelector, observation: Any) -> Targe
         code = "replay_target_ambiguous" if exc.code == "locator_ambiguous" else exc.code
         raise StepMaterializationError(
             code, "semantic replay selector could not resolve one current target",
-            details={"candidate_count": exc.candidate_count, "strategy": "semantic"},
+            details={"candidate_count": exc.candidate_count,
+                     "candidate_rects": [list(r) for r in exc.candidate_rects if r],
+                     "remediation": _replay_remediation(
+                         selector.control, code, exc.candidate_count),
+                     "strategy": "semantic"},
         ) from exc
     candidate = resolution.candidate
     if candidate is None:
-        raise StepMaterializationError("replay_target_not_found", "no semantic target")
+        raise StepMaterializationError(
+            "replay_target_not_found", "no semantic target",
+            details={"candidate_count": 0,
+                     "remediation": _replay_remediation(
+                         selector.control, "replay_target_not_found", 0)})
     return TargetRef(
         snapshot_id=snapshot_id,
         target_id=candidate.target_id,
@@ -148,11 +186,19 @@ class ReplayEvidenceRecorder:
     A frame reaches disk only when the target marked it redacted and
     window-scoped; anything else is refused rather than written, so an
     execution report can never carry an unredacted runtime screenshot.
+
+    Evidence metadata (window_title / process_name) runs through the
+    Layer-1 RedactionRegistry before persistence (D16): these strings
+    are user-controlled window chrome and land verbatim in
+    events.jsonl via SCREENSHOT_PERSISTED, so registry matches are
+    replaced with [REDACTED] at this boundary.
     """
 
-    def __init__(self, trace_store: TraceStore, *, role: str = "before") -> None:
+    def __init__(self, trace_store: TraceStore, *, role: str = "before",
+                 redaction_registry: RedactionRegistry | None = None) -> None:
         self._trace_store = trace_store
         self._role = role
+        self._registry = redaction_registry or default_registry()
         self.persisted: list[EvidenceRecord] = []
 
     @property
@@ -178,6 +224,10 @@ class ReplayEvidenceRecorder:
                 "a replay frame may only be persisted after target-side source redaction",
             )
         window = _get(observation, "active_window") or {}
+        window_title, _ = self._registry.apply_text(
+            str(_get(window, "title", "window_title") or ""))
+        process_name, _ = self._registry.apply_text(
+            str(_get(window, "process_name", "processName") or ""))
         event = self._trace_store.append_dict(
             EventType.SCREENSHOT_CAPTURED,
             payload={
@@ -188,18 +238,24 @@ class ReplayEvidenceRecorder:
             },
             step_id=step.step_id,
         )
-        record = persist_screenshot(
-            bytes(png_bytes),
-            self._role,
-            step_no=step.step_no,
-            step_id=step.step_id,
-            snapshot_id=_snapshot_id(observation),
-            event_id=event.event_id,
-            process_name=str(_get(window, "process_name", "processName") or ""),
-            pid=int(_get(window, "pid") or 0),
-            window_title=str(_get(window, "title", "window_title") or ""),
-            trace_dir=self._trace_store.root,
-        )
+        try:
+            record = persist_screenshot(
+                bytes(png_bytes),
+                self._role,
+                step_no=step.step_no,
+                step_id=step.step_id,
+                snapshot_id=_snapshot_id(observation),
+                event_id=event.event_id,
+                process_name=process_name,
+                pid=int(_get(window, "pid") or 0),
+                window_title=window_title,
+                trace_dir=self._trace_store.root,
+            )
+        except EvidenceIntegrityError as exc:
+            raise StepMaterializationError(
+                "replay_capture_invalid_frame",
+                f"a replay frame failed evidence integrity validation: {exc}",
+            ) from exc
         self._trace_store.append_dict(
             EventType.SCREENSHOT_PERSISTED,
             payload=record.to_dict(),
@@ -257,6 +313,26 @@ def _expectation_match(selector: ReplaySelector | None) -> dict[str, Any]:
 
 def _verifier_expectation(step: RecordedStep, verifier: Mapping[str, Any]) -> Expectation:
     kind = verifier.get("type") or verifier.get("assertion")
+    if kind == "region_query":
+        # Region / multi-component query: no scalar expected — the container
+        # match, quantifier, condition tree, content-time window and
+        # observation mode are the expectation value.  The deadline rides in
+        # timeout_seconds; the evaluator starts its own monotonic clock.
+        observation = dict(verifier.get("observation") or {})
+        timeout = float(verifier.get(
+            "timeoutSeconds", observation.get("deadlineSeconds", 60.0)))
+        return Expectation(
+            type="region_query",
+            value={
+                "match": verifier.get("match") or _expectation_match(step.selector),
+                "target": verifier.get("target"),
+                "quantifier": verifier.get("quantifier"),
+                "conditions": verifier.get("conditions"),
+                "contentTime": verifier.get("contentTime"),
+                "observation": observation,
+            },
+            timeout_seconds=timeout,
+        )
     if "expected" not in verifier:
         raise RecordingModelError(
             "compile_assertion_missing_expected",
@@ -601,7 +677,10 @@ class GoldenStepMaterializer:
                     else:
                         code = exc.code
                     raise StepMaterializationError(code, str(exc),
-                                                   details={"candidate_count": exc.candidate_count}) from exc
+                                                   details={"candidate_count": exc.candidate_count,
+                                                            "candidate_rects": [list(r) for r in exc.candidate_rects if r],
+                                                            "remediation": _replay_remediation(
+                                                                selector.control, code, exc.candidate_count)}) from exc
                 if fused.candidate is None:
                     # semantic_first already allows semantic sources, so this
                     # is the one place the text confirmation may assist the
@@ -684,10 +763,22 @@ class GoldenStepMaterializer:
             }
             args.update({key: value for key, value in semantic_args.items() if value not in (None, "")})
         elif step.action_id == "gui.type_text":
+            # Same control identity source as gui.click: the observed
+            # automation_id (+ control type) is the stable WinForms/UIA
+            # identity; legacy control_id/class_name only apply when no
+            # automation identity was observed. Mixing both would break the
+            # target's AND-combined control lookup (0637: dynamic WinForms
+            # class name → "Control not found").
+            automation_id = (control.get("automationId")
+                             or _get(candidate, "automation_id", "automationId"))
             semantic_args = {
-                "control_id": _get(candidate, "control_id", "controlId"),
-                "class_name": _get(candidate, "class_name", "className"),
+                "automation_id": automation_id,
+                "control_type": (control.get("controlType")
+                                 or _get(candidate, "control_type", "controlType")),
             }
+            if not automation_id:
+                semantic_args["control_id"] = _get(candidate, "control_id", "controlId")
+                semantic_args["class_name"] = _get(candidate, "class_name", "className")
             args.update({key: value for key, value in semantic_args.items() if value not in (None, "")})
         elif step.action_id == "gui.select":
             semantic_args = {
@@ -994,13 +1085,66 @@ def _run_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRunRe
     )
 
 
+def _release_product_run_lease(end_product_run: Callable[[], None]) -> None:
+    """释放目标端 product-run 租约：预算内重试，耗尽后记录、不抛出。
+
+    清理调用与收集链路（ui_bridge）同类，都在无保护位置直面隧道抖动；但
+    这里不能走 UIBridgeError 路径——finally 中的清理异常会掩盖回放的真实
+    结果。目标端租约有惰性过期兜底（product_policy._expire_if_needed），
+    预算耗尽后放弃是安全的，失败必须被记录而不是把绿的结果或原始错误顶掉。
+    """
+    import logging
+    import time as _time
+
+    logger = logging.getLogger(__name__)
+    interval, budget = 1.0, 3
+    misses = 0
+    while True:
+        try:
+            end_product_run()
+            return
+        except Exception as exc:  # noqa: BLE001 - cleanup must never mask the run
+            misses += 1
+            if misses > budget:
+                logger.warning(
+                    "product-run lease release failed after %d attempts; "
+                    "the target lease expires lazily: %s", misses, exc)
+                return
+            logger.warning("product-run lease release failed, retry %d/%d: %s",
+                           misses, budget, exc)
+            _time.sleep(interval)
+
+
 def replay_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRunResult:
-    """Ensure target GUI lease is released even when replay raises."""
+    """Ensure target GUI lease is released even when replay raises.
+
+    Also terminates the on-disk trace: an untyped exception (OSError from
+    evidence persistence, KeyboardInterrupt, an exotic transport fault)
+    escapes `run_case`'s typed handlers and would otherwise leave the trace
+    directory without any terminal event -- evidence that reads "in progress"
+    forever.  The guard appends `trace_aborted` with the exception class
+    before re-raising; a trace that already terminated is left untouched, and
+    a terminal-append failure never masks the original error.
+    """
     try:
         return _run_golden_trace(target, golden)
+    except BaseException as exc:
+        store = target.trace_store
+        if store is not None:
+            try:
+                store.finalize(
+                    EventType.TRACE_ABORTED,
+                    payload={
+                        "reason": "replay_interrupted",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            except Exception:
+                pass  # the original interruption remains the actionable error
+        raise
     finally:
         if target.end_product_run is not None:
-            target.end_product_run()
+            _release_product_run_lease(target.end_product_run)
 
 
 __all__ = [

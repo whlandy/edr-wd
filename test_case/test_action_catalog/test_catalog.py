@@ -634,6 +634,20 @@ def _make_stub_backend() -> object:
     return type("Stub", (), ns)()
 
 
+@pytest.fixture(autouse=True)
+def _restore_server_backend_singleton():
+    """G8 测试直接改 server 模块级 `_backend`/`_backend_kind` 单例做桩；
+    不恢复会污染后续 server 测试（如 execute_action 的断连回执断言）。"""
+    import importlib as _importlib
+    srv = (_importlib.import_module("server")
+           if "server" not in sys.modules else sys.modules["server"])
+    saved_backend = getattr(srv, "_backend", None)
+    saved_kind = getattr(srv, "_backend_kind", None)
+    yield
+    srv._backend = saved_backend
+    srv._backend_kind = saved_kind
+
+
 def test_server_status_metadata_nests_catalog_version_and_digest():
     server = _import_server()
     server._backend = _make_stub_backend()

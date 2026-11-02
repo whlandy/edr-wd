@@ -11,6 +11,9 @@ from target.recording.models import RecordingModelError
 
 COMPILED_CASE_SCHEMA = "edr.desktop-recorded-case/v1"
 GOLDEN_TRACE_SCHEMA = "edr.desktop-golden-trace/v1"
+#: v2 adds the optional, strictly-parsed `entryWindow` identity record.
+GOLDEN_TRACE_SCHEMA_V2 = "edr.desktop-golden-trace/v2"
+ENTRY_WINDOW_SCHEMA = "edr.entry-window-identity/v1"
 REPLAY_EVALUATION_SCHEMA = "edr.desktop-replay-evaluation/v1"
 
 
@@ -36,6 +39,72 @@ def _require(data: Mapping[str, Any], required: set[str], path: str) -> None:
 
 
 def _validate_verifier(value: Mapping[str, Any], path: str) -> None:
+    # region_query flattens its v2 draft into semantic verifier fields (no
+    # scalar ``expected``): match names the container, the condition tree /
+    # content-time / observation blocks carry the semantics, all validated by
+    # the shared region validator so compile and replay cannot drift.
+    if isinstance(value, Mapping) and value.get("type") == "region_query":
+        data = _strict(
+            value,
+            {"type", "match", "target", "quantifier", "conditions",
+             "contentTime", "observation", "timeoutSeconds"},
+            path,
+        )
+        _require(data, {"type", "match", "target", "quantifier",
+                        "conditions", "contentTime", "observation"}, path)
+        match = _strict(
+            data["match"],
+            {"automation_id", "identifier", "control_type", "text"},
+            f"{path}.match",
+        )
+        if (not all(isinstance(item, str) and item for item in match.values())
+                or not (match.get("automation_id") or match.get("identifier")
+                        or (match.get("control_type") and match.get("text")))):
+            raise RecordingModelError(
+                "type_error", "region_query match requires a stable container identity",
+                path=f"{path}.match",
+            )
+        try:
+            from target.recording.region_assertion import (
+                validate_condition_tree, validate_content_time,
+                validate_observation,
+            )
+        except ImportError:  # pragma: no cover - flat deployment layout
+            from recording.region_assertion import (  # type: ignore[no-redef]
+                validate_condition_tree, validate_content_time,
+                validate_observation,
+            )
+        quantifier = data["quantifier"]
+        if quantifier not in ("any", "all"):
+            raise RecordingModelError(
+                "type_error", "region_query quantifier must be 'any' or 'all'",
+                path=f"{path}.quantifier",
+            )
+        target = data["target"]
+        if not isinstance(target, Mapping) or target.get("mode") not in (
+                "container_rows", "fixed_components"):
+            raise RecordingModelError(
+                "type_error", "region_query target.mode is invalid",
+                path=f"{path}.target",
+            )
+        content_time = validate_content_time(data["contentTime"], f"{path}.contentTime")
+        validate_condition_tree(
+            data["conditions"], f"{path}.conditions", root=True,
+            content_time_enabled=content_time["enabled"],
+        )
+        validate_observation(
+            data["observation"], f"{path}.observation", has_binding=True,
+        )
+        timeout = data.get("timeoutSeconds", 60.0)
+        if (
+            not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+            or not 0 < float(timeout) <= 300
+        ):
+            raise RecordingModelError(
+                "type_error", "verifier timeoutSeconds must be in (0, 300]",
+                path=f"{path}.timeoutSeconds",
+            )
+        return
     data = _strict(value, {"type", "expected", "timeoutSeconds", "durationSeconds", "match"}, path)
     _require(data, {"type", "expected"}, path)
     kind = data["type"]
@@ -396,6 +465,78 @@ class RecordedTestCase:
 
 
 @dataclass(frozen=True)
+class EntryWindowIdentity:
+    """The compiled entry-window identity record (v2 golden traces).
+
+    One optional record, derived by the compiler from the first executable
+    step's selector and its reliably-associated recorded evidence. Absent
+    means "no verifiable identity" — replay then keeps the v1 behavior and
+    entry-window recovery is refused with an explicit error, never downgraded
+    to a weaker title-only match (design doc 08 §C2/§C6, R2 scope).
+    """
+    process_name: str
+    title_regex: str | None
+    root_automation_id: str | None
+    origin: str
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "schema": ENTRY_WINDOW_SCHEMA,
+            "processName": self.process_name,
+            "origin": self.origin,
+        }
+        if self.title_regex is not None:
+            data["titleRegex"] = self.title_regex
+        if self.root_automation_id is not None:
+            data["rootAutomationId"] = self.root_automation_id
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "EntryWindowIdentity":
+        d = _strict(data, {"schema", "processName", "titleRegex",
+                           "rootAutomationId", "origin"}, "golden.entryWindow")
+        if d.get("schema") != ENTRY_WINDOW_SCHEMA:
+            raise RecordingModelError(
+                "unsupported_schema",
+                f"unsupported entryWindow schema {d.get('schema')!r}",
+                path="golden.entryWindow.schema",
+            )
+        process = d.get("processName")
+        if not isinstance(process, str) or not process:
+            raise RecordingModelError(
+                "type_error", "entryWindow.processName must be a non-empty string",
+                path="golden.entryWindow.processName",
+            )
+        origin = d.get("origin")
+        if origin not in {"already_open", "opened"}:
+            raise RecordingModelError(
+                "type_error",
+                "entryWindow.origin must be 'already_open' or 'opened'",
+                path="golden.entryWindow.origin",
+            )
+        title = d.get("titleRegex")
+        if title is not None and (not isinstance(title, str) or not title):
+            raise RecordingModelError(
+                "type_error", "entryWindow.titleRegex must be a non-empty string or absent",
+                path="golden.entryWindow.titleRegex",
+            )
+        root = d.get("rootAutomationId")
+        if root is not None and (not isinstance(root, str) or not root):
+            raise RecordingModelError(
+                "type_error", "entryWindow.rootAutomationId must be a non-empty string or absent",
+                path="golden.entryWindow.rootAutomationId",
+            )
+        if title is None and root is None:
+            raise RecordingModelError(
+                "entry_identity_unidentifiable",
+                "entryWindow needs a title regex or a root automation id; "
+                "an identity with neither is not verifiable",
+                path="golden.entryWindow",
+            )
+        return cls(str(process), title, root, str(origin))
+
+
+@dataclass(frozen=True)
 class GoldenTrace:
     name: str
     source_recording: Mapping[str, Any]
@@ -405,12 +546,21 @@ class GoldenTrace:
     status: str
     cleanup: tuple[RecordedStep, ...] = ()
     schema: str = GOLDEN_TRACE_SCHEMA
+    #: v2 only. None (absent) keeps v1 semantics: no verifiable entry identity,
+    #: entry-window recovery refused with an explicit error when requested.
+    entry_window: EntryWindowIdentity | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
             raise RecordingModelError("type_error", "golden name must be non-empty", path="golden.name")
         if self.status not in {"ready", "incomplete"}:
             raise RecordingModelError("type_error", "invalid golden status", path="golden.status")
+        if self.entry_window is not None and self.schema != GOLDEN_TRACE_SCHEMA_V2:
+            raise RecordingModelError(
+                "type_error",
+                "entryWindow requires the v2 golden schema",
+                path="golden.schema",
+            )
         identifiers = [step.step_id for step in (*self.steps, *self.cleanup)]
         if len(identifiers) != len(set(identifiers)):
             raise RecordingModelError("step_graph_invalid", "step ids must be unique", path="golden.steps")
@@ -426,7 +576,7 @@ class GoldenTrace:
             item = step.to_dict()
             item["next"] = self.steps[index + 1].step_id if index + 1 < len(self.steps) else None
             step_map[step.step_id] = item
-        return {
+        data = {
             "schema": self.schema, "status": self.status, "name": self.name,
             "sourceRecording": dict(self.source_recording), "catalog": dict(self.catalog),
             "environment": dict(self.environment),
@@ -434,17 +584,29 @@ class GoldenTrace:
             "steps": step_map,
             "cleanup": [step.to_dict() for step in self.cleanup],
         }
+        if self.entry_window is not None:
+            data["entryWindow"] = self.entry_window.to_dict()
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "GoldenTrace":
-        d = _strict(data, {"schema", "status", "name", "sourceRecording", "catalog", "environment", "entry", "steps", "cleanup"}, "golden")
+        d = _strict(data, {"schema", "status", "name", "sourceRecording", "catalog", "environment", "entry", "steps", "cleanup", "entryWindow"}, "golden")
         _require(
             d,
             {"schema", "status", "name", "sourceRecording", "catalog", "environment", "entry", "steps", "cleanup"},
             "golden",
         )
-        if d.get("schema") != GOLDEN_TRACE_SCHEMA:
+        if d.get("schema") not in {GOLDEN_TRACE_SCHEMA, GOLDEN_TRACE_SCHEMA_V2}:
             raise RecordingModelError("unsupported_schema", f"unsupported schema {d.get('schema')!r}", path="golden.schema")
+        entry_window = None
+        if d.get("entryWindow") is not None:
+            if d.get("schema") != GOLDEN_TRACE_SCHEMA_V2:
+                raise RecordingModelError(
+                    "type_error",
+                    "entryWindow requires the v2 golden schema",
+                    path="golden.schema",
+                )
+            entry_window = EntryWindowIdentity.from_dict(d["entryWindow"])
         raw_steps = d.get("steps")
         if not isinstance(raw_steps, Mapping):
             raise RecordingModelError("type_error", "steps must be an object", path="golden.steps")
@@ -503,6 +665,7 @@ class GoldenTrace:
             catalog=catalog, environment=environment,
             steps=tuple(ordered), status=d.get("status", "incomplete"),
             cleanup=cleanup, schema=d["schema"],
+            entry_window=entry_window,
         )
 
 

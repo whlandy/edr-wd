@@ -213,6 +213,14 @@ def persist_screenshot(
         )
     if not png_bytes:
         raise EvidenceIntegrityError("png_bytes is empty")
+    # Reject a zero-dimension frame before any write: a syntactically valid
+    # 0×0 PNG would otherwise persist, pass its digest check, and let the
+    # visual_evidence_captured assertion report an empty capture as PASSED.
+    width, height = _png_dimensions(png_bytes)
+    if width <= 0 or height <= 0:
+        raise EvidenceIntegrityError(
+            f"zero-dimension frame rejected: {width}x{height}"
+        )
     # Validate step_id itself (FR-P1.4-10: filenames must not
     # contain traversal / control chars / separators).
     if not isinstance(step_id, str) or not step_id:
@@ -232,18 +240,18 @@ def persist_screenshot(
     image_rules = [r for r in (redaction_rules or []) if isinstance(r, ImageRule)]
     text_rules = [r for r in (redaction_rules or []) if isinstance(r, TextRule)]
     final_bytes, image_rule_ids = apply_image_redaction(png_bytes, image_rules)
-    redaction_applied = bool(image_rule_ids) or bool(
-        apply_text_redaction(window_title, text_rules)[1]
-    ) or bool(apply_text_redaction(process_name, text_rules)[1])
-    # Apply text redaction to the metadata strings (we don't persist
-    # the redacted strings yet — caller may want them; we record
-    # rule_ids in the evidence record regardless).
-    # Redaction of process_name / window_title is consumed at the
-    # caller's report-rendering boundary; the EvidenceRecord simply
-    # captures which rules fired.
+    # Text rules apply to the metadata strings themselves (D16/FR-P3.1-09):
+    # the record is what lands in events.jsonl via SCREENSHOT_PERSISTED and
+    # what the trace.md provenance line renders, so a registry match must be
+    # replaced with [REDACTED] here, not merely counted.
+    redacted_title, title_fired = apply_text_redaction(window_title, text_rules)
+    redacted_process, process_fired = apply_text_redaction(process_name, text_rules)
+    text_rule_ids = tuple(dict.fromkeys(title_fired + process_fired))
+    redaction_applied = bool(image_rule_ids) or bool(text_rule_ids)
 
-    # Width / height from the un-redacted original.
-    width, height = _png_dimensions(png_bytes)
+    # Width / height were read from the un-redacted original above
+    # (zero-dimension check), so the record matches the source image,
+    # not the redacted one.
 
     # Atomic write.
     target = Path(trace_dir) / rel_path
@@ -291,11 +299,11 @@ def persist_screenshot(
         snapshot_id=snapshot_id,
         event_id=event_id,
         step_id=step_id,
-        process_name=process_name,
+        process_name=redacted_process,
         pid=pid,
-        window_title=window_title,
+        window_title=redacted_title,
         redaction_applied=redaction_applied,
-        redaction_rule_ids=tuple(image_rule_ids),
+        redaction_rule_ids=tuple(image_rule_ids) + text_rule_ids,
     )
 
 

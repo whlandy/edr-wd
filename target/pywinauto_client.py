@@ -24,6 +24,19 @@ try:
 except ImportError:
     from target.artifacts import screenshot_path
 
+try:
+    from automation.physical_activation import (
+        PhysicalActivationConfigError,
+        parse_physical_activation_spec,
+        physical_activation_required,
+    )
+except ImportError:
+    from target.automation.physical_activation import (
+        PhysicalActivationConfigError,
+        parse_physical_activation_spec,
+        physical_activation_required,
+    )
+
 logger = logging.getLogger("edr_wd.pywinauto_client")
 
 #: The service that actually draws the EDR UI. `HisecEndpointAgent.exe cmd ui`
@@ -35,6 +48,47 @@ DEFAULT_EDR_SERVICE = "HiSec OneAgent Service"
 #: this is the agent's own default for an empty file.
 DEFAULT_EDR_IPC_PORT = 58299
 
+#: UIA control types whose containers may virtualize their rows: `children()`
+#: returns only the currently materialized items, with no error or cap signal,
+#: so the returned list alone cannot prove the container is fully enumerated.
+#: Listed lower-cased for direct comparison against `control_type()`.
+_VIRTUALIZATION_CAPABLE = {
+    "table", "datagrid", "list", "tree", "treeview", "listbox",
+}
+
+
+def _children_enumeration_is_proven_complete(gui, ctrl, children) -> bool:
+    """Whether the container's returned children are provably all of them.
+
+    ``children()`` returning without error proves exhaustiveness only for
+    containers that cannot virtualize (plain panes/groups/buttons). For a
+    virtualization-capable container (table/list/grid/tree) the materialized
+    set may be a strict subset of all rows, so the walk must NOT claim
+    completeness unless it has positive proof that the count of materialized
+    children equals the container's reported item count.
+
+    The former positive shortcut (``item_count == len(children)``) was
+    unreliable: ``children()`` can also include non-row nodes (headers,
+    scrollbars), so a table with 3 total rows, 2 materialized rows and 1 header
+    reported ``len(children)==3`` and was wrongly marked complete. A partially
+    materialized tree must never be compiled to a weak-identity ``ready``, so a
+    virtualization-capable container is conservatively treated as not complete.
+    """
+    ctype = ""
+    try:
+        ctype = str(ctrl.control_type() or "")
+    except Exception:
+        try:
+            ctype = str(ctrl.element_info.control_type or "")
+        except Exception:
+            ctype = ""
+    if ctype.lower() in _VIRTUALIZATION_CAPABLE:
+        # A virtualizable container's materialized children are not provably
+        # all of them; stay incomplete rather than promise a ready against a
+        # partial tree.
+        return False
+    return True
+
 
 class WindowsGUI:
     """Windows GUI 自动化客户端（pywinauto 封装）"""
@@ -43,6 +97,12 @@ class WindowsGUI:
         self.backend = backend
         self.app: Optional[Application] = None
         self.main_window = None
+        # 显式物理激活声明（106 轮方案 C 收窄版）：进程+完整窗口 title+
+        # automation_id 三元组同时精确匹配的控件跳过 UIA Invoke，落既有
+        # 物理路径。配置缺失 → 无规则（默认语义零变化）；配置非法 → 启动
+        # 即明确失败，不静默忽略。
+        self._physical_activation_rules = parse_physical_activation_spec(
+            os.environ.get("EDR_WD_PHYSICAL_ACTIVATION"))
         # HWND of the connected window, cached at connect time.  Screen capture
         # must not need a live UIA round-trip: when the session stops rendering
         # every UIA property read fails, and that is exactly when the GDI
@@ -323,6 +383,20 @@ class WindowsGUI:
         except Exception as e:
             logger.warning("_find_windows error: %s", e)
         return matched
+
+    def process_name_for_pid(self, pid: int) -> Optional[str]:
+        """Real owning process name for a pid, or None when unresolvable.
+
+        The recorder panel needs the true process behind each listed window
+        to start a scoped capture; the window entries themselves carry no
+        process name, so this is resolved with psutil (a declared dependency)
+        at the only layer that can answer it.
+        """
+        try:
+            import psutil
+            return psutil.Process(int(pid)).name()
+        except Exception:
+            return None
 
     def list_windows(self) -> dict:
         """
@@ -841,12 +915,17 @@ class WindowsGUI:
                 "x": win_rect.left, "y": win_rect.top,
                 "w": win_rect.width(), "h": win_rect.height()
             }
-            tree = self._build_tree(win, depth=0, max_depth=max_depth)
+            incomplete = [False]
+            tree = self._build_tree(win, depth=0, max_depth=max_depth,
+                                    _incomplete=incomplete)
+            complete = not incomplete[0]
             return {
                 "ok": True,
                 "title": win.window_text(),
                 "window_rectangle": win_rect_dict,
                 "rectangle_mode": "screen",
+                "truncated": not complete,
+                "complete": complete,
                 "controls": tree
             }
         except Exception as e:
@@ -867,16 +946,22 @@ class WindowsGUI:
 
             win = Desktop(backend=self.backend).window(handle=int(handle))
             rect = win.rectangle()
+            incomplete = [False]
+            controls = self._build_tree(win, depth=0, max_depth=max_depth,
+                                        _incomplete=incomplete)
+            complete = not incomplete[0]
             return {
                 "ok": True,
                 "title": win.window_text(),
                 "handle": int(handle),
+                "truncated": not complete,
+                "complete": complete,
                 "window_rectangle": {
                     "x": rect.left, "y": rect.top,
                     "w": rect.width(), "h": rect.height(),
                 },
                 "rectangle_mode": "screen",
-                "controls": self._build_tree(win, depth=0, max_depth=max_depth),
+                "controls": controls,
             }
         except Exception as e:
             logger.exception("dump_tree_for_window failed")
@@ -885,14 +970,114 @@ class WindowsGUI:
     # Hard cap: prevent accidentally passing unbounded depth values
     _MAX_TREE_DEPTH = 15
 
-    def _build_tree(self, ctrl, depth: int = 0, max_depth: int = 15) -> list:
-        """递归构建控件树（带深度限制防止卡死）"""
+    @staticmethod
+    def _ancestor_entry(ctrl):
+        """One ancestry level (controlType/automationId/name, empties dropped).
+
+        Extracted so ``_build_tree`` can compute a child's chain from the
+        already-walked parent chain without issuing any extra UIA ``parent()``
+        round-trips per descendant node.
+
+        Returns ``None`` when ``element_info`` cannot be read -- the invalid-
+        chain sentinel. A valid-but-empty level returns ``{}``; callers must
+        clear the whole chain (not keep a ``{}`` placeholder) when this returns
+        ``None``, to match the recording side's all-or-nothing contract.
+        """
+        try:
+            info = ctrl.element_info
+            item = {
+                "controlType": getattr(info, "control_type", None),
+                "automationId": getattr(info, "automation_id", None),
+                "name": getattr(info, "name", None),
+            }
+            return {
+                key: str(value) for key, value in item.items()
+                if value not in (None, "")
+            }
+        except Exception:
+            # element_info access or any field read (properties may raise on
+            # access too) fails -> invalid-chain sentinel clears the chain.
+            return None
+
+    def _build_ancestry(self, ctrl, *, limit: int = 6) -> list:
+        """Ancestor chain of a control, nearest parent first.
+
+        Mirrors the recording-side ancestry in ``target/recording/windows.py``:
+        walk the UIA parent chain up to *limit* levels and, for each level,
+        keep the ``controlType``/``automationId``/``name`` fields with empty
+        values dropped. Replay-time observation must carry the same fields in
+        the same order the compiler baked into the selector, or a recorded
+        step whose control has no stable automation id (and therefore keeps
+        an ancestry fallback selector) can never match at replay.
+
+        Any exception while reading a level clears the entire chain, exactly
+        as the recording side does -- a partially-built chain must never be
+        emitted, or the two ends would disagree field-for-field (§5 contract).
+        """
+        ancestry: list = []
+        try:
+            parent = ctrl.parent()
+            for _ in range(limit):
+                if parent is None:
+                    break
+                # Read element_info directly in the guarded loop so a failure
+                # reading any level clears the *entire* chain, exactly as the
+                # recording-side ancestry does. Relying on _ancestor_entry here
+                # would swallow the exception into a partial entry and break
+                # the "all-or-nothing" chain contract its own docstring states.
+                info = parent.element_info
+                item = {
+                    "controlType": getattr(info, "control_type", None),
+                    "automationId": getattr(info, "automation_id", None),
+                    "name": getattr(info, "name", None),
+                }
+                ancestry.append({
+                    key: str(value) for key, value in item.items()
+                    if value not in (None, "")
+                })
+                parent = parent.parent()
+        except Exception:
+            return []
+        return ancestry
+
+    def _build_tree(self, ctrl, depth: int = 0, max_depth: int = 15,
+                    _parent_ancestry: list | None = None,
+                    _chain_invalid: bool = False,
+                    _incomplete: list | None = None) -> list:
+        """递归构建控件树（带深度限制防止卡死）
+
+        ``_parent_ancestry`` threads the nearest-parent-first ancestor chain
+        down the recursion so each descendant node's ancestry is derived from
+        its parent's already-built chain (one entry + the parent's prefix)
+        instead of re-walking up to ``_MAX_TREE_DEPTH`` UIA ``parent()``
+        calls per node. The root passes ``None`` and walks once.
+
+        ``_chain_invalid`` is an *invalidated* marker distinct from an empty
+        chain: once an ancestor's ``element_info`` cannot be read, every deeper
+        descendant must also emit an empty ancestry (recording-side all-or-
+        nothing contract). It is threaded explicitly so a later healthy parent
+        does not rebuild a chain that a broken ancestor already invalidated.
+
+        ``_incomplete`` is a per-call ``[bool]`` accumulator owned by the
+        top-level ``dump_tree``/``dump_tree_for_window`` caller. Any truncation
+        signal (depth cap, child-count cap, children-enumeration exception, or
+        an unprovable virtualized container) flips it True, so completeness is
+        decided from the whole walk, never from shared instance state. A direct
+        caller without one gets a private accumulator; the boolean is read back
+        from that same list after the call.
+        """
+        if _incomplete is None:
+            _incomplete = [False]
         # Enforce hard cap regardless of what caller passed
         max_depth = min(max_depth, self._MAX_TREE_DEPTH)
         if depth > max_depth:
+            # Reached the depth cap with a real child beneath: the walk is
+            # incomplete, so downstream code must not treat it as exhaustive.
+            _incomplete[0] = True
             return []
 
         results = []
+        my_ancestry: list = []
         try:
             try:
                 text = ctrl.window_text()
@@ -956,6 +1141,12 @@ class WindowsGUI:
                 except Exception:
                     pass
 
+            if _chain_invalid:
+                my_ancestry = []
+            else:
+                my_ancestry = (_parent_ancestry if _parent_ancestry is not None
+                               else self._build_ancestry(ctrl))
+
             results.append({
                 "class_name": cls,
                 "text": text,
@@ -968,6 +1159,7 @@ class WindowsGUI:
                 "control_type": control_type,
                 "is_password": is_password,
                 "checked": checked,
+                "ancestry": list(my_ancestry),
             })
         except Exception:
             pass
@@ -975,10 +1167,38 @@ class WindowsGUI:
         # 递归子控件（限制子控件数量避免卡死）
         try:
             children = ctrl.children()
+            # A virtualization-capable container (table/list/grid/tree) may
+            # return only the rows currently materialized, with no error and no
+            # depth/child-count cap. `children()` completing without a signal
+            # does NOT prove exhaustiveness; only a positive materialization
+            # proof does. Without one, the walk cannot claim completeness, or a
+            # weak-identity `ready` would be promised against a partial tree.
+            if not _children_enumeration_is_proven_complete(self, ctrl, children):
+                _incomplete[0] = True
+            # Child chain = [this node] + this node's chain (nearest-first),
+            # truncated to the same 6-level cap -- no fresh UIA parent() walks.
+            # An invalid entry (sentinelled as None) means a level's
+            # element_info could not be read: clear the whole chain instead of
+            # propagating a `{}` placeholder, exactly as the recording-side
+            # ancestry does when any level read fails.
+            entry = self._ancestor_entry(ctrl)
+            child_invalid = _chain_invalid or entry is None
+            if child_invalid:
+                child_ancestry = []
+            else:
+                child_ancestry = ([entry] + list(my_ancestry[:5]))[:6]
+            if len(children) > 200:
+                _incomplete[0] = True
             for child in children[:200]:
-                results.extend(self._build_tree(child, depth + 1, max_depth))
+                results.extend(self._build_tree(
+                    child, depth + 1, max_depth, child_ancestry, child_invalid,
+                    _incomplete))
         except Exception:
-            pass
+            # A subtree whose children cannot be enumerated is an *unknown*
+            # (incomplete) region, not a proven-empty one. Marking the whole
+            # tree truncated is what lets the honest-completeness gate refuse a
+            # weak-identity `ready`: a duplicate may live beyond the failure.
+            _incomplete[0] = True
 
         return results
 
@@ -1019,7 +1239,9 @@ class WindowsGUI:
                                 ctrl.automation_id(), parent_ctrl.automation_id())
                     ctrl = parent_ctrl
 
-            semantic_result = self._semantic_activate(ctrl)
+            physical_required = self._physical_activation_required_for(ctrl)
+            semantic_result = (
+                None if physical_required else self._semantic_activate(ctrl))
             if semantic_result is not None:
                 semantic_result["control_id"] = control_id
                 return semantic_result
@@ -1039,6 +1261,19 @@ class WindowsGUI:
                 return {"ok": True, "method": "click_input", "control_id": control_id,
                         "automation_id": getattr(ctrl, "automation_id", lambda: None)()}
             except Exception as click_error:
+                if physical_required:
+                    # 显式物理声明的控件：click_input 失败必须如实失败，
+                    # 坐标 fallback 不得冒充物理控件点击通过。
+                    logger.warning("physical click_input failed for %r: %s",
+                                   getattr(ctrl, "automation_id", lambda: None)(),
+                                   click_error)
+                    return {
+                        "ok": False,
+                        "method": "click_input_failed",
+                        "control_id": control_id,
+                        "automation_id": getattr(ctrl, "automation_id", lambda: None)(),
+                        "click_input_error": str(click_error),
+                    }
                 logger.warning("click_input failed; falling back to coordinates: %s", click_error)
                 if callable(pointer_guard):
                     guarded = pointer_guard(x, y)
@@ -1171,10 +1406,13 @@ class WindowsGUI:
             return {"ok": False, "error": str(e)}
 
     def type_text(self, control_id: int = None, text: str = None,
-                   class_name: str = None, string: str = "") -> dict:
+                  class_name: str = None, string: str = "",
+                  automation_id: str = None, control_type: str = None) -> dict:
         """向控件输入文本"""
         try:
-            ctrl = self._find_control(control_id, text, class_name)
+            ctrl = self._find_control(control_id, text, class_name,
+                                      automation_id=automation_id,
+                                      control_type=control_type)
             if not ctrl:
                 return {"ok": False, "error": "Control not found"}
             ctrl.set_edit_text(string)
@@ -1219,6 +1457,198 @@ class WindowsGUI:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    # ------------------------------------------------------------------
+    # Region / container-row observation (region_query assertions)
+    # ------------------------------------------------------------------
+    #
+    # 增量只读能力：为区域/动态列表断言提供同帧行快照。仅做读取，不点击、
+    # 不滚动、不改变任何 UI 状态；虚拟列表只反映当前可访问数据。待实机验证。
+
+    _REGION_ROW_TYPES = {"listitem", "dataitem", "tablerow", "row",
+                         "treeitem", "custom", "group"}
+
+    def _resolve_control_identity(self, identity: dict):
+        """Resolve one stable control identity inside the connected window.
+
+        automationId wins; controlType+Name is the weak fallback. Returns
+        (ctrl, None) or (None, error_code).
+        """
+        win = self.main_window
+        if win is None:
+            return None, "No window connected"
+        automation_id = (identity.get("automationId")
+                         or identity.get("automation_id") or "")
+        control_type = (identity.get("controlType")
+                        or identity.get("control_type") or "")
+        name = identity.get("name") or identity.get("text") or ""
+        matches = []
+        for ctrl in win.descendants():
+            try:
+                aid = ""
+                try:
+                    aid = ctrl.automation_id() or ""
+                except Exception:
+                    pass
+                if automation_id:
+                    if aid == automation_id:
+                        matches.append(ctrl)
+                    continue
+                ctype = ""
+                try:
+                    ctype = str(ctrl.control_type() or "")
+                except Exception:
+                    try:
+                        ctype = str(ctrl.element_info.control_type or "")
+                    except Exception:
+                        pass
+                wtext = ""
+                try:
+                    wtext = ctrl.window_text() or ""
+                except Exception:
+                    pass
+                if control_type and name and ctype == control_type and wtext == name:
+                    matches.append(ctrl)
+            except Exception:
+                continue
+        if not matches:
+            return None, "control_not_found"
+        if len(matches) > 1:
+            return None, "control_ambiguous"
+        return matches[0], None
+
+    def _control_is_password(self, ctrl) -> bool:
+        """受保护控件识别（脱敏边界）：UIA IsPassword 优先，Win32 样式回退。
+
+        读不出就当非受保护处理——不猜；真正的取值脱敏由服务端按行再兜一层。
+        """
+        for attr in ("is_password", "has_password"):
+            try:
+                value = getattr(ctrl, attr)
+                value = value() if callable(value) else value
+                if value:
+                    return True
+            except Exception:
+                continue
+        try:
+            # UIA IsPassword 属性（LegacyIaAccessible / CurrentPropertyValue）。
+            return bool(
+                ctrl.element_info.CurrentPropertyValue(
+                    30019)  # UIA_IsPasswordPropertyId
+            ) if hasattr(ctrl.element_info, "CurrentPropertyValue") else False
+        except Exception:
+            pass
+        try:
+            # Win32 ES_PASSWORD (0x0020)。
+            return bool(int(ctrl.element_info.style) & 0x20)
+        except Exception:
+            return False
+
+    def _read_row_field(self, ctrl, field: str):
+        """Read one field off a row control; unreadable stays None."""
+        try:
+            if field in ("name",):
+                value = ctrl.window_text()
+                return value if value else None
+            if field in ("text", "time"):
+                return ctrl.window_text() or None
+            if field == "value":
+                try:
+                    return ctrl.get_value()
+                except Exception:
+                    try:
+                        return ctrl.legacy_properties().get("Value")
+                    except Exception:
+                        return None
+            if field == "checked":
+                try:
+                    state = ctrl.get_toggle_state()
+                    return bool(state) if state in (0, 1) else None
+                except Exception:
+                    return None
+            if field == "enabled":
+                try:
+                    return bool(ctrl.is_enabled())
+                except Exception:
+                    return None
+        except Exception:
+            return None
+        return None
+
+    def query_container_rows(self, container: dict = None,
+                             fields: list = None) -> dict:
+        """读取一个容器的当前行快照（同帧、只读、不刷新不滚动）。
+
+        返回 {"ok": True, "rows": [{"rowIndex", <field>: value}]} 或
+        {"ok": False, "error": str}。容器定位只用稳定身份（automationId 或
+        controlType+Name），绝不用坐标。
+        """
+        try:
+            if not isinstance(container, dict):
+                return {"ok": False, "error": "container identity required"}
+            wanted = [str(f) for f in (
+                fields or ["name", "text", "value", "checked", "enabled", "time"])]
+            container_ctrl, error = self._resolve_control_identity(container)
+            if container_ctrl is None:
+                return {"ok": False, "error": error or "container_not_found",
+                        "container": dict(container)}
+            rows = []
+            for index, child in enumerate(container_ctrl.children()):
+                try:
+                    protected = self._control_is_password(child)
+                    row = {"rowIndex": index}
+                    for field in wanted:
+                        value = self._read_row_field(child, field)
+                        # 受保护控件的取值/文本在本端先脱敏，服务端再兜一层。
+                        if protected and field in ("value", "text"):
+                            value = None
+                        row[field] = value
+                    try:
+                        row["controlType"] = str(child.control_type() or "")
+                    except Exception:
+                        row["controlType"] = None
+                    if protected:
+                        row["protected"] = True
+                    rows.append(row)
+                except Exception:
+                    continue
+            return {"ok": True, "rows": rows, "container": dict(container)}
+        except Exception as e:
+            logger.exception("query_container_rows failed")
+            return {"ok": False, "error": str(e)}
+
+    def read_component_values(self, components: list = None) -> dict:
+        """读取固定多组件各自当前值（{"field","identity"} 列表 → 逐个只读）。"""
+        try:
+            values = []
+            for component in components or []:
+                if not isinstance(component, dict):
+                    continue
+                field = str(component.get("field") or "")
+                identity = component.get("identity") or {}
+                ctrl, error = self._resolve_control_identity(identity)
+                if ctrl is None:
+                    entry = {"field": field, "value": None,
+                             "reason": error or "component_not_found"}
+                    if component.get("key"):
+                        entry["key"] = str(component["key"])
+                    values.append(entry)
+                    continue
+                protected = self._control_is_password(ctrl)
+                value = self._read_row_field(ctrl, field)
+                if protected:
+                    value = None
+                entry = {"field": field, "value": value}
+                if protected:
+                    entry["protected"] = True
+                # P2f：稳定键随采样值回传（身份锚定评估链路）。
+                if component.get("key"):
+                    entry["key"] = str(component["key"])
+                values.append(entry)
+            return {"ok": True, "values": values}
+        except Exception as e:
+            logger.exception("read_component_values failed")
+            return {"ok": False, "error": str(e)}
+
     def screenshot(self, path: str = None) -> dict:
         """
         截图整个窗口。
@@ -1228,6 +1658,19 @@ class WindowsGUI:
             win = self.main_window
             if win is None and not self._connected_hwnd:
                 return {"ok": False, "error": "No window connected"}
+            if self.is_minimized(win):
+                # A minimized window's GDI/PrintWindow frame is not a view of
+                # the real UI: downstream replay would project recorded
+                # coordinates onto parked geometry that observation also
+                # reports, so agent-side stale-frame gates cannot catch it.
+                return {
+                    "ok": False,
+                    "code": "window_minimized",
+                    "error": (
+                        "the connected window is minimized; restore it before "
+                        "capture or replay"
+                    ),
+                }
 
             errors = {}
             img = None
@@ -1298,6 +1741,29 @@ class WindowsGUI:
         rect = target.rectangle()
         return int(rect.left), int(rect.top)
 
+    # GetWindowRect parks a minimized window's rect at (-32000,-32000)-ish
+    # coordinates; anything at that far-negative offset is not a real
+    # on-screen position and must never become a capture origin or click
+    # anchor. Both axes park together, so requiring both keeps a
+    # multi-monitor layout with genuinely negative left (e.g. -3840)
+    # unambiguous.
+    _MINIMIZED_OFFSET = -30000
+
+    @classmethod
+    def _is_minimized_rect(cls, bounds) -> bool:
+        if not bounds or len(bounds) != 4:
+            return False
+        return (bounds[0] < cls._MINIMIZED_OFFSET
+                and bounds[1] < cls._MINIMIZED_OFFSET)
+
+    def is_minimized(self, win=None) -> bool:
+        """Win32 placement check, UIA-independent like the capture origin."""
+        hwnd = self.window_handle(win)
+        if not hwnd:
+            return False
+        bounds = self.window_rect_win32(hwnd)
+        return bounds is not None and self._is_minimized_rect(bounds)
+
     def window_handle(self, win=None) -> Optional[int]:
         """HWND of the connected window, preferring the connect-time cache.
 
@@ -1335,6 +1801,11 @@ class WindowsGUI:
                 raise RuntimeError("window rectangle unavailable")
             rect = target.rectangle()
             bounds = (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
+        if self._is_minimized_rect(bounds):
+            raise RuntimeError(
+                "window_minimized: the locked window is minimized; its parked "
+                f"rectangle {tuple(int(v) for v in bounds[:2])} cannot be a "
+                "capture origin — restore the window first")
         left, top, right, bottom = bounds
         width, height = right - left, bottom - top
         if width <= 0 or height <= 0:
@@ -1454,6 +1925,32 @@ class WindowsGUI:
         "Hyperlink", "MenuItem", "ListItem",
     }
 
+    def _physical_activation_required_for(self, ctrl) -> bool:
+        """显式声明的三元组（process+完整 title+automation_id）同时精确匹配
+        才让路物理路径；任何取值失败一律 False（不降级、不猜测）。"""
+        if not getattr(self, "_physical_activation_rules", ()):
+            return False
+        try:
+            aid = ctrl.automation_id() or ""
+        except Exception:
+            return False
+        try:
+            win = self.main_window
+            title = win.window_text() if win is not None else ""
+            pid = win.process_id() if win is not None else None
+        except Exception:
+            return False
+        process_name = None
+        if pid:
+            try:
+                process_name = psutil.Process(pid).name()
+            except Exception:
+                process_name = None
+        return physical_activation_required(rules=self._physical_activation_rules,
+                                            process_name=process_name,
+                                            window_title=title,
+                                            automation_id=aid)
+
     def _semantic_activate(self, ctrl):
         """
         Activate a UIA control through its exposed pattern before using mouse input.
@@ -1461,7 +1958,14 @@ class WindowsGUI:
         Qt/UIA controls can expose accurate component patterns even when their
         screen rectangle is broad or overlaps neighbouring content. Prefer Invoke
         or Toggle so selectors from dump_tree stay component-driven.
+
+        显式物理激活声明（EDR_WD_PHYSICAL_ACTIVATION）命中的控件在此让路：
+        返回 None → 调用方落既有控件定位 + pointer_guard + click_input 物理路径。
         """
+        if self._physical_activation_required_for(ctrl):
+            logger.info("physical activation declared for %r; skipping semantic activate",
+                        getattr(ctrl, "automation_id", lambda: None)())
+            return None
         try:
             control_type = str(ctrl.control_type() or "")
         except Exception:

@@ -36,6 +36,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+build-packaging/
 
 # OS
 .DS_Store

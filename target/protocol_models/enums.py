@@ -34,6 +34,10 @@ EXPECTATION_WINDOW_TEXT_CONTAINS_TIME = "window_text_contains_time"
 EXPECTATION_CONTROL_TEXT_TIME_RANGE = "control_text_time_range"
 EXPECTATION_WINDOW_TEXT_TIME_RANGE = "window_text_time_range"
 EXPECTATION_VISUAL_EVIDENCE_CAPTURED = "visual_evidence_captured"
+#: Region / multi-component container query (06 design §5): the value carries
+#: {match, target, quantifier, conditions, contentTime, observation}; the
+#: evaluator owns the monotonic observation window.
+EXPECTATION_REGION_QUERY = "region_query"
 
 VALID_EXPECTATION_TYPES: frozenset[str] = frozenset({
     EXPECTATION_ACTION_OK,
@@ -53,6 +57,7 @@ VALID_EXPECTATION_TYPES: frozenset[str] = frozenset({
     EXPECTATION_CONTROL_TEXT_TIME_RANGE,
     EXPECTATION_WINDOW_TEXT_TIME_RANGE,
     EXPECTATION_VISUAL_EVIDENCE_CAPTURED,
+    EXPECTATION_REGION_QUERY,
 })
 
 

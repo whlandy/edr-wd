@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -340,8 +341,11 @@ def test_replay_ambiguous_selector_blocks_without_dispatching():
     control = {
         "process_name": "EDRClient.exe", "window_title": "EDRClient",
         "automation_id": "btnApply", "control_type": "Button", "text": "应用",
+        "rect": [100, 200, 220, 260],
     }
-    runtime, _, calls = _runtime([control, control])
+    other = dict(control)
+    other["rect"] = [100, 280, 220, 340]
+    runtime, _, calls = _runtime([control, other])
     result = replay_golden_trace(
         runtime, _golden(RecordedStep("step-0001", "gui.click", {}, _selector()))
     )
@@ -350,6 +354,51 @@ def test_replay_ambiguous_selector_blocks_without_dispatching():
     assert result.case_result.step_results[0].error["code"] == "replay_target_ambiguous"
     assert result.evaluation.task_success is False
     assert result.evaluation.path_fidelity == 0.0
+    # Actionable diagnostic surfaces which rects were ambiguous (2 identical
+    # controls here -> 2 rects); still a refusal, never a silent pick.
+    details = result.case_result.step_results[0].error.get("details") or {}
+    assert details.get("candidate_count") == 2
+    assert len(details.get("candidate_rects") or []) == 2
+
+
+def test_replay_ambiguity_remediation_is_actionable_and_never_a_coordinate():
+    control = {
+        "process_name": "EDRClient.exe", "window_title": "EDRClient",
+        "automation_id": "btnApply", "control_type": "Button", "text": "应用",
+        "rect": [100, 200, 220, 260],
+    }
+    other = dict(control)
+    other["rect"] = [100, 280, 220, 340]
+    runtime, _, calls = _runtime([control, other])
+    result = replay_golden_trace(
+        runtime, _golden(RecordedStep("step-0001", "gui.click", {}, _selector()))
+    )
+    assert calls == []
+    details = result.case_result.step_results[0].error.get("details") or {}
+    remediation = details.get("remediation")
+    # A refusal with actionable guidance, never a silent pinch of a coordinate.
+    assert isinstance(remediation, str) and remediation
+    assert "candidate_count" in remediation
+    assert not any(banned in remediation
+                   for banned in ("点击坐标", "使用录制坐标", "x=", "y="))
+
+
+def test_replay_not_found_remediation_guides_window_state_check():
+    selector = ReplaySelector(
+        window={"processName": "EDRClient.exe", "titleRegex": "^EDRClient$"},
+        control={"controlType": "Button", "name": "PolicySave"},
+    )
+    runtime, _, calls = _runtime([])  # observation has no matching control
+    result = replay_golden_trace(
+        runtime, _golden(RecordedStep("step-0001", "gui.click", {}, selector))
+    )
+    assert calls == []
+    step = result.case_result.step_results[0]
+    assert step.error["code"] in ("replay_target_not_found", "replay_target_ambiguous")
+    details = step.error.get("details") or {}
+    remediation = details.get("remediation")
+    assert isinstance(remediation, str) and remediation
+    assert not any(banned in remediation for banned in ("x=", "y="))
 
 
 def test_assertion_only_step_observes_without_dispatching():
@@ -1998,3 +2047,117 @@ def test_rooted_entry_replay_defers_lock_to_exact_product_focus(tmp_path):
     assert calls == ["begin_product_run"]
     assert runtime.window_focus is not None
     runtime.end_product_run()
+
+
+# ---------------------------------------------------------------------------
+# Mid-replay interruption -> the on-disk trace must still terminate honestly.
+#
+# `run_case` converts *typed* failures (BackendUnavailable,
+# StepMaterializationError) into blocked steps, so their traces finalise with
+# a normal evaluation.  But an *untyped* exception escaping run_case -- e.g.
+# an OSError while evidence persistence touches disk, a KeyboardInterrupt
+# from an operator cancelling the replay, or any non-typed transport fault --
+# propagates out of `_run_golden_trace` and, without the interruption guard,
+# leaves the trace directory without any terminal event: evidence files that
+# look "in progress" forever, indistinguishable from a machine that died
+# mid-write.  The guard appends `trace_aborted` before re-raising, so every
+# opened trace directory ends with trace_completed or trace_aborted -- never
+# neither.  When the trace already terminated (e.g. the run completed and
+# only evaluation.json persistence then failed) the guard must not add a
+# second terminal event nor mask the original error.
+# ---------------------------------------------------------------------------
+
+
+class _DyingObservations(_Observations):
+    """Observations that refresh normally until armed, then raise untyped.
+
+    BackendUnavailable would be *typed* and absorbed by the executor as a
+    blocked step; the plain RuntimeError models the untyped class of failure
+    (OSError from evidence persistence, KeyboardInterrupt, an exotic
+    transport fault) that escapes run_case's handlers.
+    """
+
+    def __init__(self, controls):
+        super().__init__(controls)
+        self.raise_now = False
+
+    def refresh(self):
+        if self.raise_now:
+            raise RuntimeError("evidence persistence disk full")
+        return super().refresh()
+
+
+def _traced_runtime(controls, trace_root):
+    observations = _DyingObservations(controls)
+    store = TraceStore(Path(trace_root))
+    store.open()
+
+    def dispatch(**kwargs):
+        return ActionReceipt.from_ok(
+            action_id=kwargs["action_id"], action_code=kwargs["action_code"],
+            request_id=kwargs["request_id"], result={"ok": True},
+        )
+
+    executor = AtomicExecutor(dispatch=dispatch, observation_provider=observations)
+    return ReplayRuntime(executor, "1.0.0", "sha256:catalog", trace_store=store), observations, store
+
+
+def _btn_apply_controls():
+    return [{
+        "process_name": "EDRClient.exe",
+        "window_title": "EDRClient",
+        "automation_id": "btnApply",
+        "control_type": "Button",
+        "text": "应用",
+    }]
+
+
+def test_untyped_mid_replay_exception_still_terminates_the_trace(tmp_path):
+    step1 = RecordedStep("step-0001", "gui.click", {}, _selector())
+    step2 = RecordedStep("step-0002", "gui.click", {}, _selector())
+    runtime, observations, store = _traced_runtime(_btn_apply_controls(), tmp_path)
+
+    calls = []
+
+    def dispatch_arms_the_failure(**kwargs):
+        calls.append(kwargs["action_id"])
+        observations.raise_now = True
+        return ActionReceipt.from_ok(
+            action_id=kwargs["action_id"], action_code=kwargs["action_code"],
+            request_id=kwargs["request_id"], result={"ok": True},
+        )
+
+    executor = AtomicExecutor(dispatch=dispatch_arms_the_failure,
+                              observation_provider=observations)
+    runtime = replace(runtime, executor=executor)
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        replay_golden_trace(runtime, _golden(step1, step2))
+
+    assert len(calls) == 1, "the failure arms after the first dispatch"
+    events = store.read_events()
+    terminal = [event for event in events
+                if event.event_type in (EventType.TRACE_COMPLETED, EventType.TRACE_ABORTED)]
+    assert len(terminal) == 1, f"exactly one terminal event expected, got {terminal}"
+    assert events[-1].event_type is EventType.TRACE_ABORTED
+    assert events[-1].payload["reason"] == "replay_interrupted"
+    assert events[-1].payload["error_type"] == "RuntimeError"
+
+
+def test_failure_after_completed_trace_neither_double_terminates_nor_masks(tmp_path):
+    step1 = RecordedStep("step-0001", "gui.click", {}, _selector())
+    runtime, _, store = _traced_runtime(_btn_apply_controls(), tmp_path)
+
+    def disk_full(*args, **kwargs):
+        raise OSError("evaluation.json persistence failed")
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr("agent.recording.replay.tempfile.mkstemp", disk_full)
+        with pytest.raises(OSError, match="evaluation.json"):
+            replay_golden_trace(runtime, _golden(step1))
+
+    events = store.read_events()
+    terminal = [event for event in events
+                if event.event_type in (EventType.TRACE_COMPLETED, EventType.TRACE_ABORTED)]
+    assert len(terminal) == 1, "the completed trace must keep its single terminal event"
+    assert events[-1].event_type is EventType.TRACE_COMPLETED

@@ -12,10 +12,15 @@ from .policy import LocatorPolicy, choose_unique_candidate
 
 
 class LocatorError(ValueError):
-    def __init__(self, code: str, candidate_count: int = 0):
+    def __init__(self, code: str, candidate_count: int = 0, *,
+                 candidate_rects: tuple | None = None):
         super().__init__(code)
         self.code = code
         self.candidate_count = candidate_count
+        # Positions of the ambiguous candidates, nearest-first matching the
+        # candidate list. Exists only for actionable diagnostics -- a
+        # locator_ambiguous is still a refusal, never a guess.
+        self.candidate_rects = tuple(candidate_rects) if candidate_rects else ()
 
 
 @dataclass(frozen=True)
@@ -221,11 +226,13 @@ class HybridLocator:
                                                item.window_native_id, item.rect, item.source,
                                                visual_score + ocr_score))
             if not max(item.score for item in scored):
-                raise LocatorError("locator_ambiguous", len(candidates))
+                raise LocatorError("locator_ambiguous", len(candidates),
+                                   candidate_rects=tuple(c.rect for c in candidates))
             try:
                 chosen = choose_unique_candidate(tuple(scored), min_margin=policy.min_margin)
             except ValueError as exc:
-                raise LocatorError("locator_ambiguous", len(candidates)) from exc
+                raise LocatorError("locator_ambiguous", len(candidates),
+                                   candidate_rects=tuple(c.rect for c in candidates)) from exc
             return LocatorResolution(chosen, "evidence_fused", None, observation_id,
                                      tuple(sorted({kind for kind, _ in aligned[chosen.target_id]})))
         if policy.mode == "semantic_only" or request.action_id not in {"gui.click", "gui.click_target"}:

@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
-import hashlib
 import json
 import subprocess
 import sys
@@ -20,6 +17,11 @@ from agent.execution import AtomicExecutor
 from agent.execution.confirmation import ConfirmationGate, ExecutionContext
 from agent.trace.store import TraceStore
 from agent.recording.artifacts import write_compilation_artifacts
+from agent.recording.collection import (
+    CollectionRetryError,
+    RetryingCollectionAgent,
+    collect_recording_artifacts,
+)
 from agent.recording.compiler import compile_recording
 from agent.recording.mcp_runtime import MCPActionDispatch, MCPObservationProvider
 from agent.recording.replay import load_golden_trace, replay_golden_trace
@@ -36,6 +38,205 @@ from agent.target_config import TargetConfig, add_config_arguments, run_config_c
 from target.recording.models import RawRecording, RecordingModelError
 from target.action_catalog import ACTIONS_V1, CATALOG_VERSION, catalog_digest, get_spec
 from target.product_profiles import BUILTIN_CAPABILITIES, DEFAULT_APP_ID, INSTALLED_APPS
+
+
+def recording_stop_advisories(result: dict, issues: list[dict],
+                              golden_status: str) -> list[str]:
+    """`record stop` 输出的人话指引：空录与编译缺口的分类建议。
+
+    空录/租约过期以前要等操作者在落盘后自己发现；verifier 缺失以前只报 code
+    不说下一步。指引按真实 issue 分类：**只有 `compile_*_verifier_required`
+    才指引 record assert 补结果断言**；选择器歧义 / 窗口绑定各有各的修法；
+    未登记码注明以上游为准，不臆造修法、不放宽 ready 门槛。
+    """
+    advisories: list[str] = []
+    action_count = result.get("actionCount", 0)
+    reason = str(result.get("reason") or "")
+    if action_count == 0:
+        if "lease" in reason:
+            advisories.append(
+                f"这轮没有录到任何动作：录制租约在停止前已过期（reason={reason}）。")
+        else:
+            advisories.append("这轮没有录到任何动作（actionCount=0）。")
+        advisories.append(
+            "重录：压缩 record start → 界面操作 → record stop 的时间窗；"
+            "操作期间可随时跑 record status 心跳续租"
+            "（输出含 leaseSecondsRemaining，可看租约剩余秒数）。")
+        return advisories
+    if golden_status != "incomplete":
+        return advisories
+    verifier = [i for i in issues
+                if str(i.get("code", "")).endswith("_verifier_required")]
+    if verifier:
+        seqs = ", ".join(str(i.get("sequence")) for i in verifier)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步（scroll/drag）缺绑定的结果 verifier"
+            "（无法证明移动改变了状态）。用 record assert 在该步之后补一条"
+            "内容/位置/结果断言，再跑 record compile 重编译 —— 不必整条重录。")
+    ambiguous = [i for i in issues if i.get("code") in {
+        "compile_selector_ambiguous", "compile_assertion_selector_ambiguous"}]
+    if ambiguous:
+        seqs = ", ".join(str(i.get("sequence")) for i in ambiguous)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步缺稳定语义选择器；"
+            "为该动作补语义选择器后 record compile 重编译。")
+    weak_ambiguous = [i for i in issues if i.get("code")
+                      == "compile_weak_or_ambiguous_identity"]
+    if weak_ambiguous:
+        seqs = ", ".join(str(i.get("sequence")) for i in weak_ambiguous)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步是无稳定 automation id 的弱身份目标，"
+            "且整窗候选不止一个，无法保证回放唯一；请为该动作录制/确认一个"
+            "语义唯一的目标（稳定行键/行内容）后再 compile。")
+    weak_unresolved = [i for i in issues if i.get("code")
+                       == "compile_weak_identity_unresolved"]
+    if weak_unresolved:
+        seqs = ", ".join(str(i.get("sequence")) for i in weak_unresolved)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步是无稳定 automation id 的弱身份目标，"
+            "且录制未提供可证明唯一的完整控件树；无法保证回放唯一。"
+            "请为动作捕获一个稳定 automation id / 语义身份后再 compile。")
+    transition = [i for i in issues if i.get("code") == "compile_transition_unbound"]
+    if transition:
+        seqs = ", ".join(str(i.get("sequence")) for i in transition)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步窗口切换未绑定到前置动作；"
+            "补上因果绑定后 record compile 重编译。")
+    tree_undercount = [i for i in issues
+                       if i.get("code") == "compile_weak_identity_tree_undercount"]
+    if tree_undercount:
+        seqs = ", ".join(str(i.get("sequence")) for i in tree_undercount)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步录到的控件树低估了同名候选（虚拟化表格"
+            "可能没加载全部行），唯一性无法证明；把表格完整加载后重录该动作，"
+            "或捕获稳定行键/行内容、确认语义唯一身份后再 compile。")
+    volatile = [i for i in issues
+                if i.get("code") == "compile_weak_identity_volatile_label"]
+    if volatile:
+        seqs = ", ".join(str(i.get("sequence")) for i in volatile)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步的选择器靠控件文本身份解析，而同一位置"
+            "在别的录制帧里显示过不同标签——回放时该标签会找不到。请捕获稳定的"
+            " automation id，或锚定到录制与回放之间不会变化的内容，再 compile。")
+    recorder_ui = [i for i in issues
+                   if i.get("code") == "recording_recorder_ui_events"]
+    if recorder_ui:
+        counts = ", ".join(
+            f"第 {i.get('sequence')} 步" if i.get("sequence")
+            else "录制会话" for i in recorder_ui)
+        advisories.append(
+            f"golden 未就绪：{counts} 前后录制面板（指示器/断言编辑器）吞掉了"
+            "本应发给目标窗口的输入；录制时不要 connect/lock 录制器自身 UI，"
+            "重录该段动作后再 compile。")
+    unidentified = [i for i in issues
+                    if i.get("code") == "recording_unidentified_target_events"]
+    if unidentified:
+        seqs = ", ".join(str(i.get("sequence")) for i in unidentified)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步有点击落在应用无法命名的目标上"
+            "（如空白区域）；请点击可命名的控件后重录该动作再 compile。")
+    missing_expected = [i for i in issues
+                        if i.get("code") == "compile_assertion_missing_expected"]
+    if missing_expected:
+        seqs = ", ".join(str(i.get("sequence")) for i in missing_expected)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步断言缺 expected 值；"
+            "在断言编辑器里补上期望值后 compile。")
+    unsupported = [i for i in issues
+                   if i.get("code") == "compile_action_unsupported"]
+    if unsupported:
+        seqs = ", ".join(str(i.get("sequence")) for i in unsupported)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步是不支持回放的事件类型；"
+            "该动作不在当前动作目录内，无法通过补断言修复，需以目录能力为准重录。")
+    region_container = [i for i in issues
+                        if i.get("code") == "compile_region_container_unresolved"]
+    if region_container:
+        seqs = ", ".join(str(i.get("sequence")) for i in region_container)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步区域断言的容器没有稳定身份"
+            "（不会降级为坐标）；为容器补稳定身份后 compile。")
+    window_identity = [i for i in issues
+                       if i.get("code") == "compile_window_identity_ambiguous"]
+    if window_identity:
+        seqs = ", ".join(str(i.get("sequence")) for i in window_identity)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步前后录到过两个同标题/同身份的共存窗口，"
+            "回放只能锁住其中一个，无法证明步骤落在录制时的那个窗口里；"
+            "请在每步操作前用稳定窗口根身份（automation id）重新锁定窗口，"
+            "或避免流程跨越两个同标题窗口后 compile。")
+    missing_evidence = [i for i in issues
+                        if i.get("code") == "recording_capture_evidence_unavailable"]
+    if missing_evidence:
+        seqs = ", ".join(str(i.get("sequence")) for i in missing_evidence)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步有生命周期截图未能捕获；"
+            "证据不完整，无法证明步骤在录制时真实发生，请重录该段动作后 compile。")
+    secret_review = [i for i in issues
+                     if i.get("code") == "recording_secret_review_required"]
+    if secret_review:
+        seqs = ", ".join(str(i.get("sequence")) for i in secret_review)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步涉及受保护文本（密码/凭据）且未通过"
+            "环境变量 textSource 提供内容，或无法确认该输入框是否敏感；"
+            "明文不落盘，请在断言编辑器里改用环境变量来源后 compile。")
+    packets = [i for i in issues if i.get("code") == "recording_packets_dropped"]
+    if packets:
+        advisories.append(
+            "录制会话曾丢弃原生输入包（capture queue 溢出）；"
+            "录到的动作序列可能不完整，请减轻同机负载后重录再 compile。")
+    correlation = [i for i in issues
+                   if i.get("code") == "recording_correlation_errors"]
+    if correlation:
+        advisories.append(
+            "录制捕获层报告了相关联错误（correlation）；动作与证据的对应关系"
+            "可能不完整，请重录该段动作后再 compile。")
+    empty_recording = [i for i in issues
+                       if i.get("code") == "compile_recording_empty"]
+    if empty_recording:
+        advisories.append(
+            "录制里没有任何被接受的动作事件；确认操作发生在锁定窗口内、"
+            "捕获源正常后重录。")
+    other = sorted({str(i["code"]) for i in issues
+                    if i.get("code") not in _STOP_ADVISORY_KNOWN_CODES})
+    if other:
+        advisories.append(
+            "golden 未就绪：还有未登记的编译缺口 "
+            f"{', '.join(other)} —— 修复方式以上游编译器口径为准。")
+    return advisories
+
+
+_STOP_ADVISORY_KNOWN_CODES = {
+    "compile_scroll_verifier_required", "compile_drag_verifier_required",
+    "compile_selector_ambiguous", "compile_assertion_selector_ambiguous",
+    "compile_transition_unbound", "compile_recording_empty",
+    "recording_packets_dropped", "recording_correlation_errors",
+    "recording_secret_review_required", "compile_window_identity_ambiguous",
+    "recording_capture_evidence_unavailable",
+    "compile_weak_or_ambiguous_identity", "compile_weak_identity_unresolved",
+    "compile_weak_identity_tree_undercount",
+    "compile_weak_identity_volatile_label",
+    "recording_recorder_ui_events", "recording_unidentified_target_events",
+    "compile_assertion_missing_expected", "compile_action_unsupported",
+    "compile_region_container_unresolved",
+}
+
+
+def _stop_advisory_known_codes() -> frozenset[str]:
+    """known 集合的只读视图：parity 回归据此要求「登记即有指引」，防止
+    新码只登记不给分支（§7n 轮 window_identity 的沉寂缺口）。"""
+    return frozenset(_STOP_ADVISORY_KNOWN_CODES)
+
+
+def with_lease_warning(result: dict) -> dict:
+    """`record status` 的租约剩余不足 60s 时追加人话警告（纯展示，不改字段语义）。"""
+    remaining = result.get("leaseSecondsRemaining")
+    if (result.get("state") == "recording"
+            and isinstance(remaining, (int, float)) and remaining < 60):
+        return {"warnings": [
+            f"录制租约仅剩 {remaining:.0f}s：跑一次 record status（默认心跳续租），"
+            "否则到点会静默停止、之后的操作不会被录制。"], **result}
+    return result
 
 
 def _print_result(result: object) -> int:
@@ -484,7 +685,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--no-scp-fallback", action="store_true")
 
     record = sub.add_parser("record", help="Compile or manage a scoped desktop recording")
-    record.add_argument("action", choices=["compile", "start", "status", "pause", "resume", "assert", "stop"])
+    record.add_argument("action", choices=["compile", "start", "status", "pause", "resume", "assert", "stop", "ui"])
     record.add_argument("recording", nargs="?", help="recording.json for the compile action")
     record.add_argument("--output-root", help="Recording artifact root (compile and stop)")
     record.add_argument("--name", help="Capture name (start only)")
@@ -494,6 +695,7 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--profile", help="Bind generated golden trace to this app profile (compile and stop)")
     record.add_argument("--timeout", type=float, help="Per-call MCP timeout in seconds")
     record.add_argument("--no-heartbeat", action="store_true", help="Read status without renewing the recording lease")
+    record.add_argument("--ui-interval", type=float, default=2.0, help="Recorder UI bridge poll interval seconds (ui only)")
 
     replay = sub.add_parser("replay", help="Replay a ready golden trace through the atomic executor")
     replay.add_argument("golden_trace")
@@ -502,6 +704,14 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--max-depth", type=int, default=12, help="Fresh control-tree observation depth")
     replay.add_argument("--trace-root", default="result-report/replay-traces", help="Agent-local append-only replay trace root")
     replay.add_argument("--replay-mode", choices=["semantic_only", "semantic_first", "visual_only"], default="semantic_only")
+    replay.add_argument(
+        "--entry-recovery",
+        action="store_true",
+        help="Enable controlled entry-window recovery (R0 phase 1): on a structured "
+             "connect_target_not_found, re-confirm read-only whether the entry window "
+             "exists and report entry_window_absent instead of a generic refusal. "
+             "Never launches a process, service or click. Default off.",
+    )
     replay.add_argument(
         "--timeout", type=float, default=60.0,
         help="Per-call MCP timeout for replay observation and dispatch",
@@ -542,6 +752,12 @@ def _cmd_record(
     profile: str | None = None,
 ) -> int:
     """Manage target-local recording and persist stopped captures locally."""
+    if args.action == "ui":
+        from agent.recording.ui_bridge import run_recording_ui_bridge
+        return run_recording_ui_bridge(
+            agent, output_root=args.output_root, profile=profile,
+            interval=max(0.5, args.ui_interval), timeout=args.timeout,
+        )
     if args.action == "start":
         missing = [
             option
@@ -625,71 +841,38 @@ def _cmd_record(
     tool = tool_by_action[args.action]
     arguments = {"heartbeat": not args.no_heartbeat} if args.action == "status" else {}
     result = agent.call_tool(tool, arguments, timeout=args.timeout)
+    if args.action == "status" and result.get("ok"):
+        result = with_lease_warning(result)
     if args.action != "stop" or not result.get("ok"):
         return _print_result(result)
 
     try:
-        recording = RawRecording.from_dict(result["recording"])
-        compilation = compile_recording(recording, profile=profile)
-        captures: dict[str, bytes] = {}
-        seen_capture_ids: set[str] = set()
-        capture_issues: list[dict] = []
-        for event in recording.events:
-            for evidence_key in ("beforeCapture", "capture"):
-                metadata = event.evidence.get(evidence_key)
-                capture_id = metadata.get("id") if isinstance(metadata, dict) else None
-                if not isinstance(capture_id, str) or capture_id in seen_capture_ids:
-                    continue
-                seen_capture_ids.add(capture_id)
-                fetched = agent.call_tool(
-                    "get_recording_capture", {"capture_id": capture_id}, timeout=args.timeout,
-                )
-                encoded = fetched.get("image_b64") if isinstance(fetched, dict) else None
-                try:
-                    payload = base64.b64decode(encoded, validate=True) if isinstance(encoded, str) else None
-                except (binascii.Error, ValueError):
-                    payload = None
-                digest = (
-                    "sha256:" + hashlib.sha256(payload).hexdigest()
-                    if payload is not None else None
-                )
-                if (
-                    not isinstance(fetched, dict)
-                    or not fetched.get("ok")
-                    or payload is None
-                    or digest != metadata.get("sha256")
-                    or digest != fetched.get("sha256")
-                ):
-                    capture_issues.append({
-                        "code": "recording_capture_fetch_failed",
-                        "sequence": event.sequence,
-                        "evidence": evidence_key,
-                        "captureId": capture_id,
-                    })
-                    continue
-                captures[capture_id] = payload
-        output_root = Path(args.output_root).expanduser() if args.output_root else Path("recordings")
-        artifacts = write_compilation_artifacts(
-            output_root,
-            recording,
-            compilation,
-            captures=captures,
-            artifact_issues=capture_issues,
+        # 收集链路与 UI 桥（§6y）同一断连恢复语义：瞬态抖动重试，
+        # 预算耗尽才按持久化失败报告。
+        retrying = RetryingCollectionAgent(agent, interval=1.0, retries=3)
+        artifacts, capture_issues = collect_recording_artifacts(
+            retrying, result, args.output_root, profile, timeout=args.timeout,
         )
-    except (KeyError, OSError, ValueError) as exc:
+    except (KeyError, OSError, ValueError, CollectionRetryError) as exc:
         return _print_result({
             "ok": False,
             "code": "recording_persistence_failed",
             "error": str(exc),
             "target_result": result,
         })
-    return _print_result({
+    compiled_issues = [issue.to_dict() for issue in artifacts.compilation.issues]
+    advisories = recording_stop_advisories(
+        result, compiled_issues, artifacts.compilation.golden.status)
+    payload = {
         **result,
         "status": artifacts.compilation.golden.status,
         "directory": str(artifacts.directory),
-        "issues": [issue.to_dict() for issue in artifacts.compilation.issues],
+        "issues": compiled_issues,
         "captureIssues": capture_issues,
-    })
+    }
+    if advisories:
+        payload = {"warnings": advisories, **payload}
+    return _print_result(payload)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1032,6 +1215,7 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
                 persist_screenshots=args.persist_screenshots,
                 confirm_actions=args.confirm_action,
+                entry_recovery=args.entry_recovery,
             )
         except RecordingModelError as exc:
             return _print_result({

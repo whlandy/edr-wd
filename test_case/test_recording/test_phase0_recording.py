@@ -983,3 +983,95 @@ def test_a_different_window_closing_is_kept():
     assert [(v["expected"].get("title"), v["expected"]["exists"]) for v in verifiers] == [
         ("日志中心", True), ("旧窗口", False),
     ]
+
+
+def test_consecutive_actions_in_same_titled_windows_collapse_to_one_selector():
+    """Two clicks in two windows that share a title and expose no root must
+    not compile ready: replay focuses ONE window, so the whole flow would run
+    inside whichever same-titled window it locked — the other window's steps
+    would be misoperated. Handles prove the clicks hit distinct windows; a
+    collapsed replay identity means replay cannot tell them apart.
+    """
+    first = _event(1, causal_id="cause-1", ms=100)
+    second = _event(2, causal_id="cause-2", ms=200)
+    first["evidence"] = {"window": {
+        "title": "logo1", "processName": "EDRClient.exe", "handle": 101,
+    }}
+    second["evidence"] = {"window": {
+        "title": "logo1", "processName": "EDRClient.exe", "handle": 202,
+    }}
+    result = compile_recording(_recording(first, second))
+
+    assert result.golden.status == "incomplete"
+    flagged = [i.code for i in result.issues]
+    assert "compile_window_identity_ambiguous" in flagged
+    assert "compile_window_identity_ambiguous" in result.case.steps[0].issues
+    assert "compile_window_identity_ambiguous" in result.case.steps[1].issues
+
+
+def test_consecutive_actions_with_distinct_replay_window_identity_stay_ready():
+    """Two windows that differ in the identity replay matches (root or title)
+    are told apart at replay; handles alone being distinct is not enough to
+    complain, because the same window can be replaced between steps."""
+    first = _event(1, causal_id="cause-1", ms=100)
+    second = _event(2, causal_id="cause-2", ms=200)
+    first["evidence"] = {"window": {
+        "title": "logo1", "processName": "EDRClient.exe", "handle": 101,
+        "rootAutomationId": "MainRoot",
+    }}
+    second["evidence"] = {"window": {
+        "title": "logo1", "processName": "EDRClient.exe", "handle": 202,
+        "rootAutomationId": "LogRoot",
+    }}
+    result = compile_recording(_recording(first, second))
+
+    assert result.golden.status == "ready"
+    assert not result.issues
+
+
+def test_consecutive_actions_replaced_same_window_keep_ready():
+    """A handle change with a collapsed replay identity is refused even when
+    the lucky interpretation (the window was closed and reopened) exists:
+    the recording cannot prove the two clicks hit different coexisting
+    same-titled windows rather than one replaced one, and the unlucky
+    interpretation misoperates a sibling window at replay. The operator's
+    remedy is the issue message: capture a stable window root identity.
+    """
+    first = _event(1, causal_id="cause-1", ms=100)
+    second = _event(2, causal_id="cause-2", ms=200)
+    window = {"title": "日志中心", "processName": "EDRClient.exe"}
+    first["evidence"] = {"window": {**window, "handle": 101}}
+    second["evidence"] = {"window": {**window, "handle": 202}}
+    result = compile_recording(_recording(first, second))
+
+    assert result.golden.status == "incomplete"
+    assert "compile_window_identity_ambiguous" in result.issues[0].code
+
+
+def test_action_drift_into_same_titled_window_flags_the_earlier_step_too():
+    """The flow moves logo1 -> same-titled logo1: the FIRST step's selector
+    also collapsed onto the shared identity, so both steps must carry the
+    issue even though the drift was only detected at the second."""
+    first = _event(1, causal_id="cause-1", ms=100)
+    second = _event(2, causal_id="cause-2", ms=200)
+    third = _event(3, causal_id="cause-3", ms=300, target={
+        "snapshotId": "OBS-3", "targetId": "T0003",
+        "fingerprint": "sha256:other", "controlType": "Button",
+        "automationId": "btnOther", "text": "其他", "protected": False,
+    })
+    first["evidence"] = {"window": {
+        "title": "EDRClient", "processName": "EDRClient.exe", "handle": 1,
+        "rootAutomationId": "MainRoot",
+    }}
+    second["evidence"] = {"window": {
+        "title": "logo1", "processName": "EDRClient.exe", "handle": 202,
+    }}
+    third["evidence"] = {"window": {
+        "title": "logo1", "processName": "EDRClient.exe", "handle": 303,
+    }}
+    result = compile_recording(_recording(first, second, third))
+
+    assert result.golden.status == "incomplete"
+    assert "compile_window_identity_ambiguous" in result.case.steps[1].issues
+    assert "compile_window_identity_ambiguous" in result.case.steps[2].issues
+    assert "compile_window_identity_ambiguous" not in result.case.steps[0].issues

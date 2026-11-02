@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import base64
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -46,6 +47,7 @@ class MCPObservationProvider:
         use_bundle: bool = False,
         run_token: str | None = None,
         include_ocr: bool = False,
+        entry_role: str | None = None,
     ) -> None:
         self._agent = agent
         self._max_depth = max_depth
@@ -61,6 +63,11 @@ class MCPObservationProvider:
         self._use_bundle = use_bundle
         self._run_token = run_token
         self._include_ocr = include_ocr
+        # Product-run entry role resolved from the replay profile (see
+        # build_replay_runtime). Used only as the strict product-domain
+        # fallback when the session.* focus actions are not part of the
+        # profile's allowed action set.
+        self._entry_role = entry_role
 
     def focus_window(
         self, process_name: str, title_regex: str, root_automation_id: str = "",
@@ -100,7 +107,31 @@ class MCPObservationProvider:
                 if isinstance(receipt, Mapping):
                     return receipt.get("result") if receipt.get("ok") else receipt
                 return receipt
+
+            def refusal_code(receipt: Any) -> str | None:
+                if not isinstance(receipt, Mapping):
+                    return None
+                return (receipt.get("code") or receipt.get("error")
+                        or "session_focus_failed")
+
             connected = call_session("session.connect", connect_args)
+            if isinstance(connected, Mapping) and not connected.get("ok"):
+                # Profiles whose allowed action set excludes session.* (for
+                # example the minimal recording-QA fixture capability) refuse
+                # the session-based focus by product policy. Fall back to the
+                # profile's entry role — the target's own product-window focus
+                # that resolves and strictly locks the capability-owned window
+                # and establishes the run's session binding. Legacy
+                # connect/lock_window tools are NOT used under a product run.
+                code = refusal_code(connected)
+                if code == "product_action_forbidden" and self._entry_role:
+                    return self._focus_entry_role(
+                        process_name, title_regex, root_automation_id)
+                raise BackendUnavailable(
+                    connected.get("error") or code
+                    or f"cannot connect the window {title_regex!r}",
+                    code=code,
+                )
         else:
             connected = self._agent.call_tool("connect", connect_args, timeout=self._timeout)
         if not isinstance(connected, Mapping) or not connected.get("ok"):
@@ -110,6 +141,16 @@ class MCPObservationProvider:
             )
         if self._run_token is not None:
             locked = call_session("session.window_lock.set", lock_args)
+            if isinstance(locked, Mapping) and not locked.get("ok"):
+                code = refusal_code(locked)
+                if code == "product_action_forbidden" and self._entry_role:
+                    return self._focus_entry_role(
+                        process_name, title_regex, root_automation_id)
+                raise BackendUnavailable(
+                    locked.get("error") or code
+                    or f"cannot lock the window {title_regex!r}",
+                    code=code,
+                )
         else:
             locked = self._agent.call_tool("lock_window", lock_args, timeout=self._timeout)
         if not isinstance(locked, Mapping) or not locked.get("ok"):
@@ -125,15 +166,49 @@ class MCPObservationProvider:
             )
         return snapshot_id
 
+    def _focus_entry_role(
+        self, process_name: str, title_regex: str, root_automation_id: str,
+    ) -> str:
+        """Focus via the profile's entry role and verify the window identity.
+
+        The role focus is the target's product-domain mechanism: it resolves
+        the unique capability-owned window (process names + title pattern from
+        the locally reviewed profile), locks it strictly and binds the run's
+        window session. The focused window must still match the recorded
+        scope; a mismatch refuses the replay instead of dispatching into the
+        wrong window.
+        """
+        snapshot_id = self.focus_role(self._entry_role)
+        snapshot = self._snapshots.get(snapshot_id) or {}
+        identity = snapshot.get("window_identity") or {}
+        observed_process = str(identity.get("process_name") or "")
+        observed_title = str(identity.get("title") or "")
+        title_matched = bool(title_regex) and bool(
+            re.search(title_regex, observed_title))
+        if observed_process != process_name or not title_matched:
+            raise BackendUnavailable(
+                f"focused window {observed_process!r} {observed_title!r} does "
+                f"not match the recorded window {process_name!r} "
+                f"{title_regex!r}",
+                code="window_identity_mismatch",
+            )
+        if root_automation_id and not self._observes_window(snapshot_id, root_automation_id):
+            raise BackendUnavailable(
+                f"focused a window that is not {root_automation_id!r}; the title "
+                "matched a different window of the same application",
+                code="window_identity_mismatch",
+            )
+        return snapshot_id
+
     def focus_role(self, role: str) -> str:
         if self._run_token is None:
-            raise BackendUnavailable("product_run_expired")
+            raise BackendUnavailable("product_run_expired", code="product_run_expired")
         result = self._agent.call_tool("focus_window_role", {
             "role": role, "run_token": self._run_token,
         }, timeout=self._timeout)
         if not isinstance(result, Mapping) or not result.get("ok"):
-            raise BackendUnavailable((result.get("code") if isinstance(result, Mapping) else None)
-                                     or "window_role_not_found")
+            code = (result.get("code") if isinstance(result, Mapping) else None)
+            raise BackendUnavailable(code or "window_role_not_found", code=code)
         return self.refresh_bundle()
 
     def _observes_window(self, snapshot_id: str, root_automation_id: str) -> bool:
@@ -264,6 +339,20 @@ class MCPObservationProvider:
                 )
             ):
                 raise BackendUnavailable("screenshot origin is invalid")
+            # Same ±32px gate as the bundle path: UIA may exclude the
+            # invisible Win32 frame the capture includes, but an origin
+            # further away means the frame was not captured from the
+            # observed window (stale after a move, or a different window
+            # entirely). Such a frame must never persist as evidence.
+            if window_rect is None:
+                raise BackendUnavailable(
+                    "screenshot origin cannot be verified without a window rectangle"
+                )
+            if (
+                abs(int(origin[0]) - window_rect[0]) > 32
+                or abs(int(origin[1]) - window_rect[1]) > 32
+            ):
+                raise BackendUnavailable("screenshot origin does not match locked window")
             snapshot["screenshot_origin"] = [int(origin[0]), int(origin[1])]
             snapshot["screenshot_scope"] = "window"
             snapshot["screenshot_redacted"] = True
@@ -437,6 +526,78 @@ class MCPObservationProvider:
 
     def get_snapshot(self, snapshot_id: str) -> dict | None:
         return self._snapshots.get(snapshot_id)
+
+    # -- Region assertion row sampling (batch 2, 06 §5) ----------------------
+    # 与 snapshot 类方法同一条 MCP 会话、同一个 run_token：行/组件查询由
+    # target 端在既有窗口锁内完成（observe_container_rows /
+    # observe_component_values），provider 不做任何本地树遍历。
+
+    @staticmethod
+    def _region_payload(result: Any, kind: str) -> dict:
+        """把 tool 返回归一成 evaluate_region_conditions 直接可吃的形状。"""
+        if not isinstance(result, Mapping):
+            return {"ok": False, "error": kind + "_payload_invalid"}
+        if result.get("ok") is not True:
+            code = result.get("code") or result.get("error")
+            return {"ok": False,
+                    "error": str(code or kind + "_failed")}
+        return dict(result)
+
+    def query_container_rows(self, match: Any = None, fields: Any = None) -> dict:
+        """容器行采样：verifier 的 match（snake_case）翻译成目标端稳定身份。
+
+        返回 {"ok": True, "rows": [...]} 或 {"ok": False, "error": <稳定码>}；
+        后者是评估器语义里的「不可读容器」（undetermined，不是 false）。
+        """
+        source = match if isinstance(match, Mapping) else {}
+        payload: dict[str, Any] = {
+            "container": {
+                "controlType": source.get("control_type"),
+                "automationId": source.get("automation_id"),
+                "identifier": source.get("identifier"),
+                "name": source.get("text"),
+            },
+        }
+        if fields:
+            payload["fields"] = [str(field) for field in fields]
+        if self._run_token is not None:
+            payload["run_token"] = self._run_token
+        result = self._agent.call_tool(
+            "observe_container_rows", payload, timeout=self._timeout)
+        payload_result = self._region_payload(result, "container_rows")
+        if payload_result.get("ok"):
+            rows = payload_result.get("rows")
+            if not isinstance(rows, list) or any(
+                    not isinstance(row, Mapping) for row in rows):
+                return {"ok": False, "error": "container_rows_payload_invalid"}
+        return payload_result
+
+    def read_component_values(self, components: Any = None) -> dict:
+        """固定多组件取值采样：draft 组件（field+identity）逐个只读。"""
+        specs = []
+        for component in components or ():
+            if not isinstance(component, Mapping):
+                continue
+            spec: dict[str, Any] = {"field": component.get("field")}
+            # P2f：稳定键随采样请求下发（身份锚定回传）。
+            if component.get("key"):
+                spec["key"] = component["key"]
+            identity = component.get("identity")
+            if isinstance(identity, Mapping):
+                spec["identity"] = dict(identity)
+            specs.append(spec)
+        payload: dict[str, Any] = {"components": specs}
+        if self._run_token is not None:
+            payload["run_token"] = self._run_token
+        result = self._agent.call_tool(
+            "observe_component_values", payload, timeout=self._timeout)
+        payload_result = self._region_payload(result, "component_values")
+        if payload_result.get("ok"):
+            values = payload_result.get("values")
+            if not isinstance(values, list) or any(
+                    not isinstance(item, Mapping) for item in values):
+                return {"ok": False, "error": "component_values_payload_invalid"}
+        return payload_result
 
 
 class MCPActionDispatch:

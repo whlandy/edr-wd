@@ -14,7 +14,9 @@ from agent.execution.expectations import (
 from agent.execution.models import StepStatus
 from agent.recording.compiler import compile_recording
 from agent.recording.replay import _verifier_expectation
-from target.recording.models import CaptureScope, RawCaptureEvent, RecordingModelError
+from target.recording.models import (
+    CaptureScope, ObservedTarget, RawCaptureEvent, RecordingModelError,
+)
 from target.recording.session import RecordingSession
 from target.time_assertions import matching_times, parse_time_range
 
@@ -141,21 +143,34 @@ def test_window_range_needs_no_control_identity_and_searches_tree():
     {"assertion": "text_time_range", "expected": "10:10", "automationId": "logTime"},
 ])
 def test_hotkey_authored_assertion_replays_in_its_actual_product_window(assertion):
+    """断言落在它真实的产物窗口：窗口身份来自统一入口盖章的 assertion window。
+
+    旧 Shift+Ctrl+A 内嵌入口已按 06 §1 移除（Ctrl+Alt+Q 是唯一断言入口）；
+    会话侧等价路径是 request_assertion_editor() 从最近作用域事件盖章，
+    断言本身仍走管理保存路径。
+    """
     session = _session()
-    hotkey = RawCaptureEvent(
+    activity = RawCaptureEvent(
         sequence=1, wall_time="2026-10-19T00:00:00Z", monotonic_ms=1,
-        type="key_command", scope=session.scope,
-        input={"key": "A", "modifiers": ["CTRL", "SHIFT"]},
+        type="pointer_click", scope=session.scope,
+        input={"button": "left", "screenPoint": [20, 20]},
+        observed_target=ObservedTarget(
+            snapshot_id="OBS-1", target_id="T0001", fingerprint="sha256:t",
+            control_type="Button", automation_id="btnApply", text="应用",
+            protected=False,
+        ),
         evidence={"window": {"title": "日志中心", "processName": "EDRClient.exe",
                              "handle": 101, "rootAutomationId": "LogCenterRoot"}},
+        causal_id="CAUSE-1",
     )
-    assert session.ingest(hotkey) is False
+    assert session.ingest(activity) is True
+    session.request_assertion_editor()
     session.add_assertion(assertion)
 
     golden = compile_recording(session.recording()).golden
 
     assert golden.status == "ready"
-    assert golden.steps[0].selector.window == {
+    assert golden.steps[-1].selector.window == {
         "processName": "EDRClient.exe", "rootAutomationId": "LogCenterRoot",
     }
 

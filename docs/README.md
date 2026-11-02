@@ -14,6 +14,7 @@ one reference for the task at hand.
 | Select and click controls | [`../references/element-click.md`](../references/element-click.md) |
 | Debug HiSec activation | [`../references/activate-edr.md`](../references/activate-edr.md) |
 | Run tests and inspect reports | [`../references/testing.md`](../references/testing.md) |
+| Record flows and replay golden traces | [`../references/recording.md`](../references/recording.md) |
 | Add a fixed verification flow | [`../sops/INDEX.md`](../sops/INDEX.md) |
 
 Configuration assets:

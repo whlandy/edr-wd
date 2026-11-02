@@ -1241,6 +1241,18 @@ def macos_source_factory(
             correlator=MacOSAXCorrelator(resolver),
         )
         source.scope_gate = gate
+        # R6②：macOS source 接入组件清单的现场 walk（复用生产 dump_tree 的
+        # AX 树形状，不建第二套控件协议）。Windows source 用事件驱动的
+        # ControlInventory 线程快照；macOS 无逐窗口驱动可挂 request，
+        # 最小接线为按需现场 walk（session.control_inventory 消费）。
+        def control_tree(window_title_re: str | None = None, max_depth: int = 10):
+            result = backend.dump_tree(
+                window_title_re=window_title_re or scope.window_title,
+                max_depth=max_depth,
+            )
+            return result if isinstance(result, Mapping) else None
+
+        source.control_tree = control_tree
         return source
 
     return create

@@ -190,6 +190,34 @@ def _validate_evidence(value: Mapping[str, Any]) -> None:
 
 
 def _validate_assertion(value: Mapping[str, Any]) -> None:
+    # region_query is a structured draft assertion: it carries no scalar
+    # ``expected``; the whole v2 draft rides in ``draft`` and is validated by
+    # the shared region validator (lazy import keeps this module importable
+    # standalone, like the time-range parsers above).
+    if isinstance(value, Mapping) and value.get("type") == "region_query":
+        data = _strict(value, {"type", "draft", "timeoutSeconds"}, "event.assertion")
+        draft = data.get("draft")
+        if not isinstance(draft, Mapping):
+            raise RecordingModelError(
+                "recording_assertion_invalid", "region_query requires a draft object",
+                path="event.assertion.draft",
+            )
+        try:
+            from .region_assertion import validate_region_draft
+        except ImportError:  # target-local deployment
+            from region_assertion import validate_region_draft  # type: ignore[no-redef]
+        # 落盘 draft 已去掉窗口身份（只在 evidence.window），线格式复检不再要求它。
+        validate_region_draft(draft, require_window=False)
+        timeout = data.get("timeoutSeconds", 60.0)
+        if (
+            not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+            or not 0 < float(timeout) <= 300
+        ):
+            raise RecordingModelError(
+                "recording_assertion_invalid", "timeoutSeconds must be in (0, 300]",
+                path="event.assertion.timeoutSeconds",
+            )
+        return
     data = _strict(value, {"type", "expected", "timeoutSeconds", "durationSeconds"}, "event.assertion")
     kind = data.get("type")
     if kind not in {
@@ -311,6 +339,11 @@ class ObservedTarget:
     # （辅助功能名/标签）区分。给 record assert 编辑器预填 expected 用；
     # 读不到就是 None，绝不因此炸录制。不参与 golden schema。
     value: str | None = None
+    # 同父下与本控件共享 (control_type, text) 的兄弟数量（含自身）。
+    # 弱身份（无 automationId/identifier）控件靠 name+ancestry 定位时，
+    # 只有该值能区分「唯一链」与「多行同名歧义」；None=未知（不强判）。
+    # 仅在录制端真正可读时填充，不参与 golden schema。
+    same_name_siblings: int | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("snapshot_id", "target_id", "fingerprint"):
@@ -329,6 +362,16 @@ class ObservedTarget:
                     "type_error", f"observedTarget.{field_name} must be string or null",
                     path=f"observedTarget.{field_name}",
                 )
+        if self.same_name_siblings is not None and (
+            not isinstance(self.same_name_siblings, int)
+            or isinstance(self.same_name_siblings, bool)
+            or self.same_name_siblings < 1
+        ):
+            raise RecordingModelError(
+                "type_error",
+                "observedTarget.sameNameSiblings must be a positive integer or null",
+                path="observedTarget.sameNameSiblings",
+            )
         if self.rect is not None and (
             not isinstance(self.rect, (list, tuple)) or len(self.rect) != 4
             or not all(isinstance(item, int) and not isinstance(item, bool) for item in self.rect)
@@ -357,6 +400,7 @@ class ObservedTarget:
         allowed = {
             "snapshotId", "targetId", "fingerprint", "controlType",
             "automationId", "identifier", "text", "rect", "ancestry", "protected",
+            "sameNameSiblings",
         }
         d = _strict(data, allowed, "observedTarget")
         rect = d.get("rect")
@@ -371,6 +415,14 @@ class ObservedTarget:
         protected = d.get("protected")
         if protected is not None and not isinstance(protected, bool):
             raise RecordingModelError("type_error", "protected must be boolean", path="observedTarget.protected")
+        same = d.get("sameNameSiblings")
+        if same is not None and (
+            not isinstance(same, int) or isinstance(same, bool) or same < 1
+        ):
+            raise RecordingModelError(
+                "type_error", "sameNameSiblings must be a positive integer or null",
+                path="observedTarget.sameNameSiblings",
+            )
         return cls(
             snapshot_id=_text(d.get("snapshotId"), "observedTarget.snapshotId"),
             target_id=_text(d.get("targetId"), "observedTarget.targetId"),
@@ -379,6 +431,7 @@ class ObservedTarget:
             identifier=d.get("identifier"), text=d.get("text"),
             rect=tuple(rect) if rect is not None else None,
             ancestry=tuple(dict(x) for x in ancestry), protected=protected,
+            same_name_siblings=same,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -388,6 +441,7 @@ class ObservedTarget:
             "automationId": self.automation_id, "identifier": self.identifier,
             "text": self.text, "rect": list(self.rect) if self.rect else None,
             "ancestry": [dict(x) for x in self.ancestry], "protected": self.protected,
+            "sameNameSiblings": self.same_name_siblings,
         }
 
 
@@ -559,12 +613,25 @@ class RawRecording:
                 snapshot,
                 {
                     "snapshotId", "capturedAtMs", "reason", "durationMs",
-                    "window", "contentHash", "controlCount", "controls",
+                    "window", "contentHash", "stateHash", "truncated",
+                    "complete", "controlCount", "controls",
                 },
                 path,
             )
             _text(fields.get("snapshotId"), f"{path}.snapshotId")
             _text(fields.get("contentHash"), f"{path}.contentHash")
+            if "stateHash" in fields:
+                _text(fields["stateHash"], f"{path}.stateHash")
+            for bool_key in ("truncated", "complete"):
+                # When the field is present it must be a real boolean. A null
+                # (or any non-bool like "false"/0) is rejected here, matching
+                # the JSON Schema's strict `"type": "boolean"` — the schema
+                # must not pass what the model accepts, nor vice versa.
+                if bool_key in fields and not isinstance(fields[bool_key], bool):
+                    raise RecordingModelError(
+                        "type_error", f"{path}.{bool_key} must be a boolean",
+                        path=f"{path}.{bool_key}",
+                    )
             if not isinstance(fields.get("controls"), (list, tuple)):
                 raise RecordingModelError(
                     "type_error", f"{path}.controls must be an array",

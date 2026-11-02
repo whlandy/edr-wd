@@ -187,6 +187,9 @@ class AutomationBackend(Protocol):
         text: str,
         control_id: Optional[int] = None,
         class_name: Optional[str] = None,
+        string: Optional[str] = None,
+        automation_id: Optional[str] = None,
+        control_type: Optional[str] = None,
     ) -> dict: ...
     def select(
         self,
@@ -202,6 +205,32 @@ class AutomationBackend(Protocol):
         text: Optional[str] = None,
         class_name: Optional[str] = None,
     ) -> dict: ...
+
+    # ── Region / container-row observation (region_query assertions) ────────
+    #
+    # Read-only sampling for region/multi-component assertions (06 design §5).
+    # Backends that cannot answer return the structured "unavailable" shape;
+    # callers treat that as undetermined evidence, never as False.
+
+    def query_container_rows(
+        self,
+        container: Optional[dict] = None,
+        fields: Optional[list] = None,
+    ) -> dict:
+        """Read the current rows of one container (stable identity in ``container``).
+
+        Expected shape: ``{"ok": True, "rows": [{"rowIndex", <field>: value, ...}]}``
+        or ``{"ok": False, "error": str}``. One call returns one same-frame
+        snapshot; the caller re-samples per observation tick.
+        """
+        return {"ok": False, "error": "query_container_rows not supported on this backend"}
+
+    def read_component_values(
+        self,
+        components: Optional[list] = None,
+    ) -> dict:
+        """Read the current value of each fixed component ({"field", "identity"})."""
+        return {"ok": False, "error": "read_component_values not supported on this backend"}
 
 
 def lock_criteria_mismatch(
@@ -247,3 +276,56 @@ def lock_criteria_mismatch(
         except (TypeError, ValueError):
             mismatch.append("pid")
     return mismatch
+
+
+def release_window_lock_if_window_changed(backend) -> Optional[dict]:
+    """Drop a session's window lock the connected window no longer matches.
+
+    Some entry points rebind the session's connected window without going
+    through ``connect()`` — ``activate_edr`` rebinds inside the GUI layer on
+    both backends (the agent fallback / client hand-off / macOS connected
+    state rewrite), and the Windows legacy ``connect_by_title`` /
+    ``connect_by_process`` / ``connect_by_pid`` aliases rebind directly.  A
+    window lock left over from before such a rebind describes the OLD
+    window: ``get_window_lock`` then reports ``locked=True`` to the new
+    session with the old identity, and a later verify can resurrect a lock
+    this session never confirmed.
+
+    Semantics follow ``lock_criteria_mismatch``: only observable fields are
+    compared — pid, handle, title.  A state that cannot be observed
+    (``ok=False``) cannot contradict the lock and keeps it; a match keeps
+    the lock so an already-open path does not break a live ownership chain.
+    Dropping the lock only REMOVES authorization (pointer injection is then
+    refused at ``_ensure_window_lock``); it never widens it.
+
+    Returns the released lock's identity for audit, or None when the lock
+    stayed (no lock, still matching, or unobservable state).
+    """
+    lock = getattr(backend, "_window_lock", None)
+    if not isinstance(lock, dict):
+        return None
+    try:
+        state = backend._connected_window_state()
+    except Exception:
+        return None
+    if not state.get("ok"):
+        return None
+    mismatch: list[str] = []
+    if lock.get("pid") is not None and state.get("pid") is not None:
+        if int(state["pid"]) != int(lock["pid"]):
+            mismatch.append("pid")
+    if lock.get("handle") is not None and state.get("handle") is not None:
+        if int(state["handle"]) != int(lock["handle"]):
+            mismatch.append("handle")
+    if lock.get("title_re") and state.get("title") is not None:
+        import re as _re
+        try:
+            if not _re.search(str(lock["title_re"]), str(state["title"]),
+                              _re.IGNORECASE):
+                mismatch.append("title_re")
+        except _re.error:
+            mismatch.append("title_re")
+    if not mismatch:
+        return None
+    backend._window_lock = None
+    return {key: lock.get(key) for key in ("handle", "pid", "title_re", "process_name")}

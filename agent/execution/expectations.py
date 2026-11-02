@@ -42,8 +42,10 @@ Evaluator contract:
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
+from datetime import datetime, timezone
 from pathlib import Path
 import re
+import time as _time
 from typing import Any, Callable, Mapping
 
 from target.action_dispatcher import ActionReceipt
@@ -724,6 +726,445 @@ def evaluate_visual_evidence_captured(
 
 
 # ---------------------------------------------------------------------------
+# region_query — container-row / multi-component assertion (06 design §4–§5)
+# ---------------------------------------------------------------------------
+#
+# The evaluator owns the observation window: its monotonic deadline starts
+# when it is called (i.e. after the bound action completed — wizard/preview
+# time never counts), samples the container every REGION_SAMPLE_INTERVAL
+# seconds through the wired row provider, and stops at the first sample whose
+# rows satisfy the whole condition tree (first_match).  ``absent_full_period``
+# is the opposite completion rule: it may only pass at the deadline, and only
+# when every sample was readable and none matched.
+#
+# Content time is recomputed per sample against an aware wall clock: the
+# accepted window is always [C−recentSeconds, C] with C = this sample's now;
+# future timestamps are rejected and unparseable / timezone-unknown values are
+# undetermined — never False.
+#
+# Provider wiring: the executor exposes whatever its observation provider can
+# serve through `_RegionRowProviderView` (set per step, like the evidence
+# view).  Without a provider the evaluator falls back to ONE sample read from
+# the current observation snapshot: first_match still converges via the
+# executor's own post-action polling, while absent_full_period honestly
+# reports `region_query_undetermined` because a single snapshot can never
+# prove "never matched during the whole period".
+
+
+REGION_SAMPLE_INTERVAL = 0.5
+
+
+class _RegionRowProviderView:
+    """Per-step view of the container-row provider.
+
+    The executor sets it right before the ASSERTING phase from its
+    observation provider (duck-typed: `query_container_rows(match, fields)`
+    and optionally `read_component_values(components)`); tests wire stubs the
+    same way. Purely in-process wiring — no payload extension.
+    """
+
+    _state: ContextVar[Any] = ContextVar("region_row_provider", default=None)
+
+    @classmethod
+    def set(cls, provider: Any) -> Token:
+        return cls._state.set(provider)
+
+    @classmethod
+    def reset(cls, token: Token) -> None:
+        cls._state.reset(token)
+
+    @classmethod
+    def current(cls) -> Any:
+        return cls._state.get()
+
+
+class _RegionClock:
+    """The timezone-aware clock a region query samples against.
+
+    Defaults to real UTC-now; tests substitute a fixed aware clock.  Content
+    time is parsed against this clock's timezone rules — a naive recorded
+    timestamp stays undetermined, it is never assumed local.
+    """
+
+    _now: ContextVar[Callable[[], "datetime"] | None] = ContextVar(
+        "region_query_clock", default=None,
+    )
+
+    @classmethod
+    def set(cls, now: Callable[[], "datetime"] | None) -> Token:
+        return cls._now.set(now)
+
+    @classmethod
+    def reset(cls, token: Token) -> None:
+        cls._now.reset(token)
+
+    @classmethod
+    def now(cls) -> "datetime":
+        from datetime import datetime as _dt
+
+        factory = cls._now.get()
+        if factory is not None:
+            return factory()
+        return _dt.now(tz=_dt.timezone.utc)
+
+
+def region_clock(factory: Callable[[], "datetime"] | None):
+    """Context-manager form of ``_RegionClock.set`` (tests substitute a clock)."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def scope():
+        token = _RegionClock.set(factory)
+        try:
+            yield factory
+        finally:
+            _RegionClock.reset(token)
+
+    return scope()
+
+
+def _region_leaf_fields(conditions: Any) -> list[str]:
+    """Fields the row provider must read for this condition tree."""
+    fields: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, Mapping):
+            return
+        if "children" in node:
+            for child in node.get("children") or ():
+                walk(child)
+            return
+        field = node.get("field")
+        if isinstance(field, str) and field != "rows":
+            fields.add(field)
+
+    walk(conditions)
+    return sorted(fields)
+
+
+def _control_matches_identity(control: Mapping[str, Any], identity: Mapping[str, Any]) -> bool:
+    def first_non_empty(source: Mapping[str, Any], *keys: str) -> Any:
+        for key in keys:
+            if source.get(key) not in (None, ""):
+                return source.get(key)
+        return None
+
+    expected_automation = identity.get("automation_id") or identity.get("automationId")
+    expected_identifier = identity.get("identifier")
+    expected_type = identity.get("control_type") or identity.get("controlType")
+    expected_text = identity.get("text") or identity.get("name")
+    if expected_automation:
+        return str(first_non_empty(control, "automation_id", "automationId")) == str(expected_automation)
+    if expected_identifier:
+        return str(first_non_empty(control, "identifier")) == str(expected_identifier)
+    if expected_type and expected_text:
+        return (
+            str(first_non_empty(control, "control_type", "controlType", "role")) == str(expected_type)
+            and str(first_non_empty(control, "text", "name", "title")) == str(expected_text)
+        )
+    return False
+
+
+def _ancestor_matches_identity(ancestor: Any, identity: Mapping[str, Any]) -> bool:
+    if not isinstance(ancestor, Mapping):
+        return False
+    flat: dict[str, Any] = {}
+    for key, value in ancestor.items():
+        flat[key] = value
+        flat[re.sub(r"(?<!^)(?=[A-Z])", "_", str(key)).lower()] = value
+    return _control_matches_identity(flat, identity)
+
+
+def _row_from_control(control: Mapping[str, Any], index: int) -> dict[str, Any]:
+    def text_of(*keys: str) -> Any:
+        for key in keys:
+            value = control.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    row: dict[str, Any] = {
+        "rowIndex": index,
+        "name": text_of("name", "text", "title"),
+        "text": text_of("text", "name", "title"),
+        "value": text_of("value"),
+        "checked": control.get("checked"),
+        "enabled": control.get("enabled"),
+        "time": text_of("time", "text", "value"),
+        "snapshotId": control.get("target_id") or control.get("targetId"),
+    }
+    return row
+
+
+def _rows_from_observation(
+    observation: Any, match: Mapping[str, Any], fields: list[str],
+) -> dict[str, Any]:
+    """Single-sample fallback: read container rows from the current snapshot.
+
+    Rows are the controls whose nearest recorded ancestor is the container
+    (the observation reports ancestry nearest-first).  This is an
+    approximation of one UIA walk — the authoritative sampling path is the
+    wired provider; this fallback exists so the executor's own post-action
+    polling keeps giving first_match fresh snapshots until that wiring lands.
+    """
+    controls: Any = None
+    if isinstance(observation, Mapping):
+        controls = observation.get("controls")
+    else:
+        controls = getattr(observation, "controls", None)
+    if not isinstance(controls, (list, tuple)):
+        return {"ok": False, "error": "observation_controls_unavailable"}
+    rows: list[dict[str, Any]] = []
+    for control in controls:
+        if not isinstance(control, Mapping):
+            continue
+        if _control_matches_identity(control, match):
+            continue  # the container itself is not one of its rows
+        ancestry = control.get("ancestry") or []
+        if not ancestry:
+            continue
+        nearest = ancestry[0]
+        if _ancestor_matches_identity(nearest, match):
+            rows.append(_row_from_control(control, len(rows)))
+    return {"ok": True, "rows": rows, "sampling": "single_observation_snapshot"}
+
+
+def _virtual_component_row(values: Any) -> dict[str, Any]:
+    """One logical row combining each fixed component's current value."""
+    row: dict[str, Any] = {"rowIndex": 0}
+    if isinstance(values, Mapping) and not isinstance(values.get("values"), (list, tuple)):
+        row.update({key: value for key, value in values.items() if key != "rowIndex"})
+        return row
+    items = values.get("values") if isinstance(values, Mapping) else values
+    component_values: dict[str, Any] = {}
+    for item in items or ():
+        if isinstance(item, Mapping) and item.get("field"):
+            row[str(item["field"])] = item.get("value")
+            # P2f：按稳定键入 componentValues（同 field 不同身份不覆盖）；
+            # 无 key 旧载荷=不产键通道（兼容）。
+            if item.get("key"):
+                component_values[str(item["key"])] = item.get("value")
+    if component_values:
+        row["componentValues"] = component_values
+    return row
+
+
+def _component_values_from_observation(
+    observation: Any, components: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    controls: Any = None
+    if isinstance(observation, Mapping):
+        controls = observation.get("controls")
+    else:
+        controls = getattr(observation, "controls", None)
+    if not isinstance(controls, (list, tuple)):
+        return {"ok": False, "error": "observation_controls_unavailable"}
+    values: list[dict[str, Any]] = []
+    for component in components:
+        identity = component.get("identity") or {}
+        hits = [c for c in controls if isinstance(c, Mapping)
+                and _control_matches_identity(c, identity)]
+        if len(hits) != 1:
+            entry = {"field": component.get("field"), "value": None,
+                     "reason": "component_not_uniquely_found"}
+            if component.get("key"):
+                entry["key"] = component["key"]
+            values.append(entry)
+            continue
+        entry: dict[str, Any] = {
+            "field": component.get("field"),
+            "value": _row_from_control(hits[0], 0).get(str(component.get("field"))),
+        }
+        # P2f：稳定键随采样值回传（身份锚定评估链路）。
+        if component.get("key"):
+            entry["key"] = component["key"]
+        values.append(entry)
+    return {"ok": True, "values": values, "sampling": "single_observation_snapshot"}
+
+
+def _compact_sample(outcome: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "result": outcome.get("result"),
+        "rowCount": outcome.get("rowCount"),
+        "matchCount": outcome.get("matchCount"),
+        "unreadable": outcome.get("unreadable"),
+    }
+
+
+def evaluate_region_query(
+    step: Any,
+    expectation: Any,
+    observation: Any,
+    action_receipt: ActionReceipt | None,
+) -> ExpectationResult:
+    """`region_query` evaluator: monotonic observation window + row conjunction."""
+    from target.recording.region_assertion import (
+        RegionDraftError, evaluate_region_conditions,
+    )
+
+    raw = expectation.value
+    if not isinstance(raw, dict):
+        return _failed("region_query", raw, None, _observation_id(observation), 0,
+                       diagnostic="value must be {match, target, quantifier, conditions, contentTime, observation}")
+    match = raw.get("match") or {}
+    conditions = raw.get("conditions") or {}
+    target = raw.get("target") or {}
+    mode = target.get("mode", "container_rows")
+    quantifier = raw.get("quantifier") or "any"
+    content_time = raw.get("contentTime") or {}
+    observation_spec = raw.get("observation") or {}
+    recent_seconds = float(content_time.get("recentSeconds", 5.0) or 5.0)
+    absent_mode = observation_spec.get("mode") == "absent_full_period"
+    deadline = float(expectation.timeout_seconds or 60.0)
+    components = list(target.get("components") or ())
+    fields = _region_leaf_fields(conditions)
+    provider = _RegionRowProviderView.current()
+
+    def result_of(status: StepStatus, actual: Any, diagnostic: str,
+                  duration_ms: int) -> ExpectationResult:
+        return ExpectationResult(
+            expectation_type="region_query", status=status,
+            expected={
+                "quantifier": quantifier, "mode": mode,
+                "observation": observation_spec.get("mode", "first_match"),
+            },
+            actual=actual,
+            observation_id=_observation_id(observation),
+            duration_ms=duration_ms,
+            diagnostic=diagnostic,
+        )
+
+    started = _time.monotonic()
+
+    def sample_once() -> tuple[dict[str, Any], str]:
+        """One sample's condition outcome + where its rows came from."""
+        if mode == "fixed_components":
+            if provider is not None and callable(getattr(provider, "read_component_values", None)):
+                payload = provider.read_component_values(components)
+                sampling = "provider"
+            else:
+                payload = _component_values_from_observation(observation, components)
+                sampling = "single_observation_snapshot"
+            # A fixed-component sample is one logical row.  The shared
+            # evaluator accepts a sequence of rows (or an error payload),
+            # not a bare row mapping.  Preserve an unreadable provider result
+            # instead of turning it into an apparently readable row.
+            if isinstance(payload, Mapping) and payload.get("ok") is False:
+                rows = payload
+            else:
+                rows = [_virtual_component_row(payload)]
+        elif provider is not None and callable(getattr(provider, "query_container_rows", None)):
+            rows = provider.query_container_rows(match, fields)
+            sampling = "provider"
+        else:
+            rows = _rows_from_observation(observation, match, fields)
+            sampling = "single_observation_snapshot"
+        now = _RegionClock.now()
+        outcome = evaluate_region_conditions(
+            conditions, rows, now, recent_seconds, quantifier=quantifier,
+        )
+        return outcome, sampling
+
+    # No wired provider: one sample per call.  The executor's own post-action
+    # polling re-runs this evaluator against refreshed snapshots until the
+    # declared deadline, which is what gives first_match its convergence
+    # without a second timer.  absence can never be proven from one snapshot.
+    if provider is None or not (
+        callable(getattr(provider, "query_container_rows", None))
+        or callable(getattr(provider, "read_component_values", None))
+    ):
+        try:
+            outcome, sampling = sample_once()
+        except RegionDraftError as exc:
+            return result_of(StepStatus.FAILED, None,
+                             f"region_query_invalid: {exc}", 0)
+        except Exception as exc:  # noqa: BLE001 - a raising provider is undetermined
+            return result_of(
+                StepStatus.FAILED,
+                {"sampling": "provider", "error": str(exc)},
+                "region_query_undetermined", 0,
+            )
+        evidence = {"sampling": sampling, "samples": [dict(outcome)],
+                    "singleSample": True}
+        if outcome.get("result") == "pass":
+            if absent_mode:
+                evidence["reason"] = "matched_during_absent_window"
+                return result_of(StepStatus.FAILED, evidence,
+                                 "region_query_matched_during_absent_window", 0)
+            return result_of(StepStatus.PASSED, evidence, "", 0)
+        if absent_mode:
+            evidence["reason"] = "single_snapshot_cannot_prove_full_period_absence"
+        elif outcome.get("result") == "fail" and not outcome.get("unreadable"):
+            # A readable sample without a match is a real "not yet" — leave the
+            # outcome to the executor's polling instead of faking a final pass.
+            evidence["reason"] = "not_matched_in_this_sample"
+        else:
+            evidence["reason"] = "sample_undetermined"
+        return result_of(StepStatus.FAILED, evidence, "region_query_undetermined", 0)
+
+    # Provider wired: this evaluator owns the whole observation window.
+    full_samples: list[dict[str, Any]] = []
+    compact_samples: list[dict[str, Any]] = []
+    deadline_at = started + deadline
+    while True:
+        try:
+            outcome, sampling = sample_once()
+        except Exception as exc:  # noqa: BLE001 - a raising provider is undetermined
+            outcome = {"result": "undetermined", "rowCount": 0, "matchCount": 0,
+                       "unreadable": f"{type(exc).__name__}: {exc}"}
+            sampling = "provider"
+        if not compact_samples or not full_samples:
+            full_samples.append(dict(outcome))
+        elif outcome.get("result") == "pass" or _time.monotonic() >= deadline_at:
+            full_samples.append(dict(outcome))
+        compact_samples.append({**_compact_sample(outcome),
+                                "nowWall": outcome.get("nowWall"),
+                                "sampling": sampling})
+        if outcome.get("result") == "pass":
+            if absent_mode:
+                return result_of(
+                    StepStatus.FAILED,
+                    {"sampling": sampling, "samples": full_samples,
+                     "compactSamples": compact_samples,
+                     "reason": "matched_during_absent_window"},
+                    "region_query_matched_during_absent_window", 0,
+                )
+            return result_of(
+                StepStatus.PASSED,
+                {"sampling": sampling, "samples": full_samples,
+                 "compactSamples": compact_samples},
+                "", 0,
+            )
+        remaining = deadline_at - _time.monotonic()
+        if remaining <= 0:
+            break
+        _time.sleep(min(REGION_SAMPLE_INTERVAL, remaining))
+
+    any_undetermined = (
+        any(sample.get("result") == "undetermined" for sample in compact_samples)
+        or any(sample.get("unreadable") for sample in compact_samples)
+    )
+    if absent_mode and not any_undetermined:
+        # 到期且整个观察期从未匹配（每个采样都可判定）→ 通过。
+        return result_of(
+            StepStatus.PASSED,
+            {"sampling": "provider", "samples": full_samples,
+             "compactSamples": compact_samples},
+            "", 0,
+        )
+    diagnostic = ("region_query_undetermined" if any_undetermined
+                  else "region_query_not_satisfied")
+    return result_of(
+        StepStatus.FAILED,
+        {"sampling": "provider", "samples": full_samples,
+         "compactSamples": compact_samples,
+         "reason": "undetermined_samples" if any_undetermined
+         else ("absence_unprovable" if absent_mode else "no_match_before_deadline")},
+        diagnostic, 0,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -749,6 +1190,7 @@ EXPECTATION_REGISTRY: dict[str, Callable[..., ExpectationResult]] = {
     "control_text_time_range": evaluate_control_text_time_range,
     "window_text_time_range": evaluate_window_text_time_range,
     "visual_evidence_captured": evaluate_visual_evidence_captured,
+    "region_query": evaluate_region_query,
 }
 
 
@@ -782,4 +1224,32 @@ __all__ = [
     "evaluate_control_checked_equals",
     "evaluate_control_enabled_equals",
     "evaluate_window_text_contains",
+    "evaluate_region_query",
+    "set_region_row_provider",
+    "region_row_provider",
 ]
+
+
+def set_region_row_provider(provider: Any) -> Token:
+    """Wire the container-row provider for region_query evaluation.
+
+    The executor calls this per step around the ASSERTING phase; tests may
+    set a stub for the duration of one evaluator call. Returns the token to
+    reset with.
+    """
+    return _RegionRowProviderView.set(provider)
+
+
+def region_row_provider(provider: Any):
+    """Context-manager form of :func:`set_region_row_provider` (tests/wiring)."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def scope():
+        token = _RegionRowProviderView.set(provider)
+        try:
+            yield provider
+        finally:
+            _RegionRowProviderView.reset(token)
+
+    return scope()

@@ -15,6 +15,7 @@ import ntpath
 import re
 import sys
 import threading
+import weakref
 import time
 import uuid
 from datetime import datetime, timezone
@@ -659,6 +660,45 @@ class WindowsUIAResolver:
         return None
 
 
+def _same_name_sibling_count(target_data: Mapping[str, object] | None) -> int | None:
+    """Count siblings (incl. this control) sharing its (control_type, text).
+
+    Only meaningful for weak-identity controls (no automationId/identifier):
+    it is the one stable signal that distinguishes a uniquely-resolvable chain
+    from a genuinely ambiguous multi-row-same-name target. Returns ``None``
+    when the count cannot be read (unknown) -- the compiler must not invent an
+    ambiguity signal it does not have.
+    """
+    if not target_data or "_nativeElement" not in target_data:
+        return None
+    text = str(target_data.get("text") or "").strip()
+    ctype = str(target_data.get("controlType") or "").strip()
+    if not text or not ctype:
+        return None
+    wrapper = target_data.get("_nativeElement")
+    try:
+        parent = wrapper.parent()
+    except Exception:
+        return None
+    if parent is None:
+        return None
+    count = 0
+    try:
+        for sibling in parent.children():
+            try:
+                info = sibling.element_info
+                if (
+                    str(info.name or "").strip() == text
+                    and str(info.control_type or "").strip() == ctype
+                ):
+                    count += 1
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return count or None
+
+
 class WindowsUIACorrelator:
     def __init__(
         self,
@@ -882,6 +922,7 @@ class WindowsUIACorrelator:
             for key in ("controlType", "automationId", "identifier", "text", "rect")
         }
         stable = json.dumps(stable_identity, sort_keys=True, ensure_ascii=False, default=str).encode()
+        weak_identity = not (target_data.get("automationId") or target_data.get("identifier"))
         return ObservedTarget(
             snapshot_id="OBS-" + uuid.uuid4().hex,
             target_id="T0001",
@@ -901,6 +942,9 @@ class WindowsUIACorrelator:
                 if isinstance(item, Mapping)
             ),
             protected=target_data.get("protected"),
+            same_name_siblings=(
+                _same_name_sibling_count(target_data) if weak_identity else None
+            ),
         )
 
     def current_target(self, scope: CaptureScope) -> ObservedTarget | None:
@@ -1502,6 +1546,51 @@ class WindowsUIACorrelator:
         scope: CaptureScope,
         sequence: int,
     ) -> RawCaptureEvent | tuple[RawCaptureEvent, ...] | None:
+        from collections import deque as _dq
+        if getattr(self, "packet_trace", None) is None:
+            self.packet_trace = _dq(maxlen=40)
+            self.scope_root_probe = {
+                "scopeRoot": self._scope_root,
+                "resolverPidBelongs": None,
+            }
+            try:
+                _chk = getattr(self._resolver, "process_pid_belongs_to_root", None)
+                if callable(_chk) and self._scope_root:
+                    self.scope_root_probe["resolverPidBelongs"] = bool(
+                        _chk(8040, self._scope_root))
+            except Exception as _e:
+                self.scope_root_probe["resolverPidBelongs"] = f"err:{_e}"
+        self._rej_noted_this_call = False
+        _pb = self._pending_press is not None
+        _rej0 = len(self.rejections)
+        _rec = self._lands_on_recorder_ui(packet)
+        try:
+            _wf = None if packet.kind in ("window_transition",) else self._window_for(packet)
+            _wfd = (f"win={_wf.get('processName')}/{_wf.get('pid')}/"
+                    f"h={_wf.get('handle')}/t={str(_wf.get('windowTitle'))[:24]}"
+                    if isinstance(_wf, dict) else f"win={_wf!r}"[:60])
+        except Exception as _we:
+            _wfd = f"winErr:{_we}"
+        _r = self._correlate_inner(packet, scope, sequence)
+        try:
+            _trace = getattr(self, "packet_trace", None)
+            if _trace is not None:
+                _exit = ("none" if _r is None else
+                         f"tuple{len(_r)}" if isinstance(_r, tuple) else "event")
+                _rej1 = len(self.rejections)
+                _last = self.rejections[-1] if _rej1 > _rej0 else None
+                _reason = (f"rej+{_rej1 - _rej0}:{_last.get('reason')}?"
+                           if isinstance(_last, dict) else "rej+0")
+                _pt = getattr(packet, 'screen_point', None)
+                _trace.append(f"seq={sequence} kind={packet.kind} pt={_pt} "
+                              f"{_wfd} recorderUI={_rec} pendingBefore={_pb} "
+                              f"pendingAfter={self._pending_press is not None} "
+                              f"exit={_exit} {_reason}")
+        except Exception:
+            pass
+        return _r
+
+    def _correlate_inner(self, packet, scope, sequence):
         if packet.kind == "window_transition":
             return self._window_transition(packet, scope, sequence)
         if self._lands_on_recorder_ui(packet):
@@ -1532,7 +1621,8 @@ class WindowsUIACorrelator:
             result if isinstance(result, tuple)
             else () if result is None else (result,)
         )
-        if not produced and packet.kind in {"pointer_up", "scroll"}:
+        if (not produced and not getattr(self, "_rej_noted_this_call", False)
+                and packet.kind in {"pointer_up", "scroll"}):
             # In scope, not on the recorder, yet nothing came out. Without
             # this the step simply never appears and there is nothing to
             # explain why.
@@ -1630,11 +1720,33 @@ class WindowsUIACorrelator:
         # volume — ordinary typing elsewhere fills any buffer instantly and
         # buries the one rejection that explains a lost click. Only input that
         # resolved to this application's own windows is diagnostic.
+        # F57/F62（审查钉死语义+审计报告修正）：identity 去重——id→weakref，
+        # 命中须 ref() is packet 验证（防 ABA/地址复用吞账）；包销毁回调
+        # 校验旧 ref 后移除（不阻 gc）；每实例独立（不跨 correlator 泄漏）。
+        # 不用内容 hash（equal-but-distinct 包会被错误合并——审查指正）。
+        seen = getattr(self, "_rej_seen", None)
+        if seen is None:
+            seen = self._rej_seen = {}
+        key = id(packet)
+        old_ref = seen.get(key)
+        if old_ref is not None:
+            if old_ref() is packet:
+                return                      # 同一包对象：只计一次
+            del seen[key]                   # 死 ref 或地址复用：换新记账
+        def _on_dead(_r, _k=key, _s=seen):
+            if _s.get(_k) is _r:
+                del _s[_k]
+        try:
+            seen[key] = weakref.ref(packet, _on_dead)
+        except Exception:
+            pass                            # 不可弱引用类型：跳过去重不吞账
         if window is not None and scope is not None:
             if not self._process_in_scope(window.get("processName"), scope,
                                           window.get("pid")):
                 self.foreign_app_events += 1
                 return
+        # F57/F64：双重记账由上方 id→weakref identity 去重承担；遗留
+        # _last_rej_packet 裸 id 块已删（审查实测吞 distinct live packet）。
         if len(self.rejections) >= 60:
             self.rejections.pop(0)  # keep the most recent, not the first
         entry: dict[str, object] = {"reason": reason, "kind": packet.kind}

@@ -72,7 +72,8 @@ class _FakeIndicator:
     def pause(self): self.calls.append("pause")
     def resume(self): self.calls.append("resume")
     def update_count(self, count): self.calls.append(("count", count))
-    def open_assertion_editor(self, target=None): self.calls.append(("assert", target) if target else "assert")
+    def open_assertion_editor(self, target=None):
+        self.calls.append(("assert", dict(target or {})))
     def stop(self): self.calls.append("stop")
 
 
@@ -512,7 +513,8 @@ def test_visible_indicator_and_explicit_assertion_are_part_of_session_lifecycle(
     assert assertion["assertion"]["expected"] is False
     assert assertion["assertion"]["timeoutSeconds"] == 10.0
     assert assertion["observedTarget"]["automationId"] == "btnApply"
-    assert indicator.calls == ["start", "assert", ("count", 1), "stop"]
+    assert [c if isinstance(c, str) else c[0] for c in indicator.calls] == \
+        ["start", "assert", "count", "stop"]
 
 
 def test_record_assert_cli_opens_target_local_editor(monkeypatch, capsys):
@@ -523,7 +525,13 @@ def test_record_assert_cli_opens_target_local_editor(monkeypatch, capsys):
     assert agent.calls == [("add_recording_assertion", {}, None)]
 
 
-def test_assertion_shortcut_opens_editor_without_becoming_business_event():
+def test_assertion_shortcut_is_no_longer_an_editor_entry():
+    """06 设计（2026-10-25 用户确认）移除内嵌 Shift+Ctrl/Cmd+A 旧断言入口。
+
+    Ctrl+Alt+Q 是唯一断言入口。该按键组合之后按普通业务 key_command 处理：
+    进入录制时间线（编译器对不支持的按键如实报 issue），不再打开编辑器，
+    也不被静默丢弃。
+    """
     indicator = _FakeIndicator()
     service = RecordingService(
         target_name="win-dev",
@@ -541,9 +549,11 @@ def test_assertion_shortcut_opens_editor_without_becoming_business_event():
         scope=session.scope,
         input={"key": "A", "modifiers": ["CTRL", "SHIFT"]},
     ))
-    assert accepted is False
-    assert indicator.calls == ["start", "assert"]
-    assert session.recording().events == ()
+    assert accepted is True
+    # 编辑器未打开；事件按业务输入落时间线。
+    assert [c if isinstance(c, str) else c[0] for c in indicator.calls] == \
+        ["start"]
+    assert [e.type for e in session.recording().events] == ["key_command"]
     service.stop()
 
 
@@ -595,11 +605,12 @@ def test_assertion_editor_prefills_last_semantic_target():
     )
     service.start(name="flow", process_name="EDRClient.exe", window_title="^EDRClient$")
     service.assertion()
-    assert indicator.calls[-1] == ("assert", {
-        "automationId": "btnApply", "identifier": None,
-        "controlType": "Button", "name": "应用",
-        "value": None,
-    })
+    # 向导契约：编辑器收到冻结草稿——身份与当前值在 observed 里（预填语义保持）
+    last = indicator.calls[-1]
+    assert last[0] == "assert" and last[1]["readStatus"] == "ok"
+    observed = last[1]["observed"]
+    assert observed["automationId"] == "btnApply"
+    assert observed["controlType"] == "Button" and observed["name"] == "应用"
     service.stop()
 
 
@@ -623,11 +634,13 @@ def test_assertion_editor_prefers_current_hover_target_over_last_event():
 
     service.assertion()
 
-    assert indicator.calls[-1] == ("assert", {
-        "automationId": "backupEnabled", "identifier": None,
-        "controlType": "CheckBox", "name": "启用备份",
-        "value": None,   # 命中测试未读到组件取值时缺省为 None（value 预填）
-    })
+    # 命中测试未读到组件取值时 value 缺省 None（value 预填语义保持）
+    last = indicator.calls[-1]
+    assert last[0] == "assert" and last[1]["readStatus"] == "ok"
+    observed = last[1]["observed"]
+    assert observed["automationId"] == "backupEnabled"
+    assert observed["controlType"] == "CheckBox" and observed["name"] == "启用备份"
+    assert observed["value"] is None
     service.stop()
 
 

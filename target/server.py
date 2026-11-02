@@ -27,11 +27,13 @@ import ntpath
 import posixpath
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 
 from fastmcp import FastMCP
 
@@ -56,6 +58,11 @@ try:  # Installed package / `python -m target.server`.
     from .recording.models import RecordingModelError
     from .recording.indicator import tkinter_indicator_factory as _recording_indicator_factory
     from .recording.evidence import capture_redacted_window_frame as _capture_redacted_frame
+    from .recording.result_store import RecordingResultStore
+    from .recording.ui_controller import (
+        RecorderPanelHost as _RecorderPanelHost,
+        RecorderUIController as _RecorderUIController,
+    )
 except ImportError:  # Target-local `python server.py` deployment compatibility.
     from automation import create_backend
     from automation.base import AutomationBackend
@@ -77,6 +84,11 @@ except ImportError:  # Target-local `python server.py` deployment compatibility.
     from recording.models import RecordingModelError
     from recording.indicator import tkinter_indicator_factory as _recording_indicator_factory
     from recording.evidence import capture_redacted_window_frame as _capture_redacted_frame
+    from recording.result_store import RecordingResultStore
+    from recording.ui_controller import (
+        RecorderPanelHost as _RecorderPanelHost,
+        RecorderUIController as _RecorderUIController,
+    )
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -157,13 +169,26 @@ def _serialized_product_gui(func):
 _server_host = "127.0.0.1"
 _server_port = 8765
 
+_recording_result_store = RecordingResultStore(
+    Path(os.environ.get("EDR_WD_RECORDING_RESULTS",
+                        str(Path.home() / ".edr-wd" / "recording-results")))
+)
+
 _recording_service = RecordingService(
     target_name=os.environ.get("EDR_WD_TARGET_NAME", "target"),
     backend=_backend_kind,
     source_factory=_recording_source_factory(_backend_kind, _backend),
     indicator_factory=_recording_indicator_factory,
     backend_object=_backend,
+    result_store=_recording_result_store,
 )
+
+# Recorder panel (U1): the service-level entry on the interactive desktop.
+# The backend stays None when the platform failed to load; window listing
+# then reports a structured error instead of half-working.
+_recording_ui_controller = _RecorderUIController(
+    _recording_service, backend=_backend)
+_recording_panel_host = _RecorderPanelHost(_recording_ui_controller)
 
 
 def _backend_unavailable(tool_name: str) -> str:
@@ -970,8 +995,8 @@ def click_window_at(
     name="type_text",
     description=(
         "Type text into an edit control. "
-        "Finds the control by control_id (preferred), text, or class_name, "
-        "then sets the text content."
+        "Finds the control by automation_id (+ control_type), control_id "
+        "(preferred), text, or class_name, then sets the text content."
     ),
 )
 def type_text(
@@ -979,10 +1004,17 @@ def type_text(
     text: str = None,
     class_name: str = None,
     string: str = "",
+    automation_id: str = None,
+    control_type: str = None,
 ) -> str:
     if _backend is None:
         return _backend_unavailable("type_text")
-    result = _backend.type_text(control_id, text, class_name, string)
+    # kwargs 调用：适配层首参 `text` 是输入值（统一 backend 契约），而 MCP
+    # legacy 的 `text` 是定位文本、`string` 是输入值——位置传参会错绑。
+    result = _backend.type_text(
+        text=text, control_id=control_id, class_name=class_name,
+        string=string, automation_id=automation_id, control_type=control_type,
+    )
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -1150,9 +1182,179 @@ def stop_recording() -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
-@mcp.tool(name="get_recording_capture", description="Fetch one source-redacted in-memory PNG referenced by a stopped recording event.")
-def get_recording_capture(capture_id: str) -> str:
-    try: result = _recording_service.capture(capture_id=capture_id)
+@mcp.tool(name="get_recording_capture", description="Fetch one source-redacted PNG referenced by a stopped recording event. Memory first; on a miss the durable per-session store is consulted. session_id pins the owning session (recommended); the legacy no-session call only resolves when the capture id has exactly one unambiguous owner.")
+def get_recording_capture(capture_id: str, session_id: str | None = None) -> str:
+    try: result = _recording_service.capture(capture_id=capture_id, session_id=session_id)
+    except Exception as exc: result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="open_recording_ui", description="Show or restore the target-local recorder panel on the interactive desktop. Returns the current panel snapshot; fails with interactive_session_unavailable when no visible desktop exists.")
+def open_recording_ui() -> str:
+    if (blocked := _legacy_gui_conflict("open_recording_ui")) is not None:
+        return blocked
+    try: result = _recording_panel_host.start()
+    except Exception as exc: result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="region_state_query",
+    description=(
+        "F44 read-only probe of the region-assertion flow state on the "
+        "interactive desktop: whether the selection mask is open, whether a "
+        "drag selection has been completed, and the controller state literal. "
+        "No side effects. Use it to decide when to call region_confirm_action."
+    ),
+)
+def region_state_query() -> str:
+    try:
+        result = _recording_ui_controller.apply_ui_request(
+            "region_state", {})
+    except Exception as exc:
+        result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="region_confirm_action",
+    description=(
+        "F44 API-driven confirmation of the frozen drag selection in the "
+        "region-assertion flow. Equivalent to the confirm button, exposed "
+        "because the local OS/Tk input stack swallows real button/keyboard "
+        "events (root cause unknown, reported honestly). The drag selection "
+        "itself must remain real hardware input; this endpoint only advances "
+        "the already-captured selection. Returns the frozen selection."
+    ),
+)
+def region_confirm_action() -> str:
+    import uuid as _uuid
+    request_id = f"api-{_uuid.uuid4().hex[:8]}"
+    try:
+        result = _recording_ui_controller.apply_ui_request(
+            "region_confirm", {"requestId": request_id})
+    except Exception as exc:
+        result = _recording_error(exc)
+    # F50/F52：确认应答按面板既有 render 路径推送——遮罩关闭+向导打开=
+    # 真实面板 UI 流（状态驱动的面板自身决策，非伪造输入）。
+    # F52：push 结果如实入响应（panelNotified），不再静默吞——诊断链可见。
+    try:
+        region = (result or {}).get("region") or {}
+        if isinstance(result, dict) and result.get("ok") is True \
+                and region.get("state") == "confirmed":
+            pushed = _recording_panel_host.push_to_panel(
+                {"ack": request_id, "result": result})
+            if isinstance(result, dict):
+                # F73：严格 token==request_id 才透传分层（防串号）
+                _pr = getattr(_recording_panel_host, "_last_push_result", None)
+                _tok_ok = isinstance(_pr, dict) and _pr.get("token") == request_id
+                _push_ok = bool(pushed) if not isinstance(pushed, dict) else bool(pushed.get("ok"))
+                result["panelNotified"] = _push_ok
+                if _tok_ok:
+                    # F72：分层透传——deliveryAck（送达）/rendered（渲染完
+                    # 成）/wizardPhase（向导就绪/失败）不混同，调用者不得把
+                    # 送达当完成。
+                    result["panelDeliveryAck"] = bool(_pr.get("deliveryAck"))
+                    result["panelRendered"] = bool(_pr.get("rendered"))
+                    result["panelWizardPhase"] = _pr.get("wizardPhase")
+                if not _push_ok:
+                    # F73：按真实 ok/失败填写（dict/bool 双兼容）
+                    result["panelPushReason"] = (
+                        getattr(_recording_panel_host, "_last_send_error", None)
+                        or "ack-timeout-no-echo")
+    except Exception as _push_exc:
+        if isinstance(result, dict):
+            result["panelNotified"] = False
+            result["panelPushError"] = str(_push_exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="region_save_action",
+    description=(
+        "F44 API-driven save of the region assertion wizard draft "
+        "(equivalent to the wizard save button) for environments whose "
+        "local input stack is unavailable. Pass the draft as a JSON object "
+        "with targetMode/quantifier/fields exactly as the wizard would emit."
+    ),
+)
+def region_save_action(draft: str) -> str:
+    import uuid as _uuid
+    try:
+        parsed = json.loads(draft) if isinstance(draft, str) else draft
+        if not isinstance(parsed, dict):
+            raise ValueError("draft_must_be_json_object")
+        result = _recording_ui_controller.apply_ui_request(
+            "region_save",
+            {"requestId": f"api-{_uuid.uuid4().hex[:8]}", "draft": parsed})
+    except Exception as exc:
+        result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="region_update_action",
+    description=(
+        "F49 API-driven completion of the region drag selection: fix the "
+        "rubber-band rect (left, top, right, bottom) that the real hardware "
+        "drag captured on the interactive desktop, and preselect the "
+        "intersecting components. Equivalent to the release frame; exposed "
+        "because the local input-state query layer is broken (honestly "
+        "reported). The drag itself must have really happened."
+    ),
+)
+def region_update_action(left: int, top: int, right: int, bottom: int) -> str:
+    import uuid as _uuid
+    try:
+        result = _recording_ui_controller.apply_ui_request(
+            "region_update",
+            {"requestId": f"api-{_uuid.uuid4().hex[:8]}",
+             "rect": [int(left), int(top), int(right), int(bottom)]})
+    except Exception as exc:
+        result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(
+    name="region_toggle_action",
+    description=(
+        "F51 API-driven selection of the container (or one component) inside "
+        "the frozen drag rect. With container=true the largest recognizable "
+        "container (list/table/panel) intersecting the rect is selected — "
+        "required before region_save_action so the saved draft carries a "
+        "stable container identity (the compiler refuses a region query "
+        "without one)."
+    ),
+)
+def region_toggle_action(container: bool, key: str = "") -> str:
+    import uuid as _uuid
+    try:
+        result = _recording_ui_controller.apply_ui_request(
+            "region_toggle",
+            {"requestId": f"api-{_uuid.uuid4().hex[:8]}",
+             "container": bool(container), "key": str(key or "")})
+    except Exception as exc:
+        result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="get_recording_result", description="Return one stopped recording's durable, source-redacted raw document by its own session id. Sessions are isolated by the storage key; an unknown id is reported as missing, never as another session's data.")
+def get_recording_result(session_id: str) -> str:
+    try: result = _recording_service.get_result(session_id=session_id)
+    except Exception as exc: result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="list_recording_results", description="List session ids holding durable, uncollected stopped recordings on this target.")
+def list_recording_results() -> str:
+    try: result = {"ok": True, "pending": _recording_service.list_pending_results()}
+    except Exception as exc: result = _recording_error(exc)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="mark_recording_collected", description="Mark a stopped recording's durable result as collected after the Agent verified its artifacts locally.")
+def mark_recording_collected(session_id: str) -> str:
+    try: result = _recording_service.mark_result_collected(session_id=session_id)
     except Exception as exc: result = _recording_error(exc)
     return json.dumps(result, ensure_ascii=False)
 
@@ -1267,6 +1469,235 @@ def observe_product_windows(run_token: str) -> str:
         return json.dumps({"ok": False, "code": code}, ensure_ascii=False)
     return json.dumps({"ok": True, "windows": [window.__dict__ for window in windows]},
                       ensure_ascii=False)
+
+
+# -- Region assertion row sampling (batch 2, 06 §5) ---------------------------
+# 只读、同帧、不滚动：行/组件查询发生在已建立的窗口锁内（产品 run 走
+# registry 复核，legacy 走 verify_window_lock），绝不绕锁独立查询；行字段
+# 白名单与 evaluate_region_conditions 的行字段对齐；受保护控件（password）
+# 的 value/text 一律置空，且 wire 上不出现 handle/pid/坐标。
+
+_REGION_ROW_FIELDS = ("name", "text", "value", "checked", "enabled", "time")
+
+
+def _region_container_identity(container) -> dict:
+    """接受 draft/match 两种拼写，统一成稳定身份；无稳定身份显式拒绝。"""
+    if not isinstance(container, dict):
+        raise ValueError("container_identity_unstable")
+    identity = {
+        "controlType": container.get("controlType") or container.get("control_type"),
+        "automationId": container.get("automationId") or container.get("automation_id"),
+        "identifier": container.get("identifier"),
+        "name": container.get("name") or container.get("text"),
+    }
+    if not (identity["automationId"] or identity["identifier"]
+            or (identity["controlType"] and identity["name"])):
+        raise ValueError("container_identity_unstable")
+    return identity
+
+
+def _region_row_fields(fields) -> list:
+    if fields is None:
+        return list(_REGION_ROW_FIELDS)
+    if not isinstance(fields, (list, tuple)):
+        raise ValueError("field_not_supported")
+    wanted = []
+    for field in fields:
+        if field not in _REGION_ROW_FIELDS:
+            raise ValueError("field_not_supported")
+        if field not in wanted:
+            wanted.append(field)
+    return wanted
+
+
+def _region_backend_error(result) -> str:
+    code = result.get("code") if isinstance(result, dict) else None
+    if isinstance(code, str) and code:
+        return code
+    error = result.get("error") if isinstance(result, dict) else None
+    if isinstance(error, str) and error:
+        if "not supported" in error:
+            return "region_query_unsupported"
+        return str(error).split(":", 1)[0]
+    return "region_query_failed"
+
+
+def _redact_region_rows(result, wanted) -> dict:
+    if not isinstance(result, dict) or not result.get("ok"):
+        raise ValueError(_region_backend_error(result))
+    rows = result.get("rows")
+    if not isinstance(rows, list) or any(
+            not isinstance(row, dict) for row in rows):
+        raise ValueError("container_rows_payload_invalid")
+    clean_rows = []
+    for row in rows:
+        clean = {"rowIndex": row.get("rowIndex")}
+        protected = row.get("protected") is True
+        for field in wanted:
+            value = row.get(field)
+            # 脱敏边界与 capture_redacted_window_frame 同一原则：受保护控件
+            # 的取值/文本绝不跨越 wire。
+            if protected and field in ("value", "text"):
+                value = None
+            clean[field] = value
+        if protected:
+            clean["protected"] = True
+        clean_rows.append(clean)
+    return {"rows": clean_rows, "container": result.get("container")}
+
+
+def _region_component_specs(components) -> list:
+    if not isinstance(components, (list, tuple)):
+        raise ValueError("component_identity_unstable")
+    specs = []
+    for component in components:
+        if not isinstance(component, dict) or not isinstance(
+                component.get("field"), str) or not component["field"]:
+            raise ValueError("component_identity_unstable")
+        try:
+            identity = _region_container_identity(component.get("identity"))
+        except ValueError:
+            raise ValueError("component_identity_unstable") from None
+        spec: dict = {"field": component["field"], "identity": identity}
+        # P2g：稳定键透传（唯一/非空校验——重复键=覆盖歧义=拒绝）。
+        if component.get("key") is not None:
+            key = str(component["key"]).strip()
+            if not key:
+                raise ValueError("component_key_empty")
+            if any(s.get("key") == key for s in specs):
+                raise ValueError("component_key_duplicate")
+            spec["key"] = key
+        specs.append(spec)
+    return specs
+
+
+def _redact_region_values(result, specs=None) -> dict:
+    if not isinstance(result, dict) or not result.get("ok"):
+        raise ValueError(_region_backend_error(result))
+    values = result.get("values")
+    if not isinstance(values, list) or any(
+            not isinstance(item, dict) for item in values):
+        raise ValueError("component_values_payload_invalid")
+    # For keyed requests, verify the backend response against the request
+    # before exposing or evaluating it.  Otherwise duplicated, missing or
+    # substituted keys could attribute a different component's value to a
+    # condition.  Legacy unkeyed requests retain their existing wire format.
+    expected = {s["key"]: s["field"] for s in (specs or []) if "key" in s}
+    if expected:
+        if len(values) != len(specs):
+            raise ValueError("component_values_key_mismatch")
+        seen = set()
+        for item in values:
+            key = item.get("key")
+            if key is None:
+                continue  # an unkeyed legacy component may share this request
+            if not isinstance(key, str) or key not in expected or key in seen:
+                raise ValueError("component_values_key_mismatch")
+            if item.get("field") != expected[key]:
+                raise ValueError("component_values_key_mismatch")
+            seen.add(key)
+        if seen != set(expected):
+            raise ValueError("component_values_key_mismatch")
+    clean_values = []
+    for item in values:
+        clean = {"field": item.get("field"), "value": item.get("value")}
+        # P2g：provider 响应 key 透传（缺失/保护结果也保 key 并 value=None
+        # 已然如此——不伪造值；清洗不减字段）。
+        if item.get("key") is not None:
+            clean["key"] = str(item["key"])
+        if item.get("reason") is not None:
+            clean["reason"] = item.get("reason")
+        if item.get("protected") is True:
+            clean["value"] = None
+            clean["protected"] = True
+        clean_values.append(clean)
+    return {"values": clean_values}
+
+
+def _verify_region_observation_context(run_token):
+    """沿既有窗口锁/归属链复核观察上下文；返回 (context, before_registry)。
+
+    产品 run：require_product_run + WindowSession.verify_locked（双端复核由
+    调用点在查询后再做一次）。legacy：必须存在且验证通过的窗口锁 —— 没有
+    connect→lock_window 就没有行查询。
+    """
+    context = _product_policy.require_product_run(run_token)
+    before_registry = (
+        _window_session.verify_locked() if context and _window_session else None
+    )
+    if context and before_registry is None:
+        raise ValueError("window_identity_stale")
+    if not context:
+        locked = _backend.verify_window_lock(activate=False)
+        if not isinstance(locked, dict) or not locked.get("ok"):
+            raise ValueError("window_lock_required")
+    return context, before_registry
+
+
+def _verify_region_window_unchanged(before_registry) -> None:
+    if before_registry is None:
+        return
+    after_registry = _window_session.verify_locked()
+    if (after_registry.binding != before_registry.binding
+            or after_registry.native_id != before_registry.native_id
+            or after_registry.generation != before_registry.generation):
+        raise ValueError("observation_window_changed")
+
+
+@mcp.tool(
+    name="observe_container_rows",
+    description=(
+        "Read one stable-identity container's current row fields inside the "
+        "locked window (region assertion sampling; read-only, same-frame, "
+        "no lock bypass; protected values are redacted)."
+    ),
+)
+@_serialized_product_gui
+def observe_container_rows(run_token: str = None, container: dict = None,
+                           fields: list = None) -> str:
+    if _backend is None:
+        return _backend_unavailable("observe_container_rows")
+    try:
+        context, before_registry = _verify_region_observation_context(run_token)
+        identity = _region_container_identity(container)
+        wanted = _region_row_fields(fields)
+        result = _backend.query_container_rows(identity, wanted)
+        payload = _redact_region_rows(result, wanted)
+        _verify_region_window_unchanged(before_registry)
+    except Exception as exc:
+        # 只有稳定错误码跨 wire；错误路径绝不回传行内容。
+        code = str(exc).split(":", 1)[0]
+        return json.dumps({"ok": False, "code": code, "error": code},
+                          ensure_ascii=False)
+    return json.dumps({"ok": True, "sampling": "locked_window_rows", **payload},
+                      ensure_ascii=False)
+
+
+@mcp.tool(
+    name="observe_component_values",
+    description=(
+        "Read current values of fixed identity-addressed components inside "
+        "the locked window (region assertion sampling; read-only, same-frame, "
+        "no lock bypass; protected values are redacted)."
+    ),
+)
+@_serialized_product_gui
+def observe_component_values(run_token: str = None,
+                             components: list = None) -> str:
+    if _backend is None:
+        return _backend_unavailable("observe_component_values")
+    try:
+        context, before_registry = _verify_region_observation_context(run_token)
+        specs = _region_component_specs(components)
+        result = _backend.read_component_values(specs)
+        payload = _redact_region_values(result, specs)
+        _verify_region_window_unchanged(before_registry)
+    except Exception as exc:
+        code = str(exc).split(":", 1)[0]
+        return json.dumps({"ok": False, "code": code, "error": code},
+                          ensure_ascii=False)
+    return json.dumps({"ok": True, "sampling": "locked_window_values",
+                       **payload}, ensure_ascii=False)
 
 
 @mcp.tool(
@@ -2101,6 +2532,140 @@ def focus_window_selector(process_name: str, title_regex: str,
         code = str(exc).split(":", 1)[0]
         return json.dumps({"ok": False, "code": code}, ensure_ascii=False)
     return json.dumps({"ok": True, "identity": identity.__dict__}, ensure_ascii=False)
+
+
+@mcp.tool(name="focus_entry_window", description=(
+    "Replay entry-window controlled recovery (design doc 08, R2), under the "
+    "held product-run lease. Read-only enumerates windows matching the "
+    "declared entry identity FIRST; when root_automation_id is declared, each "
+    "candidate's live window root must match too (never downgraded to a "
+    "title-only match). Only when exactly one window matches the FULL "
+    "declared identity, connects that exact HWND, re-verifies the identity "
+    "under the same authorized dispatch (replacement race guard), locks it "
+    "strictly with activation, and binds it to the window session. Never "
+    "resolves or launches an application, never starts a service, never "
+    "clicks a control. Structured dispositions instead of guessing: "
+    "entry_window_absent / entry_window_ambiguous / entry_root_unverifiable / "
+    "entry_window_stale / acquired."))
+@_serialized_product_gui
+def focus_entry_window(process_name: str, title_regex: str = None, run_token: str = None,
+                       root_automation_id: str = None) -> str:
+    if _backend is None:
+        return _backend_unavailable("focus_entry_window")
+    try:
+        from .product_policy import authorized_dispatch
+    except ImportError:
+        from product_policy import authorized_dispatch
+
+    def _reject(code, error, **extra):
+        return json.dumps({"ok": False, "code": code, "error": error, **extra},
+                          ensure_ascii=False)
+
+    try:
+        context = _product_policy.require_product_run(run_token)
+        if context is None:
+            raise ValueError("product_run_expired")
+        # A declared root identity is only verifiable through an enumeration
+        # that exposes each window's own root automation id. Without that
+        # capability the declared field cannot be checked, and the contract
+        # forbids silently falling back to a title-only match.
+        root_declared = bool(root_automation_id)
+        root_enumeration = getattr(_backend, "_enumerate_top_windows_windows", None)
+        if root_declared and not callable(root_enumeration):
+            return _reject(
+                "entry_root_unverifiable",
+                "the backend cannot verify a declared window root identity; "
+                "refusing rather than matching on the title alone")
+        # Read-only enumeration first: existence and uniqueness are established
+        # BEFORE any mutation. This is the re-confirmation the design requires
+        # -- we never act on a stale connect result, only on a fresh unique
+        # match of the full declared identity.
+        found = _backend.is_window_open(title_regex, process_name, None)
+        if not isinstance(found, dict) or not found.get("ok"):
+            code = found.get("code") if isinstance(found, dict) else None
+            return _reject(code or "entry_window_probe_failed",
+                           (found.get("error") if isinstance(found, dict)
+                            else "window enumeration failed"))
+        windows = found.get("windows") or []
+        if root_declared:
+            roots = {}
+            for item in root_enumeration():
+                roots[item.get("handle")] = str(item.get("root_control_id") or "")
+            windows = [w for w in windows
+                       if roots.get(w.get("handle")) == str(root_automation_id)]
+            if not windows:
+                return _reject(
+                    "entry_window_absent",
+                    "no window matches the declared entry identity "
+                    "(process, title and root)", disposition="entry_window_absent")
+        elif not windows:
+            return _reject("entry_window_absent",
+                           "no window matches the recorded entry identity",
+                           disposition="entry_window_absent")
+        if len(windows) > 1:
+            return json.dumps({
+                "ok": False, "code": "entry_window_ambiguous",
+                "disposition": "entry_window_ambiguous",
+                "error": "several windows match the declared entry identity",
+                "candidates": [
+                    {"pid": w.get("process_id"), "title": w.get("title"),
+                     "handle": w.get("handle")} for w in windows[:8]],
+            }, ensure_ascii=False)
+        window = windows[0]
+        handle = int(window.get("handle"))
+        pid = int(window.get("process_id"))
+        title = str(window.get("title") or "")
+        title_re = "^" + re.escape(title) + "$" if title else None
+        # Connect + strict lock + activation on the exact live HWND, under the
+        # lease's authorized dispatch (legacy GUI mutations are otherwise
+        # refused while a run is active). lock_window verifies internally and
+        # clears itself on refusal; nothing here launches or clicks.
+        with authorized_dispatch(run_token):
+            connected = _backend.connect_window_identity(handle, pid)
+            if not isinstance(connected, dict) or not connected.get("ok"):
+                return _reject("entry_window_connect_failed",
+                               (connected or {}).get("error", "connect failed")
+                               if isinstance(connected, dict) else "connect failed")
+            # Replacement race guard: between the enumeration and this lock the
+            # HWND may have been destroyed and reused by a different window.
+            # Re-verify the full declared identity against the connected lock
+            # snapshot; a stale match is refused, never locked.
+            if root_declared:
+                current_roots = {
+                    item.get("handle"): str(item.get("root_control_id") or "")
+                    for item in root_enumeration()
+                }
+                if current_roots.get(handle) != str(root_automation_id):
+                    _backend.unlock_window()
+                    return _reject(
+                        "entry_window_stale",
+                        "the matching window was replaced between enumeration "
+                        "and acquisition; the identity no longer verifies")
+            locked = _backend.lock_window(pid=pid, title_re=title_re,
+                                          process_name=str(process_name),
+                                          strict=True, activate=True)
+            if not isinstance(locked, dict) or not locked.get("ok"):
+                code = locked.get("code") if isinstance(locked, dict) else None
+                return _reject(code or "entry_window_lock_failed",
+                               (locked.get("error") if isinstance(locked, dict)
+                                else "lock failed"))
+            if _window_session is not None:
+                try:
+                    _window_session.bind_backend_lock()
+                except Exception:
+                    # A lock the product registry cannot bind cannot serve
+                    # product-run observations; release and report honestly.
+                    _backend.unlock_window()
+                    return _reject(
+                        "entry_window_bind_failed",
+                        "locked window is not a registry-bindable product window")
+        return json.dumps({"ok": True, "disposition": "acquired",
+                           "window": {"pid": pid, "title": title, "handle": handle},
+                           "run_id": context.run_id},
+                          ensure_ascii=False)
+    except Exception as exc:
+        code = str(exc).split(":", 1)[0]
+        return json.dumps({"ok": False, "code": code}, ensure_ascii=False)
 
 
 def _restore_python_tool_callables() -> None:

@@ -49,6 +49,7 @@ from .enums import (
     EXPECTATION_WINDOW_TEXT_CONTAINS,
     EXPECTATION_WINDOW_TEXT_CONTAINS_TIME,
     EXPECTATION_WINDOW_TEXT_TIME_RANGE,
+    EXPECTATION_REGION_QUERY,
     VALID_EXPECTATION_TYPES,
 )
 from .models import ProtocolModelError
@@ -156,6 +157,15 @@ _EXPECTATION_TYPE_REGISTRY_RAW: dict[str, ExpectationTypeSpec] = {
         type=EXPECTATION_VISUAL_EVIDENCE_CAPTURED,
         description="Required screenshot was persisted with a matching digest.",
         required_fields=("screenshot_role",),
+    ),
+    EXPECTATION_REGION_QUERY: ExpectationTypeSpec(
+        type=EXPECTATION_REGION_QUERY,
+        description=(
+            "Container-row / multi-component region query evaluated over a "
+            "monotonic observation window with per-sample content-time "
+            "recomputation."
+        ),
+        required_fields=("match", "conditions"),
     ),
 }
 

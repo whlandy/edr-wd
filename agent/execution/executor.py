@@ -67,6 +67,7 @@ from .confirmation import (
 
 from .expectations import (
     _EvidenceView,
+    _RegionRowProviderView,
     EVALUATORS_NOT_AVAILABLE,
     EXPECTATION_REGISTRY,
     ExpectationNotAvailable,
@@ -118,7 +119,16 @@ class ObservationProvider:
 
 
 class BackendUnavailable(Exception):
-    """FR-P1.2-04: backend unreachable at executor start."""
+    """FR-P1.2-04: backend unreachable at executor start.
+
+    `code` carries the ORIGINAL refusal/diagnostic code (for example a
+    product-policy `product_action_forbidden`) so a blocked run is never
+    misreported as a generic offline backend.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code or "backend_unavailable"
 
 
 class StepMaterializationError(Exception):
@@ -249,8 +259,17 @@ class AtomicExecutor:
             if steps and callable(prepare_observation):
                 prepare_observation(steps[0])
             backend_unavailable = self._probe_backend()
-        except (BackendUnavailable, StepMaterializationError):
+        except (BackendUnavailable, StepMaterializationError) as exc:
             backend_unavailable = True
+            # Keep the ORIGINAL refusal/diagnostic code and message: a blocked
+            # case must surface why (e.g. product_action_forbidden), never a
+            # generic "backend offline" that hides the real cause.
+            probe_error = {
+                "code": getattr(exc, "code", "backend_unavailable"),
+                "message": str(exc),
+            }
+        else:
+            probe_error = None
         required_flags = tuple(step.required for step in steps)
         step_results: list[StepResult] = []
         aborted = False
@@ -263,7 +282,7 @@ class AtomicExecutor:
 
         if backend_unavailable:
             for step in steps:
-                sr = self._blocked_unavailable(step)
+                sr = self._blocked_unavailable(step, error=probe_error)
                 step_results.append(sr)
                 self._persist(step_results_path, case, step_results)
             ended = _utcnow_iso()
@@ -597,6 +616,21 @@ class AtomicExecutor:
         evidence_token = _EvidenceView.set_evidence_index(
             evidence_index, evidence_root,
         )
+        # region_query sampling: expose the observation provider itself (the
+        # evaluator calls its query_container_rows / read_component_values)
+        # the same way the evidence view is exposed — no-op for every other
+        # expectation type; providers without the capability stay unset.
+        observations = self._observations
+        region_provider = (
+            observations
+            if callable(getattr(observations, "query_container_rows", None))
+            or callable(getattr(observations, "read_component_values", None))
+            else None
+        )
+        region_token = (
+            _RegionRowProviderView.set(region_provider)
+            if region_provider is not None else None
+        )
         try:
             assertion_started = time.monotonic()
             while True:
@@ -665,10 +699,13 @@ class AtomicExecutor:
                     snapshot_id = refresh_after_action()
                     observation = self._observations.get_snapshot(snapshot_id)
                 except BackendUnavailable as exc:
-                    error_payload = {"code": "backend_unavailable", "message": str(exc)}
+                    error_payload = {"code": getattr(exc, "code", "backend_unavailable"),
+                                     "message": str(exc)}
                     break
         finally:
             _EvidenceView.reset(evidence_token)
+            if region_token is not None:
+                _RegionRowProviderView.reset(region_token)
 
         # 8. ASSERTING -> RECORDING.
         # Step outcome follows architecture §9.4 + Blocker 3 review
@@ -716,13 +753,15 @@ class AtomicExecutor:
     # -----------------------------------------------------------------
 
     def _probe_backend(self) -> bool:
-        try:
-            self._observations.refresh()
-            return False
-        except BackendUnavailable:
-            return True
+        # Let BackendUnavailable propagate: run_case records its ORIGINAL
+        # code/message into the blocked steps instead of reporting a generic
+        # offline backend.
+        self._observations.refresh()
+        return False
 
-    def _blocked_unavailable(self, step: AtomicTestStep) -> StepResult:
+    def _blocked_unavailable(
+        self, step: AtomicTestStep, *, error: dict[str, Any] | None = None,
+    ) -> StepResult:
         now = _utcnow_iso()
         return StepResult(
             step_id=step.step_id,
@@ -733,7 +772,7 @@ class AtomicExecutor:
             duration_ms=0,
             action=None,
             expectation_results=[],
-            error={"code": "backend_unavailable"},
+            error=error or {"code": "backend_unavailable"},
             transition_expected=False,
         )
 
