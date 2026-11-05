@@ -139,16 +139,53 @@ except ImportError:  # target-local deployment
     from action_dispatcher import cache_clear as _clear_dispatch_cache
 
 
-def _clear_product_run_state() -> None:
+def _clear_product_run_state() -> dict:
+    """Run-lifetime cleanup: called on end/expiry/fault. Every step runs
+    independently (finally/stepwise) so a failing unlock can never skip
+    dropping THIS run's session, observation and binding memory; the
+    unlock error is preserved for the caller, never swallowed
+    (review 1845: an unlock RuntimeError left the old facade and its
+    binding/token maps in place)."""
     global _window_session, _product_observation
-    _clear_dispatch_cache()
-    if _backend is not None and hasattr(_backend, "unlock_window"):
-        _backend.unlock_window()
-    _window_session = None
-    _product_observation = None
+    errors: list[str] = []
+    try:
+        _clear_dispatch_cache()
+    except Exception as exc:  # noqa: BLE001 — cleanup must always continue
+        errors.append(f"dispatch cache: {type(exc).__name__}: {exc}")
+    try:
+        if _backend is not None and hasattr(_backend, "unlock_window"):
+            _backend.unlock_window()
+    except Exception as exc:  # noqa: BLE001 — preserved, never swallowed
+        errors.append(f"unlock_window: {type(exc).__name__}: {exc}")
+    finally:
+        # Binding memory is dropped even when the unlock raised — clearing
+        # this run's state is unconditional and touches no other run.
+        facade = _binding_facade_holder.get("facade")
+        if facade is not None:
+            try:
+                facade.clear_run_state()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"binding cleanup: {type(exc).__name__}: {exc}")
+        _binding_facade_holder["facade"] = None
+        if _binding_facade_holder.get("tracker") is not None:
+            try:
+                stop_result = _binding_facade_holder["tracker"].stop()
+                # 结构化失败(unhook 失败/投递失败/worker 未退)透传:
+                if isinstance(stop_result, dict) and \
+                        stop_result.get("ok") is False:
+                    errors.extend(stop_result.get("errors") or [])
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"tracker stop: {type(exc).__name__}: {exc}")
+            _binding_facade_holder["tracker"] = None
+        _window_session = None
+        _product_observation = None
+    return {"errors": errors}
 
 
-_product_policy.register_cleanup_hook(_clear_product_run_state)
+# Registration is idempotent across module reloads: each reload of this
+# module binds a NEW function object, so a plain append would stack one
+# cleanup pass per reload (N reloads → N unlock calls during teardown).
+_product_policy.replace_cleanup_hook(_clear_product_run_state)
 if _backend is not None:
     _backend = _product_policy.GuardedBackend(_backend, _backend_kind)
 _window_session = None
@@ -2475,6 +2512,87 @@ def begin_product_run(profile_id: str, digest: str, lease_seconds: float = 300) 
         # A run can begin before any connect/lock; the first role focus or
         # session.window_lock.set will establish the authoritative binding.
         pass
+    global _binding_facade_holder
+    try:
+        from .product_profiles import get_capability as _get_capability
+    except ImportError:
+        from product_profiles import get_capability as _get_capability
+    try:
+        supported = False
+        tracked_generation = 0
+        coverage = "unknown"
+        backend_decides = False  # backend 中性自报(能力交由跟踪事实)
+        if _backend is not None:
+            cap_probe = getattr(_backend, "window_sequence_capability", None)
+            structured = cap_probe() if callable(cap_probe) else None
+            has_stream_factory = callable(
+                getattr(_backend, "lifecycle_event_stream", None))
+            if isinstance(structured, dict):
+                if structured.get("decided_by") == "instance-tracker":
+                    # §8 生产协商(0346 修订):仅接受**显式协议标记**
+                    # decided_by=instance-tracker — 不从函数存在/false/
+                    # None/字符串隐推中性。显式 unsupported 始终否决;
+                    # 自报 strong(独立证据)仍走严格门(1744 不回退)。
+                    backend_decides = True
+                else:
+                    # 非 decided_by 协议:自报即权威 — 显式 false /
+                    # 弱覆盖 / 缺失 / 非法字段 → 拒绝(否决权保留,
+                    # 即使有事件源工厂)。
+                    supported = structured.get("supported") is True
+                    tracked_generation = int(structured.get("generation") or 0)
+                    coverage = str(structured.get("coverage") or "unknown")
+        # 本 run 强实例跟踪底座(§7.1/§8):backend 暴露本 run 生命周期
+        # 事件源时建立跟踪并以其结构化事实协商;无事件源 → 维持
+        # unsupported(fail closed,不硬编码、不用 polling 伪造)。
+        run_tracker = None
+        if _backend is not None:
+            stream_factory = getattr(_backend, "lifecycle_event_stream", None)
+            if callable(stream_factory):
+                try:
+                    run_tracker = _RunInstanceTracker(
+                        event_source=stream_factory(),
+                        run_token=context.run_token)
+                    run_tracker.register_with_policy(_product_policy)
+                    run_tracker.start()
+                except Exception:  # noqa: BLE001 — 订阅失败如实降级
+                    run_tracker = None
+        if run_tracker is not None:
+            tracker_cap = run_tracker.capability()
+            if backend_decides:
+                # 生产协商:本 run 跟踪事实是唯一权威(事件源/代际/覆盖
+                # 共同证明);tracker 不满足即 unsupported。
+                supported = tracker_cap.get("supported") is True
+                coverage = str(tracker_cap.get("coverage") or "unknown")
+                tracked_generation = int(tracker_cap.get("generation") or 0)
+            else:
+                # backend 自报 strong:严格门保持(1744 契约不回退)。
+                if coverage != "strong" or tracked_generation <= 0:
+                    supported = False
+                else:
+                    supported = (supported
+                                 and tracker_cap.get("supported") is True)
+                coverage = (tracker_cap.get("coverage")
+                            if not supported or coverage == "unknown"
+                            else coverage)
+                tracked_generation = max(
+                    tracked_generation,
+                    int(tracker_cap.get("generation") or 0))
+        elif not backend_decides:
+            # §8 必要条件:本 run 事件源缺失(或订阅失败)→ 不放行,
+            # backend 自报 strong 不充分(review 2112/任务契约)。
+            supported = False
+            coverage = "unavailable"
+        _binding_facade_holder["facade"] = _WindowBindingFacade(
+            session=_window_session, policy=_product_policy,
+            lease_token=context.run_token,
+            declared_windows=_binding_declared_windows(context),
+            tracked_generation=tracked_generation, coverage=coverage,
+            supported=supported,
+            installed_paths=_installed_product_paths(context),
+            tracker=run_tracker)
+        _binding_facade_holder["tracker"] = run_tracker
+    except Exception:
+        _binding_facade_holder["facade"] = None
     return json.dumps({
         "ok": True, "run_id": context.run_id, "run_token": context.run_token,
         "profile_id": context.capability.profile_id, "expires_in": lease_seconds,
@@ -2485,10 +2603,319 @@ def begin_product_run(profile_id: str, digest: str, lease_seconds: float = 300) 
 @_serialized_product_gui
 def end_product_run(run_token: str) -> str:
     try:
-        _product_policy.end_product_run(run_token)
+        cleanup_results = _product_policy.end_product_run(run_token)
     except ValueError as exc:
         return json.dumps({"ok": False, "code": str(exc).split(":", 1)[0]}, ensure_ascii=False)
-    return json.dumps({"ok": True}, ensure_ascii=False)
+    # The real cleanup result — collected through the existing token-
+    # validated hook path, not by pre-unlocking speculatively — is surfaced
+    # here: a failing OS unlock appears in cleanup_errors while the run's
+    # memory is still dropped unconditionally.
+    errors = []
+    for result in cleanup_results or []:
+        if isinstance(result, dict):
+            errors.extend(result.get("errors") or [])
+    payload = {"ok": True}
+    if errors:
+        payload["cleanup_errors"] = errors
+        payload["message"] = ("run released; one or more cleanup steps "
+                              "failed and the errors are preserved above")
+    return json.dumps(payload, ensure_ascii=False)
+
+
+# -- S3 window-binding tools (09 §7/§8) ---------------------------------------
+# The facade is per-run (it holds the lease token), so begin_product_run
+# creates it and _binding_facade returns it only while that run is active.
+# Registration is module-level: the three MCP tools exist as soon as the
+# server starts, and each call resolves the active run's facade or refuses.
+
+try:
+    from .windowing.binding import (
+        WindowBindingFacade as _WindowBindingFacade,
+        WindowBindingRefusal as _WindowBindingRefusal,
+    )
+    from .windowing.instance_tracker import (
+        RunInstanceTracker as _RunInstanceTracker,
+    )
+except ImportError:  # Target-local deployment (target/ on sys.path).
+    from windowing.binding import (
+        WindowBindingFacade as _WindowBindingFacade,
+        WindowBindingRefusal as _WindowBindingRefusal,
+    )
+    from windowing.instance_tracker import (
+        RunInstanceTracker as _RunInstanceTracker,
+    )
+
+_binding_facade_holder: dict = {"facade": None, "tracker": None}
+
+
+def _binding_facade_for_run(run_token: str) -> _WindowBindingFacade:
+    facade = _binding_facade_holder.get("facade")
+    if facade is None or facade._lease_token != run_token:
+        raise _WindowBindingRefusal(
+            "window_binding_lease_refused",
+            "no active window-binding facade under this run token")
+    # The holder alone is not proof the run is alive: after a real
+    # end_product_run (or lazy lease expiry) the stale facade must refuse
+    # every call, not keep serving BOUND state.
+    try:
+        context = _product_policy.require_product_run(run_token)
+    except ValueError as exc:
+        raise _WindowBindingRefusal(
+            "window_binding_lease_refused", str(exc)) from exc
+    if context is None:
+        raise _WindowBindingRefusal(
+            "window_binding_lease_refused",
+            "the product-run lease is no longer active under this token")
+    return facade
+
+
+def _binding_declared_windows(context) -> dict:
+    """The declared windows come from the installed product profile's
+    window roles (root/title identity per role), not from the caller.
+    Takes the active run context directly — it is also used while the
+    facade is being constructed, so it must not read the holder."""
+    if context is None:
+        return {}
+    try:
+        from .product_profiles import INSTALLED_PRODUCT_SPECS
+    except ImportError:
+        from product_profiles import INSTALLED_PRODUCT_SPECS
+    spec = INSTALLED_PRODUCT_SPECS.get(
+        (context.capability.profile_id, _backend_kind))
+    if spec is None:
+        return {}
+    declared = {}
+    for role in context.capability.window_roles:
+        identity: dict = {}
+        if role.process_names:
+            identity["processName"] = role.process_names[0]
+        if role.root_control_ids:
+            identity["rootAutomationId"] = role.root_control_ids[0]
+        if role.title_pattern:
+            identity["titleRegex"] = role.title_pattern
+        declared[role.role] = identity
+    return declared
+
+
+def _installed_product_paths(context) -> tuple:
+    """Installed application paths of the active run's product profile —
+    the authorization domain for candidate-process ownership checks."""
+    if context is None:
+        return ()
+    try:
+        from .product_profiles import INSTALLED_PRODUCT_SPECS
+    except ImportError:
+        from product_profiles import INSTALLED_PRODUCT_SPECS
+    spec = INSTALLED_PRODUCT_SPECS.get(
+        (context.capability.profile_id, _backend_kind))
+    if spec is None:
+        return ()
+    application = spec.get("application") or {}
+    return tuple(application.get(key) for key in ("path", "entry_path")
+                 if isinstance(application.get(key), str)
+                 and application.get(key))
+
+
+def server_observation_controls() -> dict:
+    """The projected control map (target_id → normalized projection) of
+    the active observation — the same map the dispatcher validates
+    target_ref fingerprints against."""
+    observation = globals().get("_product_observation")
+    if not isinstance(observation, dict):
+        return {}
+    return observation.get("controls") or {}
+
+
+@mcp.tool(name="bind_entry_window", description="Bind a golden window declaration to the running window instance under the product lease.")
+@_serialized_product_gui
+def bind_entry_window(window_id: str, identity: dict, run_token: str) -> str:
+    try:
+        facade = _binding_facade_for_run(run_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    try:
+        result = facade.bind(window_id, identity, run_token=run_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="register_window_declaration", description="Register THIS run's golden window declarations (compiled-trace W references). Each entry is validated inside the installed product's authorized window-role domain; a golden W is a reference, never an authorization.")
+@_serialized_product_gui
+def register_window_declaration(declarations_json: str, run_token: str) -> str:
+    try:
+        facade = _binding_facade_for_run(run_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    try:
+        declarations = json.loads(declarations_json)
+        if not isinstance(declarations, dict):
+            raise ValueError("window_declaration_invalid")
+        result = facade.register_golden_windows(declarations)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001 — stable codes only
+        return json.dumps({"ok": False, "code": "window_declaration_invalid",
+                           "error": str(exc)}, ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="reverify_bound_window", description="Re-verify a bound window against the live inventory without dispatching any action (§7.2: consecutive steps re-verify; caching may skip activation, never the checks).")
+@_serialized_product_gui
+def reverify_bound_window(window_id: str, binding_token: str,
+                          run_token: str) -> str:
+    try:
+        facade = _binding_facade_for_run(run_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    try:
+        result = facade.reverify(window_id, binding_token,
+                                 run_token=run_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="focus_bound_window", description="Focus, authoritative-lock and re-verify a bound window in the same lease boundary; a refused verification executes zero actions. With action_id set, dispatches through the unified dispatcher's existing gates (target_ref passed through). With observe=true and no action_id, performs the lock + a fresh observation of THIS window and returns the projected controls for building target_ref values; no action executes.")
+@_serialized_product_gui
+def focus_bound_window(window_id: str, binding_token: str, run_token: str,
+                       action_id: str | None = "gui.click",
+                       action_args: dict | None = None,
+                       request_id: str | None = None,
+                       target_ref: dict | None = None,
+                       observe: bool = False) -> str:
+    try:
+        facade = _binding_facade_for_run(run_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc),
+                           "executed": False}, ensure_ascii=False)
+    # Execution is tri-state: "never called" (executed=false) / "entered
+    # dispatch, result unknown" (executed=unknown — the callback may have
+    # had side effects before failing) / "deterministic receipt"
+    # (executed=true). Any exception after entering dispatch — a refusal
+    # or a generic error — never downgrades to zero execution and never
+    # hides its cause.
+    dispatches: list[str] = []
+    entered_dispatch: list[bool] = []
+
+    def _dispatch() -> str:
+        if observe:
+            # §7.2 step 4: refresh the observation of THIS window inside
+            # the same lease/serialization boundary after the authoritative
+            # lock. A supplied target_ref must reference THIS fresh
+            # observation; stale or foreign-window refs fail the
+            # dispatcher's existing gates with zero input — kept intact.
+            # These are PRE-DISPATCH preparation failures: they must report
+            # executed=false (review 1908: focus/observation side effects
+            # are not a dispatched business action).
+            observation = json.loads(observe_window_bundle(run_token))
+            if not observation.get("ok"):
+                raise _WindowBindingRefusal(
+                    "observation_stale",
+                    f"post-lock observation failed: "
+                    f"{observation.get('code')}")
+            if target_ref is not None and target_ref.get(
+                    "snapshot_id") != observation.get("observation_id"):
+                raise _WindowBindingRefusal(
+                    "observation_stale",
+                    "target_ref does not reference the fresh post-lock "
+                    "observation; re-observe before dispatching")
+        # entered_dispatch is recorded only at the actual dispatcher call
+        # boundary — never for the observation/preparation step above.
+        entered_dispatch.append(True)
+        receipt_json = execute_action(
+            action_id=action_id, args=action_args, request_id=request_id,
+            target_ref=target_ref, run_token=run_token)
+        dispatches.append(receipt_json)
+        return receipt_json
+
+    if action_id is None:
+        # Lock + observe only: no action_id means no dispatch — the
+        # caller receives the fresh observation and projected controls
+        # (the same projection the dispatcher validates target_ref
+        # against) to build a semantic reference for the next call.
+        observed: dict = {}
+        observed_flag: list[bool] = []
+
+        def _observe_only() -> str:
+            observed_flag.append(True)
+            observed.update(json.loads(observe_window_bundle(run_token)))
+            return json.dumps({"ok": observed.get("ok") is True})
+
+        try:
+            facade.focus_and_execute(
+                window_id, binding_token, run_token=run_token,
+                dispatch_action=_observe_only)
+        except _WindowBindingRefusal as exc:
+            return json.dumps({"ok": False, "code": exc.code,
+                               "error": str(exc), "executed": False},
+                              ensure_ascii=False)
+        if not observed_flag or not observed.get("ok"):
+            return json.dumps({"ok": False,
+                               "code": (observed.get("code")
+                                        if observed else
+                                        "observation_not_captured"),
+                               "executed": False}, ensure_ascii=False)
+        return json.dumps({**observed, "executed": False,
+                           "controls": server_observation_controls()},
+                          ensure_ascii=False)
+
+    try:
+        facade.focus_and_execute(
+            window_id, binding_token, run_token=run_token,
+            dispatch_action=_dispatch)
+    except _WindowBindingRefusal as exc:
+        if dispatches:
+            return json.dumps({"ok": False, "code": exc.code,
+                               "error": str(exc), "executed": True},
+                              ensure_ascii=False)
+        if entered_dispatch:
+            return json.dumps({"ok": False, "code": exc.code,
+                               "error": str(exc), "executed": "unknown",
+                               "message": "the action entered dispatch; "
+                                          "receipt unknown"},
+                              ensure_ascii=False)
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc),
+                           "executed": False}, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001 — structured unknown, never swallow
+        if entered_dispatch:
+            return json.dumps({"ok": False,
+                               "code": "window_binding_dispatch_unknown",
+                               "error": f"{type(exc).__name__}: {exc}",
+                               "executed": "unknown",
+                               "message": "the action entered dispatch; "
+                                          "receipt unknown"},
+                              ensure_ascii=False)
+        raise
+    # The dispatch receipt IS the result: focus_and_execute returns whatever
+    # the dispatch callback produced (the ActionReceipt JSON envelope).
+    return dispatches[-1] if dispatches else json.dumps(
+        {"ok": False, "code": "window_binding_dispatch_unavailable",
+         "executed": False}, ensure_ascii=False)
+
+
+@mcp.tool(name="window_binding_state", description="Read the current binding state for a bound window.")
+@_serialized_product_gui
+def window_binding_state(window_id: str, binding_token: str, run_token: str) -> str:
+    try:
+        facade = _binding_facade_for_run(run_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    binding = facade._bindings.get(window_id)
+    if binding is None or binding.token != binding_token:
+        return json.dumps({"ok": False, "code": "window_binding_not_found"},
+                          ensure_ascii=False)
+    return json.dumps({"ok": True, "state": binding.state,
+                       "revision": binding.revision,
+                       "generation": binding.generation},
+                      ensure_ascii=False)
 
 
 @mcp.tool(name="focus_window_role", description="Resolve, focus and lock one role from the active product profile.")

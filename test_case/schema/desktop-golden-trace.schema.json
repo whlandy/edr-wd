@@ -1,102 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://edr-wd.local/schemas/desktop-golden-trace.schema.json",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schema",
-    "status",
-    "name",
-    "sourceRecording",
-    "catalog",
-    "environment",
-    "entry",
-    "steps",
-    "cleanup"
-  ],
-  "properties": {
-    "schema": {
-      "const": "edr.desktop-golden-trace/v1"
+  "oneOf": [
+    {
+      "$ref": "#/$defs/goldenV1"
     },
-    "status": {
-      "enum": [
-        "ready",
-        "incomplete"
-      ]
+    {
+      "$ref": "#/$defs/goldenV2"
     },
-    "name": {
-      "type": "string",
-      "minLength": 1
-    },
-    "sourceRecording": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schema",
-        "sha256"
-      ],
-      "properties": {
-        "schema": {
-          "type": "string"
-        },
-        "sha256": {
-          "type": "string"
-        }
-      }
-    },
-    "catalog": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "version",
-        "digest"
-      ],
-      "properties": {
-        "version": {
-          "type": "string"
-        },
-        "digest": {
-          "type": "string"
-        }
-      }
-    },
-    "environment": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "profile": {
-          "type": "string"
-        },
-        "backend": {
-          "type": "string"
-        },
-        "application": {
-          "type": "string"
-        },
-        "target": {
-          "type": "string"
-        }
-      }
-    },
-    "entry": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "steps": {
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/graphStep"
-      }
-    },
-    "cleanup": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/step"
-      }
+    {
+      "$ref": "#/$defs/goldenV3"
     }
-  },
+  ],
   "$defs": {
     "window": {
       "type": "object",
@@ -113,6 +28,10 @@
             "string",
             "null"
           ]
+        },
+        "rootAutomationId": {
+          "type": "string",
+          "description": "Stable UIA root identity of the window (design 09 §3)."
         }
       }
     },
@@ -178,7 +97,10 @@
           "type": "array",
           "minItems": 2,
           "maxItems": 2,
-          "items": {"type": "integer", "minimum": 0}
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
         },
         "relativePoint": {
           "type": "array",
@@ -283,16 +205,48 @@
           "minProperties": 1,
           "additionalProperties": false,
           "properties": {
-            "automation_id": {"type": "string", "minLength": 1},
-            "identifier": {"type": "string", "minLength": 1},
-            "control_type": {"type": "string", "minLength": 1},
-            "text": {"type": "string", "minLength": 1}
+            "automation_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "identifier": {
+              "type": "string",
+              "minLength": 1
+            },
+            "control_type": {
+              "type": "string",
+              "minLength": 1
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "anyOf": [
-            {"required": ["automation_id"]},
-            {"required": ["identifier"]},
-            {"required": ["control_type", "text"]}
+            {
+              "required": [
+                "automation_id"
+              ]
+            },
+            {
+              "required": [
+                "identifier"
+              ]
+            },
+            {
+              "required": [
+                "control_type",
+                "text"
+              ]
+            }
           ]
+        },
+        "source": {
+          "enum": [
+            "user_assertion",
+            "native_transition"
+          ],
+          "description": "Design 09 §5: strong effects come only from user-asserted window_open verifiers; a bare native transition is temporal evidence and never upgraded."
         }
       },
       "allOf": [
@@ -319,8 +273,24 @@
           }
         },
         {
-          "if": {"properties": {"type": {"enum": ["text_contains", "window_text_contains"]}}},
-          "then": {"properties": {"expected": {"type": "string", "minLength": 1}}}
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "text_contains",
+                  "window_text_contains"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
         },
         {
           "if": {
@@ -513,6 +483,486 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "goldenV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "status",
+        "name",
+        "sourceRecording",
+        "catalog",
+        "environment",
+        "entry",
+        "steps",
+        "cleanup"
+      ],
+      "properties": {
+        "schema": {
+          "const": "edr.desktop-golden-trace/v1"
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "incomplete"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRecording": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "sha256"
+          ],
+          "properties": {
+            "schema": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          }
+        },
+        "catalog": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "digest"
+          ],
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            }
+          }
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "profile": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "application": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            }
+          }
+        },
+        "entry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steps": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/graphStep"
+          }
+        },
+        "cleanup": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        }
+      }
+    },
+    "goldenV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "status",
+        "name",
+        "sourceRecording",
+        "catalog",
+        "environment",
+        "entry",
+        "steps",
+        "cleanup"
+      ],
+      "properties": {
+        "schema": {
+          "const": "edr.desktop-golden-trace/v2"
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "incomplete"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRecording": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "sha256"
+          ],
+          "properties": {
+            "schema": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          }
+        },
+        "catalog": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "digest"
+          ],
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            }
+          }
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "profile": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "application": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            }
+          }
+        },
+        "entry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steps": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/graphStep"
+          }
+        },
+        "cleanup": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        },
+        "entryWindow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "processName",
+            "origin"
+          ],
+          "properties": {
+            "schema": {
+              "const": "edr.entry-window-identity/v1"
+            },
+            "processName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "titleRegex": {
+              "type": "string",
+              "minLength": 1
+            },
+            "rootAutomationId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "origin": {
+              "enum": [
+                "already_open",
+                "opened"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "goldenV3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "status",
+        "name",
+        "sourceRecording",
+        "catalog",
+        "environment",
+        "entry",
+        "steps",
+        "cleanup"
+      ],
+      "properties": {
+        "schema": {
+          "const": "edr.desktop-golden-trace/v3"
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "incomplete"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRecording": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "sha256"
+          ],
+          "properties": {
+            "schema": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          }
+        },
+        "catalog": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "digest"
+          ],
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            }
+          }
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "profile": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "application": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            }
+          }
+        },
+        "entry": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steps": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/graphStep"
+          }
+        },
+        "cleanup": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        },
+        "entryWindow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "processName",
+            "origin"
+          ],
+          "properties": {
+            "schema": {
+              "const": "edr.entry-window-identity/v1"
+            },
+            "processName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "titleRegex": {
+              "type": "string",
+              "minLength": 1
+            },
+            "rootAutomationId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "origin": {
+              "enum": [
+                "already_open",
+                "opened"
+              ]
+            }
+          }
+        },
+        "windowSequence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "windows",
+            "steps",
+            "cleanup"
+          ],
+          "properties": {
+            "schema": {
+              "const": "edr.window-sequence/v1"
+            },
+            "windows": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "identity",
+                  "origin"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "origin": {
+                    "enum": [
+                      "already_open",
+                      "observed_during_flow"
+                    ]
+                  },
+                  "identity": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "processName"
+                    ],
+                    "properties": {
+                      "processName": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "titleRegex": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "rootAutomationId": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "stepId",
+                  "windowId"
+                ],
+                "properties": {
+                  "stepId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "windowId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "effects": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "kind",
+                        "windowId",
+                        "verification"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "kind": {
+                          "enum": [
+                            "appeared",
+                            "absent"
+                          ]
+                        },
+                        "windowId": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "verification": {
+                          "const": "explicit_assertion"
+                        },
+                        "timeoutSeconds": {
+                          "type": "number",
+                          "exclusiveMinimum": 0,
+                          "maximum": 300
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "cleanup": {
+              "type": "array"
+            }
+          }
         }
       }
     }

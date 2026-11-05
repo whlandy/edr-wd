@@ -37,17 +37,26 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def _transition_evidence(packet: "HookPacket") -> dict[str, object]:
+def _transition_evidence(packet: "HookPacket",
+                         instance: dict[str, object] | None = None) -> dict[str, object]:
     """What a window event knows about the window it is reporting.
 
     The handle is diagnostic, never a replay selector — it identifies a window
     only within this one live session. It is kept because it is what joins a
-    transition to the control inventory captured for that same window.
+    transition to the control inventory captured for that same window. S1
+    (design 09 §4): the recorded window instance and the timeline event that
+    observed this transition ride along, so downstream consumers can correlate
+    by instance instead of re-deriving one from raw handles.
     """
     evidence: dict[str, object] = {"foregroundPid": packet.native.get("pid")}
     handle = packet.native.get("handle")
     if isinstance(handle, int) and not isinstance(handle, bool):
         evidence["handle"] = handle
+    if instance:
+        if instance.get("instanceId"):
+            evidence["windowInstanceId"] = instance["instanceId"]
+        if instance.get("timelineEventId"):
+            evidence["windowTimelineEventId"] = instance["timelineEventId"]
     return evidence
 
 
@@ -771,6 +780,47 @@ class WindowsUIACorrelator:
         # existed and how each was reached still describes the flow.
         self.window_registry: list[dict[str, object]] = []
         self._window_index: dict[object, dict[str, object]] = {}
+        # S1 (design doc 09 §4): recorded window instances and the append-only
+        # timeline of native lifecycle facts. `handle` is only a tracking key
+        # within one continuous observation; after a DESTROY the key is
+        # retired, so the same HWND reappearing is a NEW instance while a
+        # HIDE->SHOW of a live window stays the same one. The timeline keeps
+        # the native kind verbatim (shown/hidden/destroyed — never the old
+        # opened/closed projection), a unified ingress `order`, and the
+        # observed monotonicMs untouched even when events arrive out of
+        # order. Association labels name the SOURCE of a link
+        # (temporal_forward/temporal_backfill/unknown); they are never
+        # "explicit" and never claim direct causation.
+        self.window_timeline: dict[str, object] = {
+            "schema": "edr.recorded-window-timeline/v1",
+            "events": [],
+            "coverage": {"destroyEvents": "supported", "droppedEvents": 0},
+        }
+        self._instance_seq = 0
+        # handle -> instanceId; entries are REMOVED on destroy so a reused
+        # handle cannot inherit the old instance.
+        self._instance_by_handle: dict[int, str] = {}
+        # (title-key fallback) -> instanceId for windows a source cannot
+        # report a handle for. Same lifetime rules as _window_index keys.
+        self._instance_by_title: dict[tuple, str] = {}
+        # instance -> last trusted owner pid (forward identity evidence for
+        # design 09 §4.2; compared on every observation of a live handle).
+        self._instance_owner_pid: dict[str, int] = {}
+        # No-hook loss accounting: the coverage block must declare dropped
+        # window events rather than pretend continuity.
+        self._dropped_window_events = 0
+        # Review 0627 P2: event.sequence is the RAW-OUTPUT contiguous number
+        # (advanced only when an event is actually produced), NOT the receive
+        # order. The timeline's ingressSequence must be a true receive order:
+        # one increment per correlate() invocation, whether or not the packet
+        # produces an event (SHOW/HIDE refused as unbound still count).
+        self._ingress_counter = 0
+        self._current_ingress = None
+        #: Whether this platform's hook delivers native destroy facts. The
+        #: Windows subclass value is backed by the WinEvent DESTROY hook;
+        #: subclasses whose hook contract does not must override (design 09
+        #: §4.1 -- coverage may never claim continuity unproven).
+        self.destroy_events_capability = "supported"
         # Why recent input was not recorded, with the window it resolved to.
         # A bare count says a capture was short; it never says whether the
         # recorder misjudged which window the user was in.
@@ -1145,13 +1195,26 @@ class WindowsUIACorrelator:
                 self._derived_scope_handles.add(handle)
             elif isinstance(title, str) and title:
                 self._derived_scope_titles.add(title)
-            self._register_window(
-                title=title if isinstance(title, str) else "",
-                process_name=str(window.get("processName") or ""),
+            # S1 (design 09 §4.2): the trusted first observation of an
+            # already-open window establishes its instance HERE — manifest
+            # entry, initial_observed timeline fact and inventory request all
+            # name the same instance. Seeding must not leave the manifest
+            # instance-less while a later input event fabricates one.
+            process_name = str(window.get("processName") or "")
+            title_text = title if isinstance(title, str) else ""
+            instance_id, _changed = self._instance_for_new_observation(
                 handle=handle if isinstance(handle, int) else None,
-                pid=window.get("pid"),
-                origin="already_open",
-            )
+                title=title_text, process_name=process_name,
+                pid=window.get("pid"))
+            # Seed happens before any packet: no ingress sequence exists, and
+            # the observation time is the REAL monotonic clock at seed time
+            # (never a fabricated 0 -- review 0607 evidence-accounting note).
+            self._declare_instance_observation(
+                instance_id=instance_id, kind="initial_observed",
+                source="initial_inventory", handle=handle,
+                title=title_text, process_name=process_name,
+                pid=window.get("pid"), origin="already_open",
+                monotonic_ms=int(time.monotonic() * 1000))
         return tuple(seeded)
 
     def _request_inventory(
@@ -1160,6 +1223,7 @@ class WindowsUIACorrelator:
         *,
         reason: str,
         monotonic_ms: int | None = None,
+        instance_id: str | None = None,
     ) -> None:
         """Ask for a control walk of this window. Cheap, and never raises."""
         if self._inventory is None or not window:
@@ -1167,6 +1231,16 @@ class WindowsUIACorrelator:
         request = getattr(self._inventory, "request", None)
         if not callable(request):
             return
+        authority = getattr(self._inventory, "instance_authority", None)
+        if authority is None:
+            # The correlator owns the authoritative instance index: expose it
+            # so the inventory can discard walks that raced a generation
+            # change (review 0517 P1-2).
+            try:
+                self._inventory.instance_authority = (
+                    lambda handle: self._instance_by_handle.get(handle))
+            except Exception:
+                pass
         try:
             request(
                 handle=window.get("handle"),
@@ -1174,11 +1248,170 @@ class WindowsUIACorrelator:
                 process_name=str(window.get("processName") or ""),
                 monotonic_ms=monotonic_ms,
                 reason=reason,
+                instance_id=instance_id,
             )
         except Exception:
             # Material capture is additive: failing to collect it must never
             # cost the step that was actually recorded.
             pass
+
+    def _timeline_append(
+        self,
+        *,
+        kind: str,
+        source: str,
+        instance_id: str | None,
+        monotonic_ms: int | None,
+        association: str | None = None,
+        associated_action_causal_id: str | None = None,
+        ingress_sequence: int | None = "auto",
+    ) -> dict[str, object]:
+        """Append one native lifecycle fact to the window timeline.
+
+        `order` is the unified ingress order across ALL timeline events;
+        `ingressSequence` additionally records the correlation sequence the
+        packet arrived under, tying window facts and business events to one
+        receive order. `monotonicMs` is the observed time kept verbatim even
+        when packets arrive out of order. Never projects kinds and never
+        claims "explicit" (design 09 §4.3).
+        """
+        events = self.window_timeline["events"]
+        assert isinstance(events, list)
+        order = len(events) + 1
+        entry: dict[str, object] = {
+            "id": f"WE{order}",
+            "order": order,
+            "monotonicMs": int(monotonic_ms) if monotonic_ms is not None else 0,
+            "kind": kind,
+            "source": source,
+        }
+        if ingress_sequence == "auto":
+            ingress_sequence = self._current_ingress
+        if ingress_sequence is not None:
+            entry["ingressSequence"] = int(ingress_sequence)
+        if instance_id is not None:
+            entry["instanceId"] = instance_id
+        if associated_action_causal_id is not None:
+            entry["associatedActionCausalId"] = associated_action_causal_id
+            entry["association"] = association or "unknown"
+        events.append(entry)
+        return entry
+
+    def _instance_for_new_observation(
+        self, *, handle: int | None, title: str, process_name: str,
+        pid: object = None,
+    ) -> tuple[str, bool]:
+        """The instance observing (re)solves to, creating one when needed.
+
+        Returns ``(instance_id, identity_changed)``. A live handle keeps its
+        instance (HIDE -> SHOW is the same window) ONLY while the trusted
+        owner evidence stays the same: a pid change on the same HWND is the
+        forward identity evidence design 09 §4.2 requires -- new instance,
+        old history retained, no DESTROY dependency. A handle absent from
+        the index (after DESTROY, or never seen) is a new instance even when
+        the handle value is reused. Handle-less windows fall back to the
+        (title, process) key with the same rules.
+        """
+        if handle is not None:
+            instance_id = self._instance_by_handle.get(handle)
+            if instance_id is None:
+                self._instance_seq += 1
+                instance_id = f"RI-{self._instance_seq:04d}"
+                self._instance_by_handle[handle] = instance_id
+                if isinstance(pid, int) and not isinstance(pid, bool):
+                    self._instance_owner_pid[instance_id] = pid
+                return instance_id, False
+            known_pid = self._instance_owner_pid.get(instance_id)
+            new_pid = int(pid) if isinstance(pid, int) and not isinstance(pid, bool) else None
+            if known_pid is not None and new_pid is not None and new_pid != known_pid:
+                # Forward owner evidence: same HWND, different process
+                # identity. Retire the old binding (history retained in the
+                # manifest) and issue a NEW instance.
+                self._instance_seq += 1
+                new_id = f"RI-{self._instance_seq:04d}"
+                self._instance_by_handle[handle] = new_id
+                self._instance_owner_pid[new_id] = new_pid
+                return new_id, True
+            if new_pid is not None:
+                self._instance_owner_pid[instance_id] = new_pid
+            return instance_id, False
+        key = ("title", process_name, title)
+        instance_id = self._instance_by_title.get(key)
+        if instance_id is None:
+            self._instance_seq += 1
+            instance_id = f"RI-{self._instance_seq:04d}"
+            self._instance_by_title[key] = instance_id
+            return instance_id, False
+        return instance_id, False
+
+    def _declare_instance_observation(
+        self, *, instance_id: str, kind: str, source: str,
+        handle: int | None, title: str, process_name: str,
+        pid: object = None, origin: str = "observed_during_flow",
+        monotonic_ms: int | None = None, association: str | None = None,
+        associated_action_causal_id: str | None = None,
+        ingress_sequence: int | str | None = "auto",
+    ) -> dict[str, object]:
+        """Declare ONE observation atomically: a manifest entry for the
+        instance (if none exists) plus the timeline fact (design 09 §4.2
+        invariant -- every instanceId a timeline fact references must have a
+        manifest declaration, at EVERY entry: seed, show, hide, input). The
+        manifest origin records how the instance was FIRST observed; the
+        timeline fact keeps the native kind/source of THIS observation."""
+        declared = any(
+            w.get("instanceId") == instance_id
+            for w in self.window_registry)
+        if not declared:
+            self._register_window(
+                title=title, process_name=process_name, handle=handle,
+                pid=pid, origin=origin, opened_by=associated_action_causal_id,
+                appeared_ms=monotonic_ms,
+            )
+        return self._timeline_append(
+            kind=kind, source=source, instance_id=instance_id,
+            monotonic_ms=monotonic_ms, association=association,
+            associated_action_causal_id=associated_action_causal_id,
+            ingress_sequence=ingress_sequence)
+
+    def _retire_instance_keys(self, *, handle: int | None, title: str,
+                              process_name: str) -> None:
+        """DESTROY retires the tracking key so handle reuse yields a new
+        instance. The old instance's history stays in the timeline."""
+        if handle is not None:
+            self._instance_by_handle.pop(handle, None)
+        else:
+            self._instance_by_title.pop(("title", process_name, title), None)
+
+    def note_hook_loss(self, dropped_window_events: int) -> None:
+        """Record window events the platform hook could not attribute.
+
+        The WinEvent driver counts DESTROYs for windows it never saw shown;
+        those losses must reach the final coverage block instead of being
+        silently dropped at the hook layer (review 0457 P1-2c).
+        """
+        self._dropped_window_events += int(dropped_window_events or 0)
+
+    def refresh_timeline_coverage(self, *, dropped_packets: int = 0) -> dict:
+        """Finalize the coverage block with the losses actually observed.
+
+        destroyEvents is declared from the platform hook's own capability;
+        droppedEvents counts packets the capture queue overflowed plus window
+        events the hook could not attribute (design 09 §4.1: a coverage
+        statement may never claim continuity the recorder cannot prove).
+        """
+        coverage = self.window_timeline.get("coverage")
+        if not isinstance(coverage, dict):
+            coverage = {}
+            self.window_timeline["coverage"] = coverage
+        # The capability claim reflects what THIS correlator's platform hook
+        # actually delivers. The Windows WinEvent hook observes
+        # DESTROY natively; the macOS AX correlator inherits this class but
+        # its hook contract does not (yet) deliver destroy facts, so it
+        # overrides the capability to "unknown" rather than endorsing
+        # continuity it cannot prove (review 0457: capability by backend).
+        coverage["destroyEvents"] = self.destroy_events_capability
+        coverage["droppedEvents"] = int(self._dropped_window_events) + int(dropped_packets)
+        return dict(coverage)
 
     def _register_window(
         self,
@@ -1193,8 +1426,13 @@ class WindowsUIACorrelator:
     ) -> None:
         """Record a window of the application, keyed by handle when there is one."""
         key = handle if handle is not None else ("title", process_name, title)
+        current_instance = (
+            self._instance_by_handle.get(handle)
+            if handle is not None
+            else self._instance_by_title.get(("title", process_name, title)))
         existing = self._window_index.get(key)
-        if existing is not None:
+        if existing is not None and existing.get("instanceId") == current_instance:
+            # Same recorded instance re-observed: refresh its lifecycle state.
             if existing.get("closed") and origin == "opened":
                 # Re-opened: the flow reached this page again.
                 existing["closed"] = False
@@ -1207,6 +1445,11 @@ class WindowsUIACorrelator:
                 # nothing" for the rest of the recording.
                 existing["openedBy"] = opened_by
             return
+        # A different (or retired) instance on this key — DESTROY followed by
+        # handle reuse — needs its OWN manifest declaration. The old entry
+        # stays untouched: its history (how that instance was reached, when it
+        # closed) is evidence about a window that no longer exists, and the
+        # new instance must not inherit its identity or backrefs.
         entry: dict[str, object] = {
             "title": title,
             "processName": process_name,
@@ -1224,12 +1467,28 @@ class WindowsUIACorrelator:
         # the registry a tree rather than a flat list. Always present, so a
         # cause learned later has somewhere to go.
         entry["openedBy"] = opened_by
+        # S1: the manifest entry names the same recorded instance the
+        # timeline just observed, so downstream consumers (snapshot
+        # provenance, compiler correlation) bind by instance, not handle.
+        instance_id = (
+            self._instance_by_handle.get(handle)
+            if handle is not None
+            else self._instance_by_title.get(("title", process_name, title)))
+        if instance_id is not None:
+            entry["instanceId"] = instance_id
+        # S1 review 0547: NO title aliasing. The native handle is the
+        # authoritative association key; aliasing (process,title) to the
+        # first instance let a distinct HWND borrow a sibling's identity and
+        # resurrected retired instances. A handle-less input resolves via
+        # _with_window's ambiguity rules instead (single live candidate =>
+        # that instance; multiple/stale => honest gap, no RI).
         self._window_index[key] = entry
         self.window_registry.append(entry)
         self._request_inventory(
             {"handle": handle, "title": title, "processName": process_name},
             reason="window_changed",
             monotonic_ms=appeared_ms,
+            instance_id=entry.get("instanceId"),
         )
         if opened_by is None and appeared_ms is not None:
             # A window opens on mouse-down while the click that caused it is
@@ -1390,6 +1649,7 @@ class WindowsUIACorrelator:
         kind: str,
         process_name: object,
         title: object,
+        instance_evidence: dict[str, object] | None = None,
     ) -> RawCaptureEvent:
         """Record a transition no action plausibly explains, without a cause.
 
@@ -1410,7 +1670,7 @@ class WindowsUIACorrelator:
             type="window_transition",
             scope=scope,
             input=event_input,
-            evidence=_transition_evidence(packet),
+            evidence=_transition_evidence(packet, instance_evidence),
             causal_id=None,
         )
 
@@ -1429,6 +1689,17 @@ class WindowsUIACorrelator:
         transition this recorder persists is causally bound by construction.
         """
         kind = packet.native.get("kind")
+        native_kind = packet.native.get("nativeKind")
+        # Native kinds ride verbatim from the platform hook; legacy sources
+        # (and older tests) still speak the opened/closed projection. Accept
+        # both spellings of the same fact.
+        native_kind = {"show": "shown", "hide": "hidden", "destroy": "destroyed"}.get(
+            native_kind or kind, native_kind)
+        if kind not in {"opened", "closed"}:
+            # A native-kind packet without the legacy projection still carries
+            # its lifecycle meaning: show->opened, hide/destroy->closed.
+            kind = {"shown": "opened", "hidden": "closed",
+                    "destroyed": "closed"}.get(native_kind, kind)
         if kind not in {"opened", "closed"}:
             return None
         process_name = packet.native.get("processName")
@@ -1440,6 +1711,98 @@ class WindowsUIACorrelator:
         # is how a recording ends up empty.
         title = packet.native.get("title")
         handle = packet.native.get("handle")
+        process_name = str(process_name or scope.process_name)
+        title_text = title if isinstance(title, str) else ""
+        handle_value = handle if isinstance(handle, int) else None
+        # S1 timeline: the native fact lands before any association work, so
+        # even unbound transitions keep their lifecycle evidence. HIDE does
+        # NOT retire the instance; DESTROY does (handle reuse afterwards is a
+        # new instance). A SHOW re-solving to a live handle is the SAME
+        # instance's new visible phase, never a new instance.
+        if native_kind is None:
+            # Legacy packet without a native kind: derive it from the
+            # projection. opened on a live handle = shown; closed is recorded
+            # as hidden unless a destroy fact arrives separately.
+            native_kind = "shown" if kind == "opened" else "hidden"
+        if native_kind == "destroyed":
+            instance_id = self._instance_by_handle.get(handle_value) if handle_value is not None \
+                else self._instance_by_title.get(("title", process_name, title_text))
+            timeline_entry = self._timeline_append(
+                kind="destroyed", source="native_destroy",
+                instance_id=instance_id, monotonic_ms=packet.monotonic_ms,
+                ingress_sequence="auto")
+            self._retire_instance_keys(handle=handle_value, title=title_text,
+                                       process_name=process_name)
+        else:
+            # Owner-aware resolution (design 09 §4.2): a live handle keeps
+            # its instance only while the trusted pid stays the same; a pid
+            # change is forward identity evidence -> NEW instance plus an
+            # identity_changed fact on the OLD instance. A HIDE for an
+            # instance the index has never seen (SHOW lost to queue
+            # overflow) is declared HERE, atomically with its manifest
+            # entry -- collection must survive the lost SHOW, and the fact
+            # keeps the real native_hide source (never mislabeled).
+            if native_kind == "hidden" and handle_value is not None \
+                    and handle_value not in self._instance_by_handle:
+                instance_id = self._instance_for_new_observation(
+                    handle=handle_value, title=title_text,
+                    process_name=process_name,
+                    pid=packet.native.get("pid"))[0]
+                timeline_entry = self._declare_instance_observation(
+                    instance_id=instance_id, kind="hidden",
+                    source="native_hide", handle=handle_value,
+                    title=title_text, process_name=process_name,
+                    pid=packet.native.get("pid"),
+                    origin="observed_during_flow",
+                    monotonic_ms=packet.monotonic_ms)
+            else:
+                existed_before = (
+                    handle_value in self._instance_by_handle
+                    if handle_value is not None
+                    else ("title", process_name,
+                          title_text) in self._instance_by_title)
+                instance_id, identity_changed = (
+                    self._instance_for_new_observation(
+                        handle=handle_value, title=title_text,
+                        process_name=process_name,
+                        pid=packet.native.get("pid")))
+                if native_kind == "hidden":
+                    timeline_kind = "hidden"
+                elif identity_changed:
+                    # The old instance's last observable state: its identity
+                    # changed under the same HWND. History retained.
+                    self._timeline_append(
+                        kind="identity_changed",
+                        source="native_identity_change",
+                        instance_id=instance_id,
+                        monotonic_ms=packet.monotonic_ms,
+                        ingress_sequence="auto")
+                    timeline_kind = "created"
+                else:
+                    timeline_kind = "shown" if existed_before else "created"
+                association = None
+                cause = None
+                if kind == "opened" and self._last_action_causal_id is not None:
+                    # Forward attribution: the most recent action MAY have
+                    # caused this; a source label, never explicit, never a
+                    # claim of direct causation (design 09 §4.3).
+                    association = "temporal_forward"
+                    cause = self._last_action_causal_id
+                fact_source = ("native_hide" if native_kind == "hidden"
+                               else "native_show")
+                timeline_entry = self._declare_instance_observation(
+                    instance_id=instance_id, kind=timeline_kind,
+                    source=fact_source, handle=handle_value,
+                    title=title_text, process_name=process_name,
+                    pid=packet.native.get("pid"),
+                    origin="opened",
+                    monotonic_ms=packet.monotonic_ms,
+                    association=association,
+                    associated_action_causal_id=cause)
+        instance_evidence = {
+            "instanceId": instance_id,
+            "timelineEventId": timeline_entry["id"] if timeline_entry else None,
+        }
         if kind == "opened":
             self._register_window(
                 title=title if isinstance(title, str) else "",
@@ -1486,7 +1849,8 @@ class WindowsUIACorrelator:
             # Far enough out that attributing it to that action would be a
             # guess. Still recorded, without a cause, so the compiler surfaces
             # it as an unbound transition instead of it vanishing.
-            return self._unbound_transition(packet, scope, sequence, kind, process_name, title)
+            return self._unbound_transition(packet, scope, sequence, kind,
+                                            process_name, title, instance_evidence)
         event_input: dict[str, object] = {
             "kind": kind,
             "processName": str(process_name or scope.process_name),
@@ -1503,7 +1867,7 @@ class WindowsUIACorrelator:
             type="window_transition",
             scope=scope,
             input=event_input,
-            evidence=_transition_evidence(packet),
+            evidence=_transition_evidence(packet, instance_evidence),
             causal_id=self._last_action_causal_id,
         )
 
@@ -1511,8 +1875,7 @@ class WindowsUIACorrelator:
     def _window_root(event: RawCaptureEvent) -> str | None:
         return window_root_identity(event.observed_target)
 
-    @classmethod
-    def _with_window(cls, event: RawCaptureEvent, window: Mapping[str, object]) -> RawCaptureEvent:
+    def _with_window(self, event: RawCaptureEvent, window: Mapping[str, object]) -> RawCaptureEvent:
         """Stamp the event with the window it happened in."""
         # Pointer actions may already carry the authoritative mouse-down
         # window. Do not replace it with the possibly post-navigation window
@@ -1534,9 +1897,91 @@ class WindowsUIACorrelator:
         handle = window.get("handle")
         if isinstance(handle, int):
             stamp["handle"] = handle
-        root = cls._window_root(event)
+        root = self._window_root(event)
         if root:
             stamp["rootAutomationId"] = root
+        # S1: the business event names its recorded instance, so downstream
+        # correlation binds by instance rather than re-deriving one from raw
+        # handles (review 0417). The native handle is the authoritative key
+        # (review 0547): an input observation must VERIFY the trusted owner
+        # even when the handle already maps to an instance (review 0627: a
+        # pid change on the same HWND is forward identity evidence -- new
+        # instance, identity_changed fact, manifest registration through the
+        # SAME atomic declaration as every other entry). A handle NOT in the
+        # index is a NEW observation (never aliased to a same-titled
+        # sibling). Without a handle, attribution needs a UNAMBIGUOUS live
+        # candidate: multiple same-title instances must stay an honest gap,
+        # never "first wins".
+        input_pid = window.get("pid")
+        instance_id = (
+            self._instance_by_handle.get(handle)
+            if isinstance(handle, int)
+            else None)
+        if instance_id is not None and isinstance(handle, int):
+            # Owner verification for an already-mapped handle.
+            instance_id, identity_changed = self._instance_for_new_observation(
+                handle=handle, title=title,
+                process_name=stamp["processName"], pid=input_pid)
+            if identity_changed:
+                self._declare_instance_observation(
+                    instance_id=instance_id, kind="identity_changed",
+                    source="input_observation", handle=handle,
+                    title=title, process_name=stamp["processName"],
+                    pid=input_pid, origin="observed_during_flow",
+                    monotonic_ms=event.monotonic_ms,
+                    association="unknown",
+                    ingress_sequence="auto")
+        if instance_id is None and not isinstance(handle, int):
+            # Candidates come from the MANIFEST (the declared instances),
+            # filtered to live ones -- a retired instance's entry may still
+            # be there, so liveness is decided by the authoritative handle
+            # index (review 0547-3: a destroyed RI must not win).
+            live_handles = set(self._instance_by_handle.values())
+            candidates = {
+                w.get("instanceId") for w in self.window_registry
+                if w.get("instanceId")
+                and str(w.get("processName") or "") == stamp["processName"]
+                and w.get("title") == title}
+            live = candidates & live_handles
+            if len(live) == 1:
+                instance_id = next(iter(live))
+            elif len(live) > 1:
+                instance_id = None  # ambiguous: honest gap, no RI stamp
+        ambiguous_no_handle = (
+            instance_id is None and not isinstance(handle, int)
+            and title is not None and len({
+                w.get("instanceId") for w in self.window_registry
+                if w.get("instanceId")
+                and str(w.get("processName") or "") == stamp["processName"]
+                and w.get("title") == title}) > 0)
+        if instance_id is None and not ambiguous_no_handle and (
+                isinstance(handle, int) or title):
+            # First observation of this window through the INPUT path (a
+            # window the seed inventory missed or whose SHOW was lost). The
+            # instance must be declared here -- uniformly across all first
+            # observation entries: manifest entry + timeline fact + this
+            # reference. The lifecycle BEFORE this observation was not seen,
+            # so the source label says so honestly: input_observation, kind
+            # observed, association unknown. Never "initial_inventory" (this
+            # is not an inventory observation) and no invented created/opened
+            # cause (review 0517 P1-3 -- numbering must not fabricate
+            # lifecycle evidence).
+            instance_id, _changed = self._instance_for_new_observation(
+                handle=handle if isinstance(handle, int) else None,
+                title=title, process_name=stamp["processName"],
+                pid=input_pid)
+            # Same atomic declaration as every other entry, carrying THIS
+            # input observation's source and true receive sequence.
+            self._declare_instance_observation(
+                instance_id=instance_id, kind="observed",
+                source="input_observation", handle=handle,
+                title=title, process_name=stamp["processName"],
+                pid=input_pid, origin="observed_during_flow",
+                monotonic_ms=event.monotonic_ms,
+                association="unknown",
+                ingress_sequence="auto")
+        if instance_id:
+            stamp["instanceId"] = instance_id
         evidence["window"] = stamp
         return dataclasses.replace(event, evidence=evidence)
 
@@ -1561,6 +2006,10 @@ class WindowsUIACorrelator:
             except Exception as _e:
                 self.scope_root_probe["resolverPidBelongs"] = f"err:{_e}"
         self._rej_noted_this_call = False
+        # True receive order for window-timeline facts: independent of the
+        # raw output sequence (which only advances on produced events).
+        self._ingress_counter += 1
+        self._current_ingress = self._ingress_counter
         _pb = self._pending_press is not None
         _rej0 = len(self.rejections)
         _rec = self._lands_on_recorder_ui(packet)
@@ -1631,10 +2080,13 @@ class WindowsUIACorrelator:
         if stamped:
             # The page as it stood around this step. Debounced by the
             # inventory, so a burst of typing costs one walk, not one each.
+            fg_handle = foreground.get("handle")
             self._request_inventory(
                 foreground,
                 reason="step",
                 monotonic_ms=stamped[0].monotonic_ms,
+                instance_id=(self._instance_by_handle.get(fg_handle)
+                             if isinstance(fg_handle, int) else None),
             )
         for event in stamped:
             if event.type in ACTION_EVENT_TYPES:
@@ -2082,6 +2534,11 @@ class WindowsWinEventDriver:
         self._hook = None
         self._callback = None
         self._titles: dict[int, tuple[str, str, int]] = {}
+        # S1: window events this hook could not attribute (e.g. a DESTROY for
+        # a window whose SHOW this hook never observed). Counted here so the
+        # final coverage block declares the loss instead of claiming
+        # continuity; drained by the session via the capture source.
+        self.dropped_window_events = 0
 
     @staticmethod
     def _matches(actual: object, expected: str) -> bool:
@@ -2148,9 +2605,34 @@ class WindowsWinEventDriver:
                     return
                 if id_object != self.OBJID_WINDOW or id_child != 0:
                     return
+                handle = int(hwnd)
+                if event == self.EVENT_OBJECT_DESTROY:
+                    # DESTROY is checked BEFORE the ancestor probe: the
+                    # window is already gone, so GetAncestor may return 0 and
+                    # querying it here would swallow every destroy fact.
+                    # Identity comes from the remembered SHOW-time record --
+                    # never from re-querying the dead HWND.
+                    remembered = self._titles.pop(handle, None)
+                    if remembered is None:
+                        self.dropped_window_events += 1
+                        return
+                    title, name, resolved_pid = remembered
+                    self._emit(HookPacket(
+                        kind="window_transition",
+                        monotonic_ms=int(time.monotonic() * 1000),
+                        wall_time=_utc_now(),
+                        native={
+                            "kind": "closed",
+                            "nativeKind": "destroyed",
+                            "processName": name,
+                            "title": title,
+                            "pid": resolved_pid,
+                            "handle": handle,
+                        },
+                    ))
+                    return
                 if user32.GetAncestor(hwnd, self.GA_ROOT) != hwnd:
                     return
-                handle = int(hwnd)
                 if event == self.EVENT_OBJECT_SHOW:
                     pid = wintypes.DWORD()
                     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -2160,18 +2642,24 @@ class WindowsWinEventDriver:
                     title = window_title(hwnd)
                     self._titles[handle] = (title, name, int(pid.value))
                     kind, resolved_pid = "opened", int(pid.value)
+                    native_kind = "shown"
                 else:
-                    remembered = self._titles.pop(handle, None)
+                    # HIDE: keep the identity -- a hidden window can be shown
+                    # again, and popping here would lose the record a later
+                    # DESTROY needs.
+                    remembered = self._titles.get(handle)
                     if remembered is None:
                         return
                     title, name, resolved_pid = remembered
                     kind = "closed"
+                    native_kind = "hidden"
                 self._emit(HookPacket(
                     kind="window_transition",
                     monotonic_ms=int(time.monotonic() * 1000),
                     wall_time=_utc_now(),
                     native={
                         "kind": kind,
+                        "nativeKind": native_kind,
                         "processName": name,
                         "title": title,
                         "pid": resolved_pid,

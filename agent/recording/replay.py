@@ -405,10 +405,7 @@ def _verifier_expectation(step: RecordedStep, verifier: Mapping[str, Any]) -> Ex
         )
     if kind == "window_open":
         exists = expected
-        window_match = {
-            "process_name": (step.selector.window.get("processName") if step.selector else None),
-            "title_regex": (step.selector.window.get("titleRegex") if step.selector else None),
-        }
+        overrides: dict[str, Any] = {}
         if isinstance(expected, Mapping):
             exists = expected.get("exists", True)
             overrides = {
@@ -416,7 +413,26 @@ def _verifier_expectation(step: RecordedStep, verifier: Mapping[str, Any]) -> Ex
                 "title": expected.get("title"),
                 "title_regex": expected.get("titleRegex"),
             }
-            window_match.update({key: value for key, value in overrides.items() if value is not None})
+            overrides = {key: value for key, value in overrides.items()
+                         if value is not None}
+        if overrides.get("title") or overrides.get("title_regex"):
+            # 显式目标(1356):expected.title/titleRegex 指定被断言
+            # 窗口时,目标身份由 expected 决定 — 不残留源步骤窗口的
+            # 互斥标题约束(selector window 的 title/titleRegex 是
+            # 录制动作所在窗口,不是被断言窗口;两者 AND 会互斥)。
+            # processName 显式覆盖保留;expected 未给 process_name 时
+            # 继承源步骤窗口进程(同一产品的窗口断言通常同进程)。
+            window_match = {"process_name": overrides.get(
+                "process_name")
+                or (step.selector.window.get("processName") if step.selector else None)}
+            window_match.update(overrides)
+        else:
+            # 未指定目标的 legacy 本窗行为:selector 自身约束保留。
+            window_match = {
+                "process_name": (step.selector.window.get("processName") if step.selector else None),
+                "title_regex": (step.selector.window.get("titleRegex") if step.selector else None),
+            }
+            window_match.update(overrides)
         return Expectation(
             type="window_open" if exists else "window_closed",
             value={key: value for key, value in window_match.items() if value},
@@ -430,6 +446,7 @@ def _verifier_expectation(step: RecordedStep, verifier: Mapping[str, Any]) -> Ex
 
 
 def golden_to_test_case(golden: GoldenTrace) -> TestCase:
+    _refuse_v3_execution(golden)
     steps = [_recorded_to_atomic(recorded, step_no) for step_no, recorded in enumerate(golden.steps, start=1)]
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", golden.name).strip("-") or "recorded"
     return TestCase(case_id=f"GOLDEN-{safe_id}", title=golden.name, steps=tuple(steps))
@@ -1115,6 +1132,26 @@ def _release_product_run_lease(end_product_run: Callable[[], None]) -> None:
             _time.sleep(interval)
 
 
+
+def _refuse_v3_execution(golden: GoldenTrace) -> None:
+    """Public-consumption boundary for golden v3 (design doc 09 §9).
+
+    Every consumer that turns a golden into target actions or test steps
+    must refuse BEFORE any target side effect: the window-binding and
+    effects slices (S3/S4) are not implemented, and dropping windowSequence
+    to run raw selectors is exactly the silent-contract-loss the design
+    forbids.
+    """
+    if getattr(golden, "window_sequence", None) is not None:
+        from .models import RecordingModelError
+        raise RecordingModelError(
+            "window_sequence_execution_unsupported",
+            "golden v3 replay requires the window-binding and effects "
+            "capabilities (design slices S3/S4), which are not implemented",
+            path="replay.windowSequence",
+        )
+
+
 def replay_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRunResult:
     """Ensure target GUI lease is released even when replay raises.
 
@@ -1126,6 +1163,8 @@ def replay_golden_trace(target: ReplayRuntime, golden: GoldenTrace) -> ReplayRun
     before re-raising; a trace that already terminated is left untouched, and
     a terminal-append failure never masks the original error.
     """
+    _refuse_v3_execution(golden)
+
     try:
         return _run_golden_trace(target, golden)
     except BaseException as exc:

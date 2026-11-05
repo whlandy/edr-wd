@@ -12,6 +12,23 @@ import re
 from typing import Any, Mapping
 
 RAW_RECORDING_SCHEMA = "edr.desktop-recording/v1"
+#: v2 adds recorded window instances (instanceId) and the append-only
+#: windowTimeline (design doc 09 §4). New recorders write v2; new readers
+#: accept both v1 (no timeline, nothing fabricated) and v2.
+RAW_RECORDING_SCHEMA_V2 = "edr.desktop-recording/v2"
+RECORDED_WINDOW_TIMELINE_SCHEMA = "edr.recorded-window-timeline/v1"
+#: Timeline `kind` values are the native facts (design 09 §4.1): never the
+#: old manifest's opened/closed projection.
+TIMELINE_KINDS = {"initial_observed", "created", "shown", "hidden",
+                  "destroyed", "identity_changed", "lost", "observed"}
+TIMELINE_SOURCES = {"initial_inventory", "native_show", "native_hide",
+                    "native_destroy", "native_identity_change", "poller",
+                    "tracking_loss", "coverage", "input_observation"}
+#: Association labels (design 09 §4.3): the SOURCE of the link, never a
+#: confidence. "explicit" is reserved for user-confirmed binding assertions
+#: and is never auto-filled from temporal proximity or legacy openedBy.
+TIMELINE_ASSOCIATIONS = {"explicit", "temporal_forward", "temporal_backfill",
+                         "unknown"}
 
 #: Raw event types that compile into one executable action step.  A window
 #: transition or an explicit verifier binds to the most recent event of one of
@@ -125,9 +142,21 @@ def _validate_evidence(value: Mapping[str, Any]) -> None:
         {
             "foregroundPid", "doubleClickIntervalMs", "beforeCapture",
             "capture", "captureError", "window", "handle",
+            # S1 (design 09 §4): the recorded-window instance and the timeline
+            # event that observed this transition. Recording-session-scoped
+            # references, like evidence.window.handle — diagnostic joins, not
+            # replay selectors.
+            "windowInstanceId", "windowTimelineEventId",
         },
         "event.evidence",
     )
+    for ref_key in ("windowInstanceId", "windowTimelineEventId"):
+        ref = data.get(ref_key)
+        if ref is not None and (not isinstance(ref, str) or not ref):
+            raise RecordingModelError(
+                "type_error", f"evidence.{ref_key} must be a non-empty string or absent",
+                path=f"event.evidence.{ref_key}",
+            )
     # A window event names the window it reports, and that name is what joins
     # the transition to the control inventory captured for the same window.
     # Session-local, like `window.handle`, and diagnostic for the same reason.
@@ -149,9 +178,18 @@ def _validate_evidence(value: Mapping[str, Any]) -> None:
         # of which physical window produced the step, never a replay
         # selector field.
         fields = _strict(
-            window, {"title", "processName", "handle", "rootAutomationId"},
+            window, {"title", "processName", "handle", "rootAutomationId",
+                     "instanceId"},
             "event.evidence.window",
         )
+        if "instanceId" in fields and (
+                not isinstance(fields["instanceId"], str)
+                or not fields["instanceId"]):
+            raise RecordingModelError(
+                "type_error",
+                "evidence.window.instanceId must be a non-empty string",
+                path="event.evidence.window.instanceId",
+            )
         for key in ("title", "processName"):
             if key in fields and not isinstance(fields[key], str):
                 raise RecordingModelError(
@@ -525,6 +563,167 @@ class RawCaptureEvent:
         return out
 
 
+def _validate_window_timeline(timeline: Mapping[str, Any],
+                              windows: tuple) -> None:
+    """Strict validation for the v2 windowTimeline (design doc 09 §4).
+
+    The timeline is the append-only factual record of window lifecycle
+    observations: unified ingress `order`, observed `monotonicMs` kept
+    verbatim, native kinds (never the old opened/closed projection), an
+    association label that is a SOURCE (never "explicit" unless a user
+    confirmed it, which the recorder never writes), and a coverage statement.
+    Every instanceId must name a window the document actually declares.
+    """
+    d = _strict(timeline, {"schema", "events", "coverage"},
+                "recording.windowTimeline")
+    if d.get("schema") != RECORDED_WINDOW_TIMELINE_SCHEMA:
+        raise RecordingModelError(
+            "unsupported_schema",
+            f"unsupported windowTimeline schema {d.get('schema')!r}",
+            path="recording.windowTimeline.schema",
+        )
+    events = d.get("events")
+    if not isinstance(events, (list, tuple)):
+        raise RecordingModelError(
+            "type_error", "windowTimeline.events must be an array",
+            path="recording.windowTimeline.events",
+        )
+    declared = set()
+    for index, window in enumerate(windows):
+        instance_id = window.get("instanceId") if isinstance(window, Mapping) else None
+        if isinstance(instance_id, str) and instance_id:
+            declared.add(instance_id)
+    seen_ids = set()
+    previous_order = None
+    for index, event in enumerate(events):
+        path = f"recording.windowTimeline.events[{index}]"
+        item = _strict(
+            event,
+            {"id", "order", "monotonicMs", "instanceId", "kind", "source",
+             "associatedActionCausalId", "association", "ingressSequence"},
+            path,
+        )
+        for key in ("id", "kind", "source"):
+            value = item.get(key)
+            if not isinstance(value, str) or not value:
+                raise RecordingModelError(
+                    "type_error", f"{path}.{key} must be a non-empty string",
+                    path=f"{path}.{key}",
+                )
+        if item["id"] in seen_ids:
+            raise RecordingModelError(
+                "window_timeline_invalid", f"duplicate timeline event id {item['id']!r}",
+                path=f"{path}.id",
+            )
+        seen_ids.add(item["id"])
+        if item["kind"] not in TIMELINE_KINDS:
+            raise RecordingModelError(
+                "window_timeline_invalid",
+                f"{path}.kind {item['kind']!r} is not a native fact kind",
+                path=f"{path}.kind",
+            )
+        if item["source"] not in TIMELINE_SOURCES:
+            raise RecordingModelError(
+                "window_timeline_invalid",
+                f"{path}.source {item['source']!r} is not a declared source",
+                path=f"{path}.source",
+            )
+        order = item.get("order")
+        if not isinstance(order, int) or isinstance(order, bool) or order < 0:
+            raise RecordingModelError(
+                "type_error", f"{path}.order must be a non-negative integer",
+                path=f"{path}.order",
+            )
+        if previous_order is not None and order < previous_order:
+            raise RecordingModelError(
+                "window_timeline_invalid",
+                "windowTimeline.events order must be non-decreasing "
+                "(ingress order); observed monotonicMs may be out of order "
+                "and stays verbatim",
+                path=f"{path}.order",
+            )
+        previous_order = order
+        ms = item.get("monotonicMs")
+        if not isinstance(ms, int) or isinstance(ms, bool):
+            raise RecordingModelError(
+                "type_error", f"{path}.monotonicMs must be an integer",
+                path=f"{path}.monotonicMs",
+            )
+        ingress = item.get("ingressSequence")
+        if ingress is not None and (not isinstance(ingress, int)
+                                    or isinstance(ingress, bool) or ingress < 1):
+            raise RecordingModelError(
+                "type_error",
+                f"{path}.ingressSequence must be a positive integer or absent",
+                path=f"{path}.ingressSequence",
+            )
+        instance_id = item.get("instanceId")
+        if instance_id is not None:
+            if not isinstance(instance_id, str) or not instance_id:
+                raise RecordingModelError(
+                    "type_error",
+                    f"{path}.instanceId must be a non-empty string or absent",
+                    path=f"{path}.instanceId",
+                )
+            if instance_id not in declared:
+                raise RecordingModelError(
+                    "window_timeline_invalid",
+                    f"{path}.instanceId {instance_id!r} does not name a declared "
+                    "window instance",
+                    path=f"{path}.instanceId",
+                )
+        association = item.get("association")
+        if association is not None:
+            if association not in TIMELINE_ASSOCIATIONS:
+                raise RecordingModelError(
+                    "window_timeline_invalid",
+                    f"{path}.association {association!r} is not a declared source label",
+                    path=f"{path}.association",
+                )
+            if association == "explicit":
+                # The recorder never writes explicit (design 09 §4.3): only a
+                # user-confirmed binding assertion may claim it, and that is
+                # not a recording-time fact.
+                raise RecordingModelError(
+                    "window_timeline_invalid",
+                    f"{path}.association must not be 'explicit' in recorded data",
+                    path=f"{path}.association",
+                )
+        if "associatedActionCausalId" in item and not isinstance(
+                item["associatedActionCausalId"], str):
+            raise RecordingModelError(
+                "type_error",
+                f"{path}.associatedActionCausalId must be a string or absent",
+                path=f"{path}.associatedActionCausalId",
+            )
+    coverage = d.get("coverage")
+    if not isinstance(coverage, Mapping):
+        raise RecordingModelError(
+            "type_error", "windowTimeline.coverage must be an object",
+            path="recording.windowTimeline.coverage",
+        )
+    # Coverage is a strict, schema-aligned contract (review 0457 P2): the
+    # model and the JSON schema must agree on fields, enums and types, so a
+    # document one accepts and the other rejects cannot exist.
+    cov = _strict(coverage, {"destroyEvents", "droppedEvents"},
+                  "recording.windowTimeline.coverage")
+    destroy = cov.get("destroyEvents")
+    if destroy not in {"supported", "unsupported", "unknown"}:
+        raise RecordingModelError(
+            "window_timeline_invalid",
+            f"coverage.destroyEvents {destroy!r} must be "
+            "'supported' | 'unsupported' | 'unknown'",
+            path="recording.windowTimeline.coverage.destroyEvents",
+        )
+    dropped = cov.get("droppedEvents")
+    if not isinstance(dropped, int) or isinstance(dropped, bool) or dropped < 0:
+        raise RecordingModelError(
+            "type_error",
+            "coverage.droppedEvents must be a non-negative integer",
+            path="recording.windowTimeline.coverage.droppedEvents",
+        )
+
+
 @dataclass(frozen=True)
 class RawRecording:
     session_id: str
@@ -556,13 +755,24 @@ class RawRecording:
     # these say whether the recorder misjudged which window the user was in.
     rejections: tuple[Mapping[str, Any], ...] = ()
     schema: str = RAW_RECORDING_SCHEMA
+    #: v2 only. The append-only recorded-window timeline: native show/hide/
+    #: destroy facts with a unified ingress order and the observed monotonic
+    #: time kept verbatim. Absent on v1 documents — nothing is fabricated.
+    window_timeline: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        if self.schema != RAW_RECORDING_SCHEMA:
+        if self.schema not in {RAW_RECORDING_SCHEMA, RAW_RECORDING_SCHEMA_V2}:
             raise RecordingModelError(
                 "unsupported_schema", f"unsupported schema {self.schema!r}",
                 path="recording.schema",
             )
+        if self.window_timeline is not None and self.schema != RAW_RECORDING_SCHEMA_V2:
+            raise RecordingModelError(
+                "type_error", "windowTimeline requires the v2 recording schema",
+                path="recording.schema",
+            )
+        if self.window_timeline is not None:
+            _validate_window_timeline(self.window_timeline, self.windows)
         _text(self.session_id, "recording.sessionId")
         _text(self.name, "recording.name")
         diagnostics = _strict(
@@ -593,12 +803,15 @@ class RawRecording:
                 )
         for index, window in enumerate(self.windows):
             path = f"recording.windows[{index}]"
+            allowed_window_fields = {
+                "title", "processName", "handle", "pid", "origin",
+                "closed", "openedBy", "reopenedBy",
+            }
+            if self.schema == RAW_RECORDING_SCHEMA_V2:
+                allowed_window_fields.add("instanceId")
             fields = _strict(
                 window,
-                {
-                    "title", "processName", "handle", "pid", "origin",
-                    "closed", "openedBy", "reopenedBy",
-                },
+                allowed_window_fields,
                 path,
             )
             for key in ("title", "processName", "origin"):
@@ -679,12 +892,23 @@ class RawRecording:
             data,
             {
                 "schema", "sessionId", "name", "events", "captureDiagnostics",
-                "windows", "controlSnapshots", "rejections",
+                "windows", "controlSnapshots", "rejections", "windowTimeline",
             },
             "recording",
         )
-        if d.get("schema") != RAW_RECORDING_SCHEMA:
+        if d.get("schema") not in {RAW_RECORDING_SCHEMA, RAW_RECORDING_SCHEMA_V2}:
             raise RecordingModelError("unsupported_schema", f"unsupported schema {d.get('schema')!r}", path="recording.schema")
+        window_timeline = d.get("windowTimeline")
+        if window_timeline is not None and d.get("schema") != RAW_RECORDING_SCHEMA_V2:
+            raise RecordingModelError(
+                "type_error", "windowTimeline requires the v2 recording schema",
+                path="recording.schema",
+            )
+        if window_timeline is not None and not isinstance(window_timeline, Mapping):
+            raise RecordingModelError(
+                "type_error", "windowTimeline must be an object",
+                path="recording.windowTimeline",
+            )
         raw_events = d.get("events")
         if not isinstance(raw_events, list):
             raise RecordingModelError("type_error", "events must be an array", path="recording.events")
@@ -729,10 +953,11 @@ class RawRecording:
             control_snapshots=tuple(dict(x) for x in raw_snapshots),
             rejections=tuple(dict(x) for x in raw_rejections),
             schema=d["schema"],
+            window_timeline=dict(window_timeline) if window_timeline is not None else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "schema": self.schema,
             "sessionId": self.session_id,
             "name": self.name,
@@ -742,3 +967,10 @@ class RawRecording:
             "rejections": [dict(x) for x in self.rejections],
             "events": [x.to_dict() for x in self.events],
         }
+        if self.window_timeline is not None:
+            timeline = dict(self.window_timeline)
+            events = timeline.get("events")
+            if isinstance(events, tuple):
+                timeline["events"] = [dict(e) for e in events]
+            data["windowTimeline"] = timeline
+        return data

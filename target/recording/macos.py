@@ -1195,6 +1195,11 @@ class MacOSWindowEventDriver:
 
 
 class MacOSAXCorrelator(WindowsUIACorrelator):
+    #: The macOS AX hook contract does not deliver native destroy facts, so
+    #: this correlator must NOT claim destroyEvents=supported in coverage
+    #: (review 0457: capability is declared per backend, never inherited).
+    destroy_events_capability = "unknown"
+
     """Shared event semantics with an AX-backed resolver."""
 
     @staticmethod

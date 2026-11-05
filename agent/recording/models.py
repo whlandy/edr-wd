@@ -13,6 +13,10 @@ COMPILED_CASE_SCHEMA = "edr.desktop-recorded-case/v1"
 GOLDEN_TRACE_SCHEMA = "edr.desktop-golden-trace/v1"
 #: v2 adds the optional, strictly-parsed `entryWindow` identity record.
 GOLDEN_TRACE_SCHEMA_V2 = "edr.desktop-golden-trace/v2"
+#: v3 adds the strict windowSequence (design doc 09 §5): per-step window
+#: ownership + effects. v3 artifacts are NOT executable until S3/S4 land.
+GOLDEN_TRACE_SCHEMA_V3 = "edr.desktop-golden-trace/v3"
+WINDOW_SEQUENCE_SCHEMA = "edr.window-sequence/v1"
 ENTRY_WINDOW_SCHEMA = "edr.entry-window-identity/v1"
 REPLAY_EVALUATION_SCHEMA = "edr.desktop-replay-evaluation/v1"
 
@@ -105,7 +109,7 @@ def _validate_verifier(value: Mapping[str, Any], path: str) -> None:
                 path=f"{path}.timeoutSeconds",
             )
         return
-    data = _strict(value, {"type", "expected", "timeoutSeconds", "durationSeconds", "match"}, path)
+    data = _strict(value, {"type", "expected", "timeoutSeconds", "durationSeconds", "match", "source"}, path)
     _require(data, {"type", "expected"}, path)
     kind = data["type"]
     if kind not in {
@@ -117,6 +121,15 @@ def _validate_verifier(value: Mapping[str, Any], path: str) -> None:
         raise RecordingModelError(
             "golden_verifier_unsupported", f"unsupported verifier {kind!r}",
             path=f"{path}.type",
+        )
+    verifier_source = data.get("source")
+    if verifier_source is not None and verifier_source not in {
+            "user_assertion", "native_transition"}:
+        raise RecordingModelError(
+            "type_error",
+            f"verifier source {verifier_source!r} must be 'user_assertion' "
+            "or 'native_transition'",
+            path=f"{path}.source",
         )
     expected = data["expected"]
     control_kinds = {
@@ -536,6 +549,315 @@ class EntryWindowIdentity:
         return cls(str(process), title, root, str(origin))
 
 
+
+@dataclass(frozen=True)
+class WindowSequence:
+    """The strict v3 window-ownership sequence (design doc 09 §5)."""
+    schema: str
+    windows: tuple[Mapping[str, Any], ...]
+    steps: tuple[Mapping[str, Any], ...]
+    cleanup: tuple[Mapping[str, Any], ...] = ()
+
+    ALLOWED_EFFECT_KINDS = {"appeared", "absent"}
+    ALLOWED_EFFECT_VERIFICATION = {"explicit_assertion"}
+    ALLOWED_ORIGINS = {"already_open", "observed_during_flow"}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "windows": [dict(w) for w in self.windows],
+            "steps": [dict(s) for s in self.steps],
+            "cleanup": [dict(s) for s in self.cleanup],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "WindowSequence":
+        d = _strict(data, {"schema", "windows", "steps", "cleanup"},
+                    "golden.windowSequence")
+        if d.get("schema") != WINDOW_SEQUENCE_SCHEMA:
+            raise RecordingModelError(
+                "unsupported_schema",
+                f"unsupported windowSequence schema {d.get('schema')!r}",
+                path="golden.windowSequence.schema",
+            )
+        windows = d.get("windows")
+        steps = d.get("steps")
+        cleanup = d.get("cleanup", [])
+        for name, value in (("windows", windows), ("steps", steps),
+                            ("cleanup", cleanup)):
+            if not isinstance(value, (list, tuple)):
+                raise RecordingModelError(
+                    "type_error", f"windowSequence.{name} must be an array",
+                    path=f"golden.windowSequence.{name}",
+                )
+        return cls(WINDOW_SEQUENCE_SCHEMA,
+                   tuple(dict(w) for w in windows),
+                   tuple(dict(s) for s in steps),
+                   tuple(dict(s) for s in cleanup))
+
+
+def _validate_window_sequence(sequence: "WindowSequence",
+                              steps: tuple["RecordedStep", ...],
+                              cleanup: tuple["RecordedStep", ...],
+                              entry_window: "EntryWindowIdentity | None") -> None:
+    """Strict validation for the v3 windowSequence (design doc 09 §5.1)."""
+    known_steps = {s.step_id for s in (*steps, *cleanup)}
+    window_ids = set()
+    for index, window in enumerate(sequence.windows):
+        path = f"golden.windowSequence.windows[{index}]"
+        d = _strict(window, {"id", "identity", "origin"}, path)
+        wid = d.get("id")
+        if not isinstance(wid, str) or not wid:
+            raise RecordingModelError(
+                "type_error", f"{path}.id must be a non-empty string",
+                path=f"{path}.id")
+        if wid in window_ids:
+            raise RecordingModelError(
+                "window_sequence_invalid", f"duplicate window id {wid!r}",
+                path=f"{path}.id")
+        window_ids.add(wid)
+        if d.get("origin") not in WindowSequence.ALLOWED_ORIGINS:
+            raise RecordingModelError(
+                "window_sequence_invalid",
+                f"{path}.origin {d.get('origin')!r} is not declared",
+                path=f"{path}.origin",
+            )
+        identity = d.get("identity")
+        idata = _strict(identity if isinstance(identity, Mapping) else {},
+                        {"processName", "titleRegex", "rootAutomationId"},
+                        f"{path}.identity")
+        process = idata.get("processName")
+        if not isinstance(process, str) or not process:
+            raise RecordingModelError(
+                "type_error",
+                f"{path}.identity.processName must be a non-empty string",
+                path=f"{path}.identity.processName",
+            )
+        for key in ("titleRegex", "rootAutomationId"):
+            value = idata.get(key)
+            if value is not None and not isinstance(value, str):
+                raise RecordingModelError(
+                    "type_error", f"{path}.identity.{key} must be a string",
+                    path=f"{path}.identity.{key}",
+                )
+            if isinstance(value, str) and key == "titleRegex":
+                import re as _re
+                try:
+                    _re.compile(value)
+                except _re.error as exc:
+                    raise RecordingModelError(
+                        "type_error",
+                        f"{path}.identity.titleRegex is not a valid regex: {exc}",
+                        path=f"{path}.identity.titleRegex",
+                    ) from exc
+        if not idata.get("titleRegex") and not idata.get("rootAutomationId"):
+            raise RecordingModelError(
+                "window_sequence_invalid",
+                f"{path}.identity needs a title regex or a root automation id",
+                path=f"{path}.identity",
+            )
+    if not window_ids:
+        raise RecordingModelError(
+            "window_sequence_invalid",
+            "windowSequence must declare at least one window",
+            path="golden.windowSequence.windows",
+        )
+    # Every executable node exactly one ownership entry; step refs valid.
+    owner_of = {}
+    main_step_ids = {s.step_id for s in steps}
+    cleanup_step_ids = {s.step_id for s in cleanup}
+    effect_ids_global: set[str] = set()
+    for section_name, section in (("steps", sequence.steps),
+                                  ("cleanup", sequence.cleanup)):
+        for index, entry in enumerate(section):
+            path = f"golden.windowSequence.{section_name}[{index}]"
+            d = _strict(entry, {"stepId", "windowId", "effects"}, path)
+            step_id = d.get("stepId")
+            if step_id not in known_steps:
+                raise RecordingModelError(
+                    "window_sequence_invalid",
+                    f"{path}.stepId {step_id!r} is not an executable step",
+                    path=f"{path}.stepId",
+                )
+            if step_id in owner_of:
+                raise RecordingModelError(
+                    "window_sequence_invalid",
+                    f"duplicate ownership entry for {step_id!r}",
+                    path=f"{path}.stepId",
+                )
+            # Partition integrity (review 0907 P2): a MAIN step's ownership
+            # must be in steps, a CLEANUP step's in cleanup.
+            if (section_name == "steps" and step_id in cleanup_step_ids) or (
+                    section_name == "cleanup"
+                    and step_id in main_step_ids):
+                raise RecordingModelError(
+                    "window_sequence_invalid",
+                    f"{step_id!r} ownership appears in the wrong section "
+                    f"({section_name})",
+                    path=f"{path}.stepId",
+                )
+            wid = d.get("windowId")
+            if wid not in window_ids:
+                raise RecordingModelError(
+                    "window_sequence_invalid",
+                    f"{path}.windowId {wid!r} is not a declared window",
+                    path=f"{path}.windowId",
+                )
+            owner_of[step_id] = wid
+            effects = d.get("effects") or ()
+            if not isinstance(effects, (list, tuple)):
+                raise RecordingModelError(
+                    "type_error", f"{path}.effects must be an array",
+                    path=f"{path}.effects",
+                )
+            for e_index, effect in enumerate(effects):
+                e_path = f"{path}.effects[{e_index}]"
+                ed = _strict(effect, {"id", "kind", "windowId",
+                                      "verification", "timeoutSeconds"},
+                             e_path)
+                eid = ed.get("id")
+                if not isinstance(eid, str) or not eid or eid in effect_ids_global:
+                    raise RecordingModelError(
+                        "window_sequence_invalid",
+                        f"{e_path}.id must be a unique non-empty string "
+                        "(global across steps and cleanup)",
+                        path=f"{e_path}.id",
+                    )
+                effect_ids_global.add(eid)
+                if ed.get("kind") not in WindowSequence.ALLOWED_EFFECT_KINDS:
+                    raise RecordingModelError(
+                        "window_sequence_invalid",
+                        f"{e_path}.kind {ed.get('kind')!r} is not declared",
+                        path=f"{e_path}.kind",
+                    )
+                if ed.get("windowId") not in window_ids:
+                    raise RecordingModelError(
+                        "window_sequence_invalid",
+                        f"{e_path}.windowId is not a declared window",
+                        path=f"{e_path}.windowId",
+                    )
+                if ed.get("verification") not in \
+                        WindowSequence.ALLOWED_EFFECT_VERIFICATION:
+                    raise RecordingModelError(
+                        "window_sequence_invalid",
+                        f"{e_path}.verification must be explicit_assertion "
+                        "(temporal associations never produce strong effects)",
+                        path=f"{e_path}.verification",
+                    )
+                timeout = ed.get("timeoutSeconds")
+                if timeout is not None and (
+                        not isinstance(timeout, (int, float))
+                        or isinstance(timeout, bool)
+                        or not 0 < timeout <= 300):
+                    raise RecordingModelError(
+                        "type_error",
+                        f"{e_path}.timeoutSeconds must be in (0, 300]",
+                        path=f"{e_path}.timeoutSeconds",
+                    )
+    missing = known_steps - set(owner_of)
+    if missing:
+        raise RecordingModelError(
+            "window_sequence_invalid",
+            f"executable steps without window ownership: {sorted(missing)}",
+            path="golden.windowSequence.steps",
+        )
+    # selector↔identity consistency (review 0747 P2): each executable
+    # step's selector window must agree with the identity of the W it is
+    # owned by; a mismatch means the sequence does not describe the flow.
+    identity_by_id = {
+        w.get("id"): (w.get("identity") or {})
+        for w in sequence.windows
+    }
+    for step in (*steps, *cleanup):
+        wid = owner_of.get(step.step_id)
+        identity = identity_by_id.get(wid) or {}
+        if step.selector is None:
+            continue
+        selector_window = step.selector.window
+        process = str(selector_window.get("processName") or "")
+        if process and process != identity.get("processName"):
+            raise RecordingModelError(
+                "window_sequence_invalid",
+                f"{step.step_id}: selector processName {process!r} disagrees "
+                f"with owned window identity {identity.get('processName')!r}",
+                path=f"golden.windowSequence.steps",
+            )
+        root = selector_window.get("rootAutomationId")
+        identity_root = identity.get("rootAutomationId")
+        if root and identity_root and root != identity_root:
+            raise RecordingModelError(
+                "window_sequence_invalid",
+                f"{step.step_id}: selector rootAutomationId disagrees with "
+                "the owned window identity",
+                path="golden.windowSequence.steps",
+            )
+        if root and identity_root is None and identity.get("titleRegex"):
+            # The window declared itself by title only, but the step's
+            # selector names a root: the identity is INCOMPLETE for this
+            # step -- a missing field must not silently pass (review 0907).
+            raise RecordingModelError(
+                "window_sequence_invalid",
+                f"{step.step_id}: owned window identity lacks the "
+                "rootAutomationId the step's selector asserts",
+                path="golden.windowSequence.steps",
+            )
+        title = selector_window.get("titleRegex")
+        identity_title = identity.get("titleRegex")
+        if title and identity_title and title != identity_title:
+            raise RecordingModelError(
+                "window_sequence_invalid",
+                f"{step.step_id}: selector titleRegex disagrees with the "
+                "owned window identity",
+                path="golden.windowSequence.steps",
+            )
+        if title and identity_title is None and identity.get("rootAutomationId"):
+            raise RecordingModelError(
+                "window_sequence_invalid",
+                f"{step.step_id}: owned window identity lacks the "
+                "titleRegex the step's selector asserts",
+                path="golden.windowSequence.steps",
+            )
+    # entryWindow must STRICTLY match the ownership of the first selector
+    # step (review 0907): every field the entry declares must agree with the
+    # identity, and a matching window must exist -- None==None laziness or a
+    # wrong entry silently matching nothing are both refusals.
+    if entry_window is not None:
+        first_selector = next(
+            (s for s in steps if s.selector is not None), None)
+        entry_fields = {
+            "processName": entry_window.process_name,
+            "titleRegex": entry_window.title_regex,
+            "rootAutomationId": entry_window.root_automation_id,
+        }
+        entry_matches = []
+        for window in sequence.windows:
+            identity = window.get("identity") or {}
+            ok = True
+            for key, value in entry_fields.items():
+                if value is None:
+                    continue
+                if identity.get(key) != value:
+                    ok = False
+                    break
+            if ok:
+                entry_matches.append(window.get("id"))
+        if first_selector is not None:
+            owner = owner_of.get(first_selector.step_id)
+            if owner not in entry_matches:
+                raise RecordingModelError(
+                    "window_sequence_invalid",
+                    "entryWindow identity does not strictly match the first "
+                    "selector step's ownership window",
+                    path="golden.windowSequence",
+                )
+        elif not entry_matches:
+            raise RecordingModelError(
+                "window_sequence_invalid",
+                "entryWindow matches no declared window identity",
+                path="golden.windowSequence",
+            )
+
+
 @dataclass(frozen=True)
 class GoldenTrace:
     name: str
@@ -549,18 +871,39 @@ class GoldenTrace:
     #: v2 only. None (absent) keeps v1 semantics: no verifiable entry identity,
     #: entry-window recovery refused with an explicit error when requested.
     entry_window: EntryWindowIdentity | None = None
+    #: v3 only. The strict window-ownership sequence (design doc 09 §5).
+    #: A v3 golden is NOT executable until the S3/S4 binding/effects slices
+    #: land; replay must refuse before any target side effect.
+    window_sequence: WindowSequence | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
             raise RecordingModelError("type_error", "golden name must be non-empty", path="golden.name")
         if self.status not in {"ready", "incomplete"}:
             raise RecordingModelError("type_error", "invalid golden status", path="golden.status")
-        if self.entry_window is not None and self.schema != GOLDEN_TRACE_SCHEMA_V2:
+        if self.entry_window is not None and self.schema not in {
+                GOLDEN_TRACE_SCHEMA_V2, GOLDEN_TRACE_SCHEMA_V3}:
             raise RecordingModelError(
                 "type_error",
-                "entryWindow requires the v2 golden schema",
+                "entryWindow requires the v2 or v3 golden schema",
                 path="golden.schema",
             )
+        if self.window_sequence is not None and self.schema != GOLDEN_TRACE_SCHEMA_V3:
+            raise RecordingModelError(
+                "type_error",
+                "windowSequence requires the v3 golden schema",
+                path="golden.schema",
+            )
+        if self.schema == GOLDEN_TRACE_SCHEMA_V3:
+            if self.window_sequence is None:
+                raise RecordingModelError(
+                    "window_sequence_invalid",
+                    "a v3 golden trace requires windowSequence "
+                    "(no silent fallback to v2 semantics)",
+                    path="golden.windowSequence",
+                )
+            _validate_window_sequence(self.window_sequence, self.steps,
+                                      self.cleanup, self.entry_window)
         identifiers = [step.step_id for step in (*self.steps, *self.cleanup)]
         if len(identifiers) != len(set(identifiers)):
             raise RecordingModelError("step_graph_invalid", "step ids must be unique", path="golden.steps")
@@ -586,27 +929,40 @@ class GoldenTrace:
         }
         if self.entry_window is not None:
             data["entryWindow"] = self.entry_window.to_dict()
+        if self.window_sequence is not None:
+            data["windowSequence"] = self.window_sequence.to_dict()
         return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "GoldenTrace":
-        d = _strict(data, {"schema", "status", "name", "sourceRecording", "catalog", "environment", "entry", "steps", "cleanup", "entryWindow"}, "golden")
+        d = _strict(data, {"schema", "status", "name", "sourceRecording", "catalog", "environment", "entry", "steps", "cleanup", "entryWindow", "windowSequence"}, "golden")
         _require(
             d,
             {"schema", "status", "name", "sourceRecording", "catalog", "environment", "entry", "steps", "cleanup"},
             "golden",
         )
-        if d.get("schema") not in {GOLDEN_TRACE_SCHEMA, GOLDEN_TRACE_SCHEMA_V2}:
+        if d.get("schema") not in {GOLDEN_TRACE_SCHEMA, GOLDEN_TRACE_SCHEMA_V2,
+                                   GOLDEN_TRACE_SCHEMA_V3}:
             raise RecordingModelError("unsupported_schema", f"unsupported schema {d.get('schema')!r}", path="golden.schema")
         entry_window = None
         if d.get("entryWindow") is not None:
-            if d.get("schema") != GOLDEN_TRACE_SCHEMA_V2:
+            if d.get("schema") not in {GOLDEN_TRACE_SCHEMA_V2,
+                                       GOLDEN_TRACE_SCHEMA_V3}:
                 raise RecordingModelError(
                     "type_error",
-                    "entryWindow requires the v2 golden schema",
+                    "entryWindow requires the v2 or v3 golden schema",
                     path="golden.schema",
                 )
             entry_window = EntryWindowIdentity.from_dict(d["entryWindow"])
+        window_sequence = None
+        if d.get("windowSequence") is not None:
+            if d.get("schema") != GOLDEN_TRACE_SCHEMA_V3:
+                raise RecordingModelError(
+                    "type_error",
+                    "windowSequence requires the v3 golden schema",
+                    path="golden.schema",
+                )
+            window_sequence = WindowSequence.from_dict(d["windowSequence"])
         raw_steps = d.get("steps")
         if not isinstance(raw_steps, Mapping):
             raise RecordingModelError("type_error", "steps must be an object", path="golden.steps")
@@ -666,6 +1022,7 @@ class GoldenTrace:
             steps=tuple(ordered), status=d.get("status", "incomplete"),
             cleanup=cleanup, schema=d["schema"],
             entry_window=entry_window,
+            window_sequence=window_sequence,
         )
 
 

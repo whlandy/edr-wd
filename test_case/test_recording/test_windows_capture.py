@@ -302,7 +302,8 @@ def test_windows_uia_correlator_builds_click_with_semantic_target():
     assert event.observed_target.protected is False
     assert event.evidence == {
         "foregroundPid": 42, "doubleClickIntervalMs": 650,
-        "window": {"title": "EDRClient", "processName": "EDRClient.exe"},
+        "window": {"title": "EDRClient", "processName": "EDRClient.exe",
+                   "instanceId": "RI-0001"},
     }
 
 
@@ -333,6 +334,7 @@ def test_pointer_action_keeps_mouse_down_window_when_same_hwnd_changes_title():
     assert event is not None
     assert event.evidence["window"] == {
         "title": "EDRClient", "processName": "EDRClient.exe", "handle": 101,
+        "instanceId": "RI-0001",
     }
 
 

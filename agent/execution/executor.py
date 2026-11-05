@@ -255,7 +255,22 @@ class AtomicExecutor:
         steps = list(case.steps)
         materializer = step_materializer or self._step_materializer
         prepare_observation = getattr(materializer, "prepare_observation_for_step", None)
+        # §7.6:run_case 预聚焦(steps[0])也是 GUI 副作用 — attempt
+        # begin 必须在其之前(0709 缺口1 修订:run_step 内的钩子覆盖
+        # 不到此边界)。
+        case_begin_hook = getattr(self, "_attempt_ledger_hook", None)
         try:
+            # 0809 缺口1:协议检查(实例不可 callable)— 与 run_step
+            # 相同;begin 重入时复用同一 attempt(不产生幽灵 start)。
+            if steps and case_begin_hook is not None and hasattr(
+                    case_begin_hook, "begin_before_preparation"):
+                case_begin_hook.begin_before_preparation(
+                    step_id=steps[0].step_id,
+                    window_id=getattr(
+                        self, "_attempt_window_by_step", {}).get(
+                        steps[0].step_id, ""),
+                    before_state={"bindingRevision": 0,
+                                  "observationRef": None})
             if steps and callable(prepare_observation):
                 prepare_observation(steps[0])
             backend_unavailable = self._probe_backend()
@@ -303,6 +318,20 @@ class AtomicExecutor:
             sr = self.run_step(case, step, snapshot=None, step_materializer=materializer)
             step_results.append(sr)
             self._persist(step_results_path, case, step_results)
+            # §7.6(0809 缺口2):run_step 提前 return(finalise_blocked/
+            # dispatcher 异常/preparation 拒绝)与 skip 也必须终结
+            # attempt — unknown/fail 锁存 run(不论 required/on_error,
+            # 后续 0 focus/输入);正常尾部已由 run_step 内部 complete。
+            case_hook = getattr(self, "_attempt_ledger_hook", None)
+            if callable(getattr(case_hook, "complete_after_step", None)) \
+                    and getattr(self, "_attempt_open_event", None) is not None:
+                case_hook.complete_after_step(
+                    step_result=sr, receipt=getattr(sr, "action", None),
+                    expectation_results=[],
+                    window_id=getattr(
+                        self, "_attempt_window_by_step", {}).get(
+                        step.step_id, ""),
+                    error_payload=getattr(sr, "error", None))
 
             if sr.status == StepStatus.BLOCKED and step.required:
                 aborted = True
@@ -403,6 +432,22 @@ class AtomicExecutor:
         # 2. VALIDATING -> OBSERVING (refresh).
         state = next_state(state, StepState.OBSERVING)
         materializer = step_materializer or self._step_materializer
+        # §7.6 attempt 生命周期钩子(0709 缺口1/2):真实 step
+        # preparation(含预聚焦/恢复聚焦)**之前**持久 begin + 不可变
+        # 脱敏 before-state;preparation/focus/dispatch 前失败即拒绝
+        # (0 dispatch ≠ 0 GUI 副作用 — 聚焦也是副作用)。
+        attempt_hook = getattr(self, "_attempt_ledger_hook", None)
+        # 0739 缺口:hook 是**协议对象**(begin_before_preparation/
+        # complete_after_step 方法),不是 callable — callable 实例
+        # 检查让两钩子永不运行(独立探针证实)。协议检查 + 方法调用。
+        if attempt_hook is not None and hasattr(
+                attempt_hook, "begin_before_preparation"):
+            attempt_hook.begin_before_preparation(
+                step_id=step.step_id, window_id=getattr(
+                    self, "_attempt_window_by_step", {}).get(
+                    step.step_id, ""),
+                before_state={"bindingRevision": 0,
+                              "observationRef": None})
         prepare_observation = getattr(materializer, "prepare_observation_for_step", None)
         if callable(prepare_observation):
             try:
@@ -732,7 +777,7 @@ class AtomicExecutor:
         state = next_state(state, StepState.COMPLETED)
 
         ended = _utcnow_iso()
-        return StepResult(
+        step_result = StepResult(
             step_id=step.step_id,
             step_no=step.step_no,
             status=(
@@ -747,6 +792,19 @@ class AtomicExecutor:
             error=error_payload,
             transition_expected=transition_expected,
         )
+        # §7.6 complete 钩子(0709 缺口2/3):业务断言/窗口效果评估后
+        # 才提交 cursor;fail/unknown/skipped 不得推进;post-action
+        # 持久失败 → run 级锁存(后续 0 focus/输入,不重试未知 GUI)。
+        if attempt_hook is not None and hasattr(
+                attempt_hook, "complete_after_step"):
+            attempt_hook.complete_after_step(
+                step_result=step_result,
+                receipt=receipt,
+                expectation_results=expectation_results,
+                window_id=getattr(self, "_attempt_window_by_step", {}).get(
+                    step.step_id, ""),
+                error_payload=error_payload)
+        return step_result
 
     # -----------------------------------------------------------------
     # Helpers

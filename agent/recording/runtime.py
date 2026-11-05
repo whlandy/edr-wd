@@ -358,6 +358,18 @@ def build_replay_runtime(
     entry_recovery: bool = False,
 ) -> ReplayRuntime:
     """Assemble the runtime that replays `golden` against `agent`."""
+    # S2 boundary (design doc 09 §9): a v3 golden requires the window-binding
+    # and effects slices (S3/S4), which are not implemented. Refuse BEFORE
+    # any target call -- a lease or connect is already a GUI-side-effect
+    # gate. Never fall back to executing on raw selectors with the
+    # windowSequence dropped.
+    if getattr(golden, "window_sequence", None) is not None:
+        raise RecordingModelError(
+            "window_sequence_execution_unsupported",
+            "golden v3 replay requires the window-binding and effects "
+            "capabilities (design slices S3/S4), which are not implemented",
+            path="replay.windowSequence",
+        )
     # Validate local replay prerequisites before any remote lock or GUI lease.
     # Otherwise an invalid asset request can strand an exclusive GUI run.
     bound_profile = golden.environment.get("profile")

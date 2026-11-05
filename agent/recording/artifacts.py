@@ -264,11 +264,32 @@ def write_compilation_artifacts(
     # 顺手导出 maa-fw 的节点表。靠人记得跑一条命令是不行的 —— 忘了不会报错，
     # 只会变成「maa-fw 那边加载了什么都不做」，两边都看不出来。
     maa_note = _write_maa_nodes(directory, result)
-    _atomic_text(artifacts.generated_test, render_pytest(recording.name))
-    _atomic_text(artifacts.conftest, render_conftest())
-    _atomic_text(artifacts.pytest_ini, render_pytest_ini())
     report = result.report_dict()
     report["artifactIssues"] = [dict(issue) for issue in artifact_issues]
     report["maaExport"] = maa_note
+    # Review 0747 P1-4b: the CORE artifacts (recording/case/golden/
+    # compile-report with sourceEvents) must always land -- a stop/collect
+    # run must not lose its diagnostics because an OPTIONAL export is
+    # unsupported. The optional pytest projection for golden v3 is refused
+    # explicitly (no legacy executable file, no silent contract drop) AFTER
+    # the core write completes.
     _atomic_text(artifacts.compile_report, canonical_json(report))
+    if result.golden.schema == "edr.desktop-golden-trace/v3":
+        _atomic_text(
+            artifacts.generated_test,
+            "# generated pytest export is UNSUPPORTED for golden v3: the "
+            "# window-sequence contract has no executor projection yet "
+            "# (design slices S3/S4 pending). Replay also refuses.\n"
+            "# This file is intentionally not executable.\n",
+        )
+        report["pytestExport"] = {
+            "supported": False,
+            "reason": "golden v3 requires the window-binding and effects "
+                      "capabilities (design slices S3/S4)",
+        }
+        _atomic_text(artifacts.compile_report, canonical_json(report))
+    else:
+        _atomic_text(artifacts.generated_test, render_pytest(recording.name))
+    _atomic_text(artifacts.conftest, render_conftest())
+    _atomic_text(artifacts.pytest_ini, render_pytest_ini())
     return artifacts

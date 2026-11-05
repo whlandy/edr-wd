@@ -100,6 +100,10 @@ def test_every_compiler_issue_code_is_catalogued():
     的码都会出现在「未登记」兜底文案里 —— 该测试随即失败，把词汇漂移在
     当轮拦住，而不是等操作者实机遇到。"""
     compiler_codes = [
+        "compile_window_identity_conflict",
+        "compile_window_effect_unverified",
+        "recording_window_coverage_incomplete",
+        "compile_window_source_unresolved",
         "compile_scroll_verifier_required",
         "compile_drag_verifier_required",
         "compile_selector_ambiguous",

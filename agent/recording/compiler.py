@@ -14,9 +14,10 @@ from target.recording.models import (
     RawRecording,
 )
 
-from .models import (GOLDEN_TRACE_SCHEMA_V2, EntryWindowIdentity, GoldenTrace,
+from .models import (GOLDEN_TRACE_SCHEMA_V2, GOLDEN_TRACE_SCHEMA_V3,
+                     WINDOW_SEQUENCE_SCHEMA, EntryWindowIdentity, GoldenTrace,
                      RecordedStep, RecordedTestCase, ReplaySelector,
-                     canonical_json)
+                     WindowSequence, canonical_json)
 from .selectors import (
     assertion_match, synthesize_drag_end_selector, synthesize_selector,
     window_for_event,
@@ -257,8 +258,14 @@ def coalesce_events(
     *,
     double_click_ms: int = 500,
     scroll_coalesce_ms: int = 500,
+    provenance_out: dict[int, list[int]] | None = None,
 ) -> tuple[RawCaptureEvent, ...]:
-    """Coalesce deterministic pairs without discarding unsupported events."""
+    """Coalesce deterministic pairs without discarding unsupported events.
+
+    When ``provenance_out`` is given, it receives ``coalesced_seq ->
+    [absorbed raw sequences]`` -- the REAL merge facts, recorded at the
+    merge site (review 0907: not inferred from surviving positions).
+    """
     source = list(events); result: list[RawCaptureEvent] = []; index = 0
     while index < len(source):
         current = source[index]
@@ -272,6 +279,9 @@ def coalesce_events(
                     evidence["beforeCapture"] = current.evidence["beforeCapture"]
                 if "captureError" in current.evidence:
                     evidence["captureError"] = current.evidence["captureError"]
+                if provenance_out is not None:
+                    provenance_out.setdefault(current.sequence, []).extend(
+                        item.sequence for item in source[index:index + run])
                 result.append(RawCaptureEvent(
                     sequence=current.sequence,
                     wall_time=last.wall_time,
@@ -315,6 +325,9 @@ def coalesce_events(
                 combined_evidence["beforeCapture"] = current.evidence["beforeCapture"]
             if "captureError" in current.evidence:
                 combined_evidence["captureError"] = current.evidence["captureError"]
+            if provenance_out is not None:
+                provenance_out.setdefault(current.sequence, []).append(
+                    second.sequence)
             result.append(RawCaptureEvent(
                 sequence=current.sequence, wall_time=second.wall_time,
                 monotonic_ms=second.monotonic_ms, type="pointer_double_click",
@@ -941,6 +954,435 @@ def _compile_event(event: RawCaptureEvent, step_no: int,
     ), issues
 
 
+
+def _build_window_sequence(
+    steps: list[RecordedStep],
+    cleanup: list[RecordedStep],
+    step_source_sequences: dict[str, list[int]],
+    events: list,
+    recording: RawRecording,
+    entry_identity: EntryWindowIdentity | None,
+) -> tuple[WindowSequence | None, list[CompileIssue]]:
+    """Derive the v3 windowSequence (design doc 09 §6.2).
+
+    Ownership per executable step: the step's FIRST source event handle ->
+    the recording instance that handle names (S1 manifest instanceId) -> a
+    stable identity (processName + root from the step's snapshot/selector).
+    Cross-instance snapshot borrowing is refused; a step whose identity
+    cannot be corroborated leaves the whole sequence undetermined (incomplete
+    with structured diagnostics -- never numbered into readiness).
+    """
+    issues: list[CompileIssue] = []
+    # §6.2: resolve instances from the EVENT's own instanceId (S1 stamps
+    # evidence.window.instanceId) and the timeline's lifecycle intervals --
+    # never from a manifest end-state handle->RI dict, which would collapse
+    # two generations of one HWND into one window. The manifest provides the
+    # per-instance identity facts (pid/origin), keyed by RI.
+    manifest_by_ri = {
+        w.get("instanceId"): w
+        for w in recording.windows if w.get("instanceId")
+    }
+    # Lifecycle intervals (§4.1/§6.2): `start` is the FIRST observed fact
+    # (a birth lower bound -- first observation never proves physical
+    # creation); `end` is the DESTROYED time only. A live instance has no
+    # end: any fact time after that is just another observation, and a
+    # snapshot at 50ms after an initial_observation at 10ms is perfectly
+    # valid evidence for the live window (review 0947 P1-2a).
+    instance_intervals: dict[str, tuple[int | None, int | None]] = {}
+    for fact in (recording.window_timeline or {}).get("events", ()):
+        ri = fact.get("instanceId")
+        if not ri:
+            continue
+        start, end = instance_intervals.get(ri, (None, None))
+        ms = fact.get("monotonicMs")
+        if ms is None:
+            continue
+        if start is None or ms < start:
+            start = ms
+        instance_intervals[ri] = (start, end)
+    # Provable-interval boundaries (§4.1, review 1007): a DESTROYED or LOST
+    # fact ends what the timeline can prove for that instance -- destroyed
+    # is physical death, lost is unknown continuity; neither may be treated
+    # as proven beyond the fact. identity_changed does NOT end the old
+    # instance's own interval here: the NEW instance (which the handle now
+    # binds) accumulates its own facts from the change point onward.
+    for fact in (recording.window_timeline or {}).get("events", ()):
+        kind = fact.get("kind")
+        if (kind in {"destroyed", "lost"} and fact.get("instanceId")):
+            ri = fact["instanceId"]
+            start, _ = instance_intervals.get(ri, (None, None))
+            ms = int(fact.get("monotonicMs") or 0)
+            # Keep the FIRST unprovable boundary (review 1127): a later
+            # lost/recovery-lookalike fact must not extend an
+            # already-ended interval.
+            _, prev_end = instance_intervals.get(ri, (None, None))
+            if prev_end is None or ms < prev_end:
+                instance_intervals[ri] = (start, ms)
+    # Root evidence must come from snapshots attributed to the instance:
+    # a snapshot's window handle maps to an instance only when the snapshot
+    # time falls inside that instance's lifecycle interval.
+    snapshot_roots_by_ri: dict[str, str] = {}
+    snapshot_roots_unverified: set[str] = set()
+    for s in recording.control_snapshots:
+        window = s.get("window") or {}
+        handle = window.get("handle")
+        root = window.get("rootAutomationId")
+        if handle is None or not root:
+            continue
+        attributed = None
+        for ri, (start, end) in instance_intervals.items():
+            manifest = manifest_by_ri.get(ri) or {}
+            if manifest.get("handle") != handle:
+                continue
+            ms = s.get("capturedAtMs")
+            if start is not None and ms is not None and ms < start:
+                continue
+            if end is not None and ms is not None and ms > end:
+                continue  # destroyed before this snapshot: not its evidence
+            snap_ri = window.get("instanceId")
+            if snap_ri and snap_ri != ri:
+                continue  # the snapshot names another instance
+            if attributed is not None and attributed != ri:
+                attributed = None
+                break
+            attributed = ri
+        if attributed:
+            known = snapshot_roots_by_ri.get(attributed)
+            if known is not None and known != root:
+                # One instance, contradictory roots: identity conflict.
+                issues.append(CompileIssue(
+                    "compile_window_identity_conflict", 0,
+                    f"instance {attributed} has contradictory snapshot "
+                    f"roots ({known!r} vs {root!r}); no windowSequence",
+                ))
+                return None, issues
+            snapshot_roots_by_ri[attributed] = root
+        else:
+            snapshot_roots_unverified.add(root)
+    # Lifecycle evidence gate (§4.1/§6.2): a declared instanceId is only as
+    # good as the lifecycle facts behind it. A raw v2 document WITHOUT a
+    # timeline/coverage cannot prove any window continuity; a destroyed
+    # instance cannot own actions observed after its destruction; snapshots
+    # must carry a time inside the instance's interval and agree on one root.
+    coverage = (recording.window_timeline or {}).get("coverage") or {}
+    timeline_events = (recording.window_timeline or {}).get("events") or ()
+    if not timeline_events or not coverage:
+        issues.append(CompileIssue(
+            "recording_window_coverage_incomplete", 0,
+            "the raw v2 recording declares window instances but carries no "
+            "window timeline/coverage; lifecycle continuity is unproven, so "
+            "the golden stays incomplete",
+        ))
+        return None, issues
+    coverage_incomplete = (
+        coverage.get("destroyEvents") == "unknown"
+        or int(coverage.get("droppedEvents") or 0) > 0)
+    if coverage_incomplete:
+        issues.append(CompileIssue(
+            "recording_window_coverage_incomplete", 0,
+            "the recorded window timeline declares incomplete coverage "
+            f"(destroyEvents={coverage.get('destroyEvents')!r}, "
+            f"droppedEvents={coverage.get('droppedEvents')!r}); lifecycle "
+            "evidence cannot prove window continuity, so the golden stays "
+            "incomplete",
+        ))
+        return None, issues
+    # Destroyed/retired instances cannot own later actions: record each
+    # instance's destruction time and refuse attribution past it.
+    destroyed_at: dict[str, int] = {}
+    for fact in timeline_events:
+        if fact.get("kind") == "destroyed" and fact.get("instanceId"):
+            destroyed_at[fact["instanceId"]] = int(fact.get("monotonicMs") or 0)
+    windows_declared: list[dict] = []
+    # One recorded instance maps to AT MOST ONE declared window (§3/§4.2);
+    # later contradictory identities are reported, never split.
+    window_key_by_ri: dict[str, dict] = {}
+    steps_out: list[dict] = []
+    cleanup_out: list[dict] = []
+
+    def _window_for(step_source: RawCaptureEvent | None,
+                    step: RecordedStep) -> str | None:
+        selector = step.selector
+        if selector is None:
+            return None
+        process = str(selector.window.get("processName") or "")
+        if not process:
+            return None
+        # The event's OWN instanceId (stamped by S1) is the primary
+        # attribution; the manifest describes each instance's identity facts.
+        instance_id = (step_source.evidence or {}).get("window", {}).get(
+            "instanceId") if step_source is not None else None
+        if not instance_id:
+            return None
+        # Effective lifecycle check (§6.2, review 0947 P1-1): the action's
+        # observation time must fall inside the instance's proven interval
+        # -- not before its first fact (first observation is a lower bound,
+        # not a birth) and not after its destruction. The RI string alone
+        # never proves ownership.
+        if instance_id not in instance_intervals:
+            # The RI the action names has NO facts of its own in the
+            # timeline: without a single verifiable observation there is no
+            # proven lifecycle at all -- the default (None, None) "infinite
+            # interval" must never pass (review 1007 P1-a).
+            return None
+        start_bound, end_bound = instance_intervals.get(
+            instance_id, (None, None))
+        action_ms = (int(step_source.monotonic_ms or 0)
+                     if step_source is not None else None)
+        if action_ms is not None:
+            if start_bound is not None and action_ms < start_bound:
+                return None
+            if end_bound is not None and action_ms > end_bound:
+                return None
+        manifest = manifest_by_ri.get(instance_id) or {}
+        if str(manifest.get("processName") or "") != process:
+            # The instance belongs to another process than the selector
+            # claims: contradictory evidence, never reconcile by guess.
+            return None
+        root = selector.window.get("rootAutomationId")
+        snap_root = snapshot_roots_by_ri.get(instance_id)
+        if root and snap_root and root != snap_root:
+            # Selector root contradicts the instance's own snapshot root:
+            # cross-generation borrowing or corrupted identity -- refuse.
+            return None
+        # Root evidence from the instance's own snapshot CORROBORATES the
+        # identity; it never replaces the selector's title evidence. Merge
+        # fields: a snapshot-root promotion fills a missing root, keeping
+        # the title the selector asserts (review 0947 P1-2b -- the previous
+        # "root replaces title" shape made a normal live-window snapshot
+        # trip the strict model).
+        if root is None:
+            root = snap_root
+        identity = {"processName": process}
+        if root:
+            identity["rootAutomationId"] = root
+        title_regex = selector.window.get("titleRegex")
+        if title_regex:
+            identity["titleRegex"] = title_regex
+        if not identity.get("titleRegex") and not identity.get("rootAutomationId"):
+            return None
+        prior = window_key_by_ri.get(instance_id)
+        if prior is not None and prior["identity"] != identity:
+            # One recorded instance is at most ONE window (design 09 §3/§4.2:
+            # a title change does not create a new instance). Contradictory
+            # stable identities for the same RI mean the identity cannot be
+            # safely expressed as a single binding -- structured incomplete,
+            # never two bindings for one physical window (review 1027 P1).
+            issues.append(CompileIssue(
+                "compile_window_identity_conflict", 0,
+                f"instance {instance_id} was observed with contradictory "
+                f"stable identities ({prior['identity']} vs {identity}); "
+                "a title change does not create a new window instance",
+            ))
+            return None
+        if prior is None:
+            raw_origin = next(
+                (w.get("origin") for w in recording.windows
+                 if w.get("instanceId") == instance_id),
+                "observed_during_flow")
+            # raw v2's "opened" means the flow opened it during the capture;
+            # the golden contract words it as observed_during_flow (§5).
+            origin = ("already_open" if raw_origin == "already_open"
+                      else "observed_during_flow")
+            wid = f"W{len(window_key_by_ri) + 1}"
+            window_key_by_ri[instance_id] = {"id": wid,
+                                             "identity": identity}
+            recorded_title = next(
+                (w.get("title") for w in recording.windows
+                 if w.get("instanceId") == instance_id), None)
+            windows_declared.append({
+                "id": wid,
+                "identity": identity,
+                "origin": origin,
+                # internal: for effect-target resolution by recorded title
+                "_recordedTitle": recorded_title,
+            })
+        return window_key_by_ri[instance_id]["id"]
+
+    for step in steps:
+        source_sequences = step_source_sequences.get(step.step_id) or []
+        source = next(
+            (e for e in recording.events
+             if e.sequence in source_sequences), None)
+        wid = _window_for(source, step)
+        if wid is None:
+            issues.append(CompileIssue(
+                "compile_window_source_unresolved", 0,
+                f"{step.step_id}: the recording instance for this step could "
+                "not be verified from its source evidence; no windowSequence "
+                "is emitted",
+            ))
+            return None, issues
+        entry = {"stepId": step.step_id, "windowId": wid}
+        steps_out.append(entry)
+    # Effects pass -- after ALL windows are declared, so an explicit
+    # assertion targeting a window first owned by a LATER step still
+    # resolves (review 0747 P1-3: effects were silently dropped when the
+    # target window had not been declared by an earlier step).
+    for step in steps:
+        window_id = next(
+            (entry["windowId"] for entry in steps_out
+             if entry["stepId"] == step.step_id), None)
+        if window_id is None:
+            continue
+        effects = []
+        seen_effect_targets: set[tuple] = set()
+        for verifier in step.verifiers:
+            if verifier.get("type") != "window_open":
+                continue
+            if verifier.get("source") != "user_assertion":
+                # Native transition = temporal_forward evidence: diagnostic
+                # only, never a strong effect (design 09 §4.3).
+                continue
+            expected = verifier.get("expected") or {}
+            exists = expected.get("exists")
+            target_title = expected.get("title")
+            # Full target-identity resolution (review 0947 P1-3): the
+            # assertion's expected process/root/title must ALL agree with
+            # the declared identity; a same-title window of another process
+            # never borrows. Zero or multiple candidates keep the golden
+            # incomplete with the structured diagnostic below.
+            expected_process = expected.get("processName")
+            expected_root = expected.get("rootAutomationId")
+            expected_regex = expected.get("titleRegex")
+            import re as _re
+            compiled_pattern = None
+            invalid_pattern = False
+            if isinstance(expected_regex, str) and expected_regex:
+                try:
+                    compiled_pattern = _re.compile(expected_regex)
+                except _re.error:
+                    # An INVALID condition must never degrade to an
+                    # unconditional match (review 1027 P2-1): refuse the
+                    # effect with a structured diagnostic.
+                    invalid_pattern = True
+            if invalid_pattern:
+                issues.append(CompileIssue(
+                    "compile_window_effect_unverified", 0,
+                    f"{step.step_id}: the user-asserted titleRegex "
+                    f"{expected_regex!r} is not a valid regex; the explicit "
+                    "effect cannot be built",
+                ))
+                continue
+            matches = []
+            for w in windows_declared:
+                identity = w["identity"]
+                if expected_process and \
+                        identity.get("processName") != expected_process:
+                    continue
+                if expected_root and \
+                        identity.get("rootAutomationId") != expected_root:
+                    continue
+                # Title condition: a literal title matches the instance's
+                # recorded title fact; a declared titleRegex in the expected
+                # must ALSO match the recorded title (the window_open
+                # contract treats expected.titleRegex as a regex over the
+                # window's title -- review 1007 P2: the regex condition was
+                # silently ignored, binding the effect to any sole window).
+                recorded_title = w.get("_recordedTitle")
+                if target_title and recorded_title != target_title:
+                    continue
+                if compiled_pattern is not None and (
+                        not isinstance(recorded_title, str)
+                        or not compiled_pattern.search(recorded_title)):
+                    continue
+                matches.append(w)
+            target_wid = matches[0]["id"] if len(matches) == 1 else None
+            if target_wid is None:
+                # An explicit condition that cannot be mapped to a declared
+                # window is NOT silently dropped: the sequence stays
+                # incomplete with a structured diagnostic (review 0747).
+                issues.append(CompileIssue(
+                    "compile_window_effect_unverified", 0,
+                    f"{step.step_id}: the user-asserted window "
+                    f"{target_title!r} has no declared identity in the "
+                    "window sequence; the explicit effect cannot be built",
+                ))
+                continue
+            # Stable, content-derived unique ID (review 1107): the dedup
+            # key and the ID key must be the SAME normalized condition, so
+            # different conditions (literal vs regex, exists true/false)
+            # never collide on EF-step-W.
+            condition_key = (expected.get("processName"),
+                             expected.get("rootAutomationId"),
+                             expected.get("titleRegex"),
+                             expected.get("title"), bool(exists))
+            if condition_key in seen_effect_targets:
+                continue  # same source window, same claim: merge (§5)
+            seen_effect_targets.add(condition_key)
+            import hashlib as _hashlib
+            condition_digest = _hashlib.sha256(
+                canonical_json(
+                    {"processName": expected.get("processName"),
+                     "rootAutomationId": expected.get("rootAutomationId"),
+                     "titleRegex": expected.get("titleRegex"),
+                     "title": expected.get("title"),
+                     "exists": bool(exists)}).encode()).hexdigest()[:12]
+            effects.append({
+                "id": f"EF-{step.step_id}-{condition_digest}",
+                "kind": "appeared" if exists else "absent",
+                "windowId": target_wid,
+                "verification": "explicit_assertion",
+                "timeoutSeconds": verifier.get("timeoutSeconds", 10.0),
+            })
+        if effects:
+            # Mutually exclusive post-conditions on the same target window
+            # (appeared AND absent) cannot both be satisfiable: keep both
+            # effects honestly but the golden must NOT read as passable
+            # (review 1107-2: "互斥结果不可假称可通过,完整保留并结构化
+            # incomplete").
+            by_target: dict[str, set[str]] = {}
+            for effect in effects:
+                by_target.setdefault(effect["windowId"], set()).add(
+                    effect["kind"])
+            if any(kinds == {"appeared", "absent"}
+                   for kinds in by_target.values()):
+                issues.append(CompileIssue(
+                    "compile_window_effect_unverified", 0,
+                    f"{step.step_id}: mutually exclusive window conditions "
+                    "(appeared and absent) were asserted on the same "
+                    "target; both are preserved but the golden stays "
+                    "incomplete",
+                ))
+            next(entry for entry in steps_out
+                 if entry["stepId"] == step.step_id)["effects"] = effects
+    for step in cleanup:
+        source_sequences = step_source_sequences.get(step.step_id) or []
+        source = next(
+            (e for e in recording.events
+             if e.sequence in source_sequences), None)
+        wid = _window_for(source, step)
+        if wid is None:
+            issues.append(CompileIssue(
+                "compile_window_source_unresolved", 0,
+                f"{step.step_id} (cleanup): instance could not be verified",
+            ))
+            return None, issues
+        cleanup_out.append({"stepId": step.step_id, "windowId": wid})
+    public_windows = [
+        {k: v for k, v in w.items() if not k.startswith("_")}
+        for w in windows_declared]
+    try:
+        sequence = WindowSequence(
+            schema=WINDOW_SEQUENCE_SCHEMA,
+            windows=tuple(dict(w) for w in public_windows),
+            steps=tuple(dict(s) for s in steps_out),
+            cleanup=tuple(dict(s) for s in cleanup_out),
+        )
+    except RecordingModelError as exc:
+        # A strict-model refusal during sequence construction is an
+        # identity-evidence problem: report it as a structured incomplete
+        # result instead of crashing the public compile entry (review 0947
+        # P1-2b -- "无法安全升级时诚实诊断而不崩溃").
+        issues.append(CompileIssue(
+            "compile_window_identity_conflict", 0,
+            f"window-sequence identity evidence conflicts with the "
+            f"compiled steps ({exc.message}); the golden stays incomplete",
+        ))
+        return None, issues
+    return sequence, issues
+
+
 def _entry_window_identity(
     first_step: RecordedStep | None,
     first_source_event: RawCaptureEvent | None,
@@ -1052,7 +1494,11 @@ def compile_recording(
 
         catalog_version = catalog_version or CATALOG_VERSION
         catalog_digest = catalog_digest or current_digest()
-    events = coalesce_events(recording.events)
+    # §6.1 provenance: coalesce records its REAL merge facts (absorbed raw
+    # sequences) at the merge site -- not guessed from surviving positions
+    # (review 0907 P2).
+    coalesced_from: dict[int, list[int]] = {}
+    events = coalesce_events(recording.events, provenance_out=coalesced_from)
     navigation_merges, merged_nav_sequences = _navigation_merges(events)
     steps: list[RecordedStep] = []; issues: list[CompileIssue] = []
     if not events:
@@ -1097,9 +1543,19 @@ def compile_recording(
     # recorded flow spanned two coexisting windows that replay cannot tell
     # apart. Handles are within-recording proof of distinct windows only, so
     # every step that shares the collapsed identity is flagged, not just the
-    # drift's edge.
-    collapsed_window_steps: dict[str, tuple[int, int]] = {}
+    # drift's edge. The recurrence check compares against the FIRST event
+    # that sourced this identity (design 09 §6.3): revisiting one window
+    # (A -> B -> A) reuses the same handle and must not be flagged, while a
+    # recurrence on a different handle still proves a second same-identity
+    # instance and stays refused.
+    collapsed_window_steps: dict[str, tuple[int, int, RawCaptureEvent | None]] = {}
     first_selector_event: RawCaptureEvent | None = None
+    # §6.1: explicit stepId -> raw source sequences (compile-time truth).
+    step_source_sequences: dict[str, list[int]] = {}
+    # 显式因果绑定索引(P1 2038): causal_id -> (steps 下标, 动作事件)。
+    # bindCausalId 命中**非最近**动作时,该断言按与"最近动作绑定"完全
+    # 相同的折叠/跨窗语义处理,折叠目标为被命名的动作步。
+    causal_step_index: dict[str, tuple[int, RawCaptureEvent]] = {}
 
     def _flag_window_identity_ambiguous(step_index: int, sequence: int) -> None:
         step = steps[step_index]
@@ -1151,19 +1607,41 @@ def compile_recording(
             # reported in diagnostics, never silently dropped from the capture.
             continue
         ambiguous_bound_window = False
-        if _assertion_is_bound(event, last_action_causal_id, last_action_index is not None):
-            assert last_action_index is not None
-            if _cross_window_bound_assertion(event, last_action_event):
+        # 折叠目标:bindPrevious(最近动作)或 bindCausalId(显式命中的
+        # 任意已建动作步)——显式命中旧步骤时,折叠/跨窗/ambiguous
+        # 语义与最近动作路径完全一致,仅目标换为被命名步骤与事件。
+        # P1(2324):explicit_bound 仅限**合法 assertion 事件**
+        # (type=assertion 且 assertion 非空)——旧 causal 的窗口转换等
+        # 非断言事件必须继续走专用转换/动作处理门(结构化
+        # incomplete/拒绝),不得送入 assertion 分支以空 assertion
+        # 构造 verifier 抛异常。
+        explicit_bound = (event.type == "assertion" and
+                          event.assertion is not None and
+                          event.causal_id is not None and
+                          event.causal_id in causal_step_index and
+                          not _shares_action_cause(
+                              event, last_action_causal_id,
+                              last_action_index is not None))
+        bound_index, bound_event = (
+            causal_step_index[event.causal_id]
+            if explicit_bound else (last_action_index, last_action_event))
+        if _assertion_is_bound(event, last_action_causal_id, last_action_index is not None) or explicit_bound:
+            if _cross_window_bound_assertion(event, bound_event):
                 # Keep the causal proof for verifier-required scroll/drag, but
                 # execute the assertion after focusing its destination window.
-                cross_window_verified_actions.add(last_action_index)
+                cross_window_verified_actions.add(bound_index)
                 ambiguous_bound_window = bool(
-                    last_action_event is not None
-                    and _different_recorded_handles(event, last_action_event)
-                    and window_for_event(event) == window_for_event(last_action_event)
+                    bound_event is not None
+                    and _different_recorded_handles(event, bound_event)
+                    and window_for_event(event) == window_for_event(bound_event)
                 )
             else:
                 verifier_payload = dict(event.assertion or {})
+                # §5 (review 0907): a bound USER assertion is the strong
+                # effect source; tag it so the builder can tell it from a
+                # bare native transition (temporal evidence only).
+                if verifier_payload.get("type") == "window_open":
+                    verifier_payload["source"] = "user_assertion"
                 if verifier_payload.get("type") == "region_query":
                     region_verifier = _region_query_verifier(event)
                     if region_verifier is None:
@@ -1172,16 +1650,22 @@ def compile_recording(
                             _REGION_CONTAINER_ISSUE[1],
                         )
                         issues.append(container_issue)
-                        steps[last_action_index] = replace(
-                            steps[last_action_index], status="incomplete",
+                        steps[bound_index] = replace(
+                            steps[bound_index], status="incomplete",
                             issues=(
-                                *steps[last_action_index].issues,
+                                *steps[bound_index].issues,
                                 container_issue.code,
                             ),
                         )
                         continue
                     verifier_payload = region_verifier
-                bind_verifier(last_action_index, verifier_payload, event)
+                bind_verifier(bound_index, verifier_payload, event)
+                # §6.1 provenance: a bound assertion's raw sequence belongs
+                # to the action step it verifies (the continue path never
+                # reaches the loop-bottom mapping).
+                step_source_sequences.setdefault(
+                    steps[bound_index].step_id, []
+                ).append(event.sequence)
                 continue
         if event.type == "window_transition":
             transition_kind = event.input.get("kind")
@@ -1207,6 +1691,11 @@ def compile_recording(
                             v for v in previous.verifiers if v is not opposite
                         ),
                     )
+                    # §6.1 provenance (review 0907): the cancelled half is
+                    # still a raw event consumed by this step -- its sequence
+                    # stays traceable through the step's source map.
+                    step_source_sequences.setdefault(
+                        previous.step_id, []).append(event.sequence)
                     continue
                 expected = {
                     "exists": transition_kind == "opened",
@@ -1220,8 +1709,18 @@ def compile_recording(
                     "type": "window_open",
                     "expected": expected,
                     "timeoutSeconds": event.input.get("timeoutSeconds", 10.0),
+                    # §5: effects are strong ONLY when the user explicitly
+                    # asserted the window. A bare native transition shares
+                    # the causal id but is temporal_forward evidence -- it
+                    # must never be upgraded to explicit (review 0747 P1-3).
+                    "source": ("user_assertion"
+                               if event.assertion else "native_transition"),
                 }
                 bind_verifier(last_action_index, verifier, event)
+                # §6.1 provenance: bound window_transition raw sequence.
+                step_source_sequences.setdefault(
+                    steps[last_action_index].step_id, []
+                ).append(event.sequence)
                 continue
             issue = CompileIssue(
                 "compile_transition_unbound",
@@ -1267,6 +1766,12 @@ def compile_recording(
             )
             event_issues.append(capture_issue)
         steps.append(step);issues.extend(event_issues)
+        # §6.1 explicit source-event mapping: every compiled step records the
+        # raw sequences it was built from (merges/bindings/collapse included)
+        # -- never inferred from list positions afterwards.
+        if step.step_id not in step_source_sequences:
+            step_source_sequences[step.step_id] = []
+        step_source_sequences[step.step_id].append(event.sequence)
         if step.selector is not None and first_selector_event is None:
             first_selector_event = event
         if step.action_id is not None:
@@ -1274,26 +1779,34 @@ def compile_recording(
             last_action_index = len(steps) - 1
             last_action_causal_id = event.causal_id
             last_action_event = event
+            if event.causal_id:
+                causal_step_index[event.causal_id] = (len(steps) - 1, event)
             if event.type in VERIFIER_REQUIRED_EVENT_TYPES:
                 verifier_required[last_action_index] = (event.type, event.sequence)
             # Same-titled-window drift: this action's replay window identity
             # matches an earlier action's while the recorded handles prove two
-            # distinct windows. Flag the whole collapsed group, back to the
-            # first member.
+            # distinct windows. The comparison anchor is the FIRST event that
+            # sourced this identity, not the immediately preceding action
+            # (design 09 §6.3): A -> B -> A revisits one window (same handle
+            # as the first A step, no flag), while A -> B -> A2 (different
+            # handle on the recurring identity) still proves a second
+            # same-identity instance. Flag the whole collapsed group, back to
+            # the first member.
             if step.selector is not None:
                 identity = canonical_json(step.selector.window)
-                first_index, first_sequence = collapsed_window_steps.get(
-                    identity, (last_action_index, event.sequence),
-                )
+                first_index, first_sequence, first_event = (
+                    collapsed_window_steps.get(
+                        identity, (last_action_index, event.sequence, event)))
                 if (
                     last_action_index != first_index
-                    and previous_action_event is not None
-                    and _different_recorded_handles(event, previous_action_event)
+                    and first_event is not None
+                    and _different_recorded_handles(event, first_event)
                 ):
                     _flag_window_identity_ambiguous(last_action_index, event.sequence)
                     _flag_window_identity_ambiguous(first_index, first_sequence)
                 if identity not in collapsed_window_steps:
-                    collapsed_window_steps[identity] = (last_action_index, event.sequence)
+                    collapsed_window_steps[identity] = (
+                        last_action_index, event.sequence, event)
 
     def _run_is_verified(index: int) -> bool:
         """Is this step covered by a verifier bound later in the same run?
@@ -1349,7 +1862,31 @@ def compile_recording(
         case = RecordedTestCase(
             case.name, case.source_session_id, case.steps, status)
     issues.extend(entry_issues)
-    if entry_identity is not None:
+    # §6: a v2 raw recording compiles to golden v3 with the window sequence;
+    # v1-era recordings keep the pre-v3 shape (no lifecycle evidence to
+    # declare windows from).
+    window_sequence = None
+    if recording.schema == "edr.desktop-recording/v2" and steps:
+        window_sequence, window_issues = _build_window_sequence(
+            steps, [], step_source_sequences, events, recording,
+            entry_identity)
+        if window_issues:
+            issues.extend(window_issues)
+            status = "incomplete"
+            case = RecordedTestCase(
+                case.name, case.source_session_id, case.steps, status)
+    if window_sequence is not None:
+        golden = GoldenTrace(
+            name=recording.name,
+            source_recording={"schema": recording.schema, "sha256": recording_digest},
+            catalog={"version": catalog_version, "digest": catalog_digest},
+            environment=environment,
+            steps=tuple(steps), status=status,
+            schema=GOLDEN_TRACE_SCHEMA_V3,
+            entry_window=entry_identity,
+            window_sequence=window_sequence,
+        )
+    elif entry_identity is not None:
         golden = GoldenTrace(
             name=recording.name,
             source_recording={"schema": recording.schema, "sha256": recording_digest},
@@ -1368,7 +1905,21 @@ def compile_recording(
             steps=tuple(steps), status=status,
         )
     out_of_scope = recording.capture_diagnostics.get("outOfScopeEvents", 0)
-    diagnostics = {"outOfScopeEvents": int(out_of_scope or 0)}
+    diagnostics = {
+        "outOfScopeEvents": int(out_of_scope or 0),
+        # §6.1 explicit source-event mapping: stepId -> raw sequences, kept
+        # in the report so any compiled step can be traced to its evidence.
+        "sourceEvents": {"byStep": {
+            step_id: [int(s) for s in seqs]
+            for step_id, seqs in step_source_sequences.items()
+        }},
+        # Raw sequences a coalesced event absorbed (double-click second
+        # click, scroll notches): traceable to the step that consumed them.
+        "coalescedSources": {
+            str(coalesced_seq): [int(s) for s in raws]
+            for coalesced_seq, raws in coalesced_from.items()
+        },
+    }
     if navigation_merges:
         diagnostics["mergedNavigationKeyEvents"] = [
             record

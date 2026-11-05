@@ -436,6 +436,7 @@ def test_registering_a_window_asks_for_its_material_at_once():
     assert inventory.requests == [{
         "handle": 7, "title": "Log Center", "process_name": "EDRClient.exe",
         "monotonic_ms": None, "reason": "window_changed",
+        "instance_id": None,  # 直接调用 _register_window,无 timeline 实例
     }]
 
 

@@ -25,6 +25,15 @@ import pyautogui
 
 from .base import lock_criteria_mismatch, release_window_lock_if_window_changed
 
+# Win32 生命周期事件常量(实例跟踪订阅范围;§7.4)。
+from .instance_events import (  # noqa: E402,F401 — re-export for tests
+    EVENT_OBJECT_CREATE,
+    EVENT_OBJECT_DESTROY,
+    EVENT_OBJECT_HIDE,
+    EVENT_OBJECT_SHOW,
+    LIFECYCLE_EVENT_IDS,
+)
+
 # pywinauto_client is Windows-only and depends on pywinauto + psutil, which
 # are NOT installed on macOS targets. We import it lazily inside __init__
 # so that `from automation import create_backend; create_backend("macos_…")`
@@ -652,6 +661,29 @@ class WindowsPywinautoBackend:
         class_name: Optional[str] = None,
     ) -> dict:
         return self._gui.is_window_open(title_re, process_name, class_name)  # type: ignore[arg-type]
+
+    # ---- 本 run 强实例跟踪(§7.4/§8;生产实装) ----
+
+    def lifecycle_event_stream(self):
+        """本 run 原生生命周期事件源:SetWinEventHook 订阅
+        create/destroy/hide/show,回调/消息循环线程经
+        target.automation.instance_events 实现;订阅失败/线程故障
+        如实暴露(协商据此 unsupported)。订阅建立即枚举既有窗口
+        作为基线(0148:不要求用户先重开窗口)。"""
+        from .instance_events import WindowsEventHookSource
+        return WindowsEventHookSource(
+            existing_windows_provider=self._enumerate_top_windows_windows)
+
+    def window_sequence_capability(self) -> dict:
+        """生产协商协议(0346 复验修订):**显式 decided_by=
+        instance-tracker** 标记 — 本 backend 无独立于事件源的强实例
+        能力声明,能力由 server 侧 RunInstanceTracker 按本 run 真实
+        事件源/代际/覆盖事实判定。非协议自报(如仅 supported=false)
+        将按权威自报处理 → 显式拒绝(否决权保留)。"""
+        return {"decided_by": "instance-tracker",
+                "note": ("capability decided by this run's "
+                         "instance tracker; backend does not self-report "
+                         "strong")}
 
     def wait_window(
         self,

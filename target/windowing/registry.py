@@ -138,6 +138,18 @@ class WindowRegistry:
         self._lock = current
         return current
 
+    def revoke_lock(self, native_id: str | None = None) -> bool:
+        """Drop the authoritative registry lock. With native_id, only the
+        lock on that exact window is revoked (one binding's failure must
+        not touch another binding's lock); without it, any current lock is
+        dropped (run teardown). Returns True when a lock was revoked."""
+        if self._lock is None:
+            return False
+        if native_id is not None and self._lock.native_id != str(native_id):
+            return False
+        self._lock = None
+        return True
+
     def wait_transition(self, before: WindowIdentity | None, expected: str,
                         profile, refresh: Callable[[], Iterable[Mapping]],
                         timeout: float = 5.0, interval: float = 0.1) -> WindowIdentity:

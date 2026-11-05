@@ -57,6 +57,7 @@ class WindowSession:
                     "process_name": process_name,
                     "title": item.get("title") or item.get("window_title") or "",
                     "rect": rect, "visible": item.get("visible", True),
+                    "foreground": item.get("foreground", False),
                     "root_control_id": item.get("root_control_id") or "",
                     "class_name": item.get("class_name") or "",
                     "parent_native_id": item.get("parent_native_id"),
@@ -72,7 +73,13 @@ class WindowSession:
         paths = [path for path in paths if isinstance(path, str) and path]
         if not paths:
             raise WindowIdentityError("product_window_path_unavailable")
-        resolve_exe = process_exe or (lambda pid: psutil.Process(pid).exe())
+        # 归属探针优先用会话后端的归属缝隙(与 WindowBindingFacade
+        # _product_owned 同一 seam 契约 exe_path_for_pid);无缝隙时
+        # 回落 psutil。
+        backend_probe = getattr(self.backend, "exe_path_for_pid", None)
+        resolve_exe = process_exe or (
+            backend_probe if callable(backend_probe)
+            else (lambda pid: psutil.Process(pid).exe()))
         candidate_names = {
             name.lower() for rule in capability.window_roles
             for name in rule.process_names

@@ -1,26 +1,109 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://edr-wd.local/schemas/desktop-recording.schema.json",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schema",
-    "sessionId",
-    "name",
-    "captureDiagnostics",
-    "events"
+  "oneOf": [
+    {
+      "$ref": "#/$defs/recordingV1"
+    },
+    {
+      "$ref": "#/$defs/recordingV2"
+    }
   ],
-  "properties": {
-    "schema": {
-      "const": "edr.desktop-recording/v1"
+  "$defs": {
+    "recordingV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "sessionId",
+        "name",
+        "captureDiagnostics",
+        "events"
+      ],
+      "properties": {
+        "schema": {
+          "const": "edr.desktop-recording/v1"
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "captureDiagnostics": {
+          "$ref": "#/$defs/captureDiagnostics"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/event"
+          }
+        },
+        "windows": {
+          "type": "array",
+          "description": "The application's windows as this capture saw them, in first-appearance order. `openedBy` carries the causal id of the action that opened the window, so the list reconstructs a tree of how the flow moved between pages.",
+          "items": {
+            "$ref": "#/$defs/windowEntryV1"
+          }
+        },
+        "controlSnapshots": {
+          "$ref": "#/$defs/controlSnapshots"
+        },
+        "rejections": {
+          "$ref": "#/$defs/rejections"
+        }
+      }
     },
-    "sessionId": {
-      "type": "string",
-      "minLength": 1
-    },
-    "name": {
-      "type": "string",
-      "minLength": 1
+    "recordingV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "sessionId",
+        "name",
+        "captureDiagnostics",
+        "events"
+      ],
+      "properties": {
+        "schema": {
+          "const": "edr.desktop-recording/v2"
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "captureDiagnostics": {
+          "$ref": "#/$defs/captureDiagnostics"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/event"
+          }
+        },
+        "windows": {
+          "type": "array",
+          "description": "v2 adds `instanceId`: the recorded-window instance the entry names, matching the windowTimeline references.",
+          "items": {
+            "$ref": "#/$defs/windowEntryV2"
+          }
+        },
+        "controlSnapshots": {
+          "$ref": "#/$defs/controlSnapshots"
+        },
+        "rejections": {
+          "$ref": "#/$defs/rejections"
+        },
+        "windowTimeline": {
+          "$ref": "#/$defs/windowTimeline"
+        }
+      }
     },
     "captureDiagnostics": {
       "type": "object",
@@ -54,56 +137,203 @@
         }
       }
     },
-    "events": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/event"
+    "windowEntryV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "processName",
+        "origin"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "processName": {
+          "type": "string"
+        },
+        "handle": {
+          "type": "integer"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "origin": {
+          "enum": [
+            "already_open",
+            "opened",
+            "observed_during_flow"
+          ]
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "openedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reopenedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
-    "windows": {
-      "type": "array",
-      "description": "The application's windows as this capture saw them, in first-appearance order. `openedBy` carries the causal id of the action that opened the window, so the list reconstructs a tree of how the flow moved between pages.",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "title",
-          "processName",
-          "origin"
-        ],
-        "properties": {
-          "title": {
-            "type": "string"
-          },
-          "processName": {
-            "type": "string"
-          },
-          "handle": {
-            "type": "integer"
-          },
-          "pid": {
-            "type": "integer"
-          },
-          "origin": {
-            "enum": [
-              "already_open",
-              "opened"
-            ]
-          },
-          "closed": {
-            "type": "boolean"
-          },
-          "openedBy": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "reopenedBy": {
-            "type": [
-              "string",
-              "null"
-            ]
+    "windowEntryV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "processName",
+        "origin"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "processName": {
+          "type": "string"
+        },
+        "handle": {
+          "type": "integer"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "origin": {
+          "enum": [
+            "already_open",
+            "opened",
+            "observed_during_flow"
+          ]
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "openedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reopenedBy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "instanceId": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "windowTimeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "events",
+        "coverage"
+      ],
+      "properties": {
+        "schema": {
+          "const": "edr.recorded-window-timeline/v1"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "order",
+              "monotonicMs",
+              "kind",
+              "source"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "order": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "monotonicMs": {
+                "type": "integer"
+              },
+              "instanceId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "enum": [
+                  "initial_observed",
+                  "created",
+                  "shown",
+                  "hidden",
+                  "destroyed",
+                  "identity_changed",
+                  "lost",
+                  "observed"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "initial_inventory",
+                  "native_show",
+                  "native_hide",
+                  "native_destroy",
+                  "native_identity_change",
+                  "poller",
+                  "tracking_loss",
+                  "coverage",
+                  "input_observation"
+                ]
+              },
+              "associatedActionCausalId": {
+                "type": "string"
+              },
+              "association": {
+                "enum": [
+                  "temporal_forward",
+                  "temporal_backfill",
+                  "unknown"
+                ],
+                "description": "The SOURCE of the link, never a confidence. 'explicit' is reserved for user-confirmed binding assertions and is invalid in recorded data."
+              },
+              "ingressSequence": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The correlation receive sequence the packet arrived under, tying window facts and business events to one ingress order."
+              }
+            }
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "destroyEvents",
+            "droppedEvents"
+          ],
+          "properties": {
+            "destroyEvents": {
+              "enum": [
+                "supported",
+                "unsupported",
+                "unknown"
+              ]
+            },
+            "droppedEvents": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       }
@@ -284,9 +514,7 @@
           }
         }
       }
-    }
-  },
-  "$defs": {
+    },
     "scope": {
       "type": "object",
       "additionalProperties": false,
@@ -509,6 +737,14 @@
         },
         "handle": {
           "type": "integer"
+        },
+        "windowInstanceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "windowTimelineEventId": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },
@@ -572,8 +808,24 @@
           }
         },
         {
-          "if": {"properties": {"type": {"enum": ["text_contains", "window_text_contains"]}}},
-          "then": {"properties": {"expected": {"type": "string", "minLength": 1}}}
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "text_contains",
+                  "window_text_contains"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
         },
         {
           "if": {

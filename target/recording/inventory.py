@@ -179,6 +179,13 @@ class ControlInventory:
         if max_snapshots < 1:
             raise ValueError("max_snapshots must be positive")
         self._resolver = resolver
+        #: Optional authority callback: (handle) -> the CURRENT recorded
+        #: instance id for that handle, or None when unknowable. Provided by
+        #: the correlator (which owns the instance index); when present, a
+        #: walk published for a superseded instance is discarded with a
+        #: structured skip instead of stamping the old RI on new controls
+        #: (review 0517 P1-2).
+        self.instance_authority = None
         self._max_depth = max_depth
         self._debounce_ms = debounce_ms
         self._max_snapshots = max_snapshots
@@ -208,6 +215,7 @@ class ControlInventory:
         process_name: str = "",
         monotonic_ms: int | None = None,
         reason: str = "step",
+        instance_id: str | None = None,
     ) -> None:
         """Ask for a walk of one window. Never blocks, never raises.
 
@@ -228,6 +236,17 @@ class ControlInventory:
                 return
             existing = self._pending.get(handle)
             if existing is not None:
+                if (existing.get("instanceId")
+                        and instance_id
+                        and existing["instanceId"] != instance_id):
+                    # The window instance changed (destroy/reuse) while the
+                    # old walk was still pending: the old request describes a
+                    # window that no longer exists. Replace it -- merging
+                    # would stamp the NEW instance's walk with the OLD
+                    # instance id (review 0457 P1-3).
+                    self._pending.pop(handle, None)
+                    existing = None
+            if existing is not None:
                 existing["dueMs"] = min(int(existing["dueMs"]), due_ms)
                 if reason == "window_changed":
                     existing["reason"] = reason
@@ -243,6 +262,7 @@ class ControlInventory:
                     "reason": reason,
                     "dueMs": due_ms,
                     "requestedAtMs": monotonic_ms,
+                    "instanceId": instance_id,
                 }
             self._wake.notify()
 
@@ -329,15 +349,41 @@ class ControlInventory:
         digest = content_hash(controls)
         observed_state_digest = state_hash(controls)
         root = _root_identity(controls)
-        # Dedup key must include the recording-time handle: two windows may
-        # share a root/title but be distinct (the compiler binds snapshots to
-        # the event's exact handle). Keying only on root would collapse them.
-        key = f"handle:{int(request['handle'])}:{root or ''}"
+        # Dedup key must include the recording-time handle AND the recorded
+        # instance: two windows may share a root/title but be distinct, and a
+        # reused handle after destroy hosts a NEW instance whose identical
+        # tree must still be snapshotted under its own id (review 0457
+        # P1-3 -- keying on handle alone let RI-0002 be silently labeled
+        # RI-0001 via the unchanged path). Keying only on root would collapse
+        # them; keying on handle would merge instances.
+        instance = str(request.get("instanceId") or "")
+        # In-flight generation check (review 0517 P1-2): if the handle's
+        # authoritative instance changed while the walk ran -- or is now
+        # unknowable (destroyed, tracking lost) -- this result can no longer
+        # vouch for the requested instance. Discard with a structured skip;
+        # never publish the old RI on new controls.
+        authority = self.instance_authority
+        if instance and callable(authority):
+            current = authority(int(request["handle"]))
+            if current != instance:
+                # The authoritative index moved on (destroy/reuse/retire):
+                # this walk cannot vouch for the requested instance.
+                self._skip("instance_superseded")
+                return
+        elif instance and authority is None:
+            # No authority wired (a bare inventory used without its
+            # correlator): attribution cannot be proven either way. The old
+            # label must not be published as verified -- structured discard
+            # with a diagnostic (review 0517 P1-2: unable-to-confirm is
+            # dropped, never stamped).
+            self._skip("instance_authority_unavailable")
+            return
+        key = f"handle:{int(request['handle'])}:{instance}:{root or ''}"
         with self._lock:
             if self._hashes.get(key) == (digest, observed_state_digest):
-                # Unchanged since the last walk of this window. The earlier
-                # snapshot still describes it, so consumers joining by time
-                # keep resolving to that one.
+                # Unchanged since the last walk of THIS instance of this
+                # window. The earlier snapshot still describes it, so
+                # consumers joining by time keep resolving to that one.
                 self._skip("unchanged")
                 return
             if len(self._snapshots) >= self._max_snapshots:
@@ -350,6 +396,11 @@ class ControlInventory:
                 "title": str(tree.get("title") or request.get("title") or ""),
                 "processName": str(request.get("processName") or ""),
             }
+            # S1 (design 09 §4): the snapshot names the recorded instance it
+            # walked, so compiler correlation binds snapshots to instances
+            # instead of re-deriving from handles.
+            if request.get("instanceId"):
+                window["instanceId"] = str(request["instanceId"])
             if root:
                 window["rootAutomationId"] = root
             self._snapshots.append({

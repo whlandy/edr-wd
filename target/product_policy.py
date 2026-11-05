@@ -68,6 +68,20 @@ def register_cleanup_hook(callback) -> None:
     _cleanup_hooks.append(callback)
 
 
+def replace_cleanup_hook(callback) -> None:
+    """Idempotent registration: drop any previously-registered hook that is
+    not this exact object and append `callback`. Module reloads bind new
+    function objects; without the replace semantics each reload would stack
+    another cleanup pass (and unlock call) onto every run teardown."""
+    with _mutex:
+        _cleanup_hooks[:] = [cb for cb in _cleanup_hooks
+                             if getattr(cb, "__module__", None)
+                             != getattr(callback, "__module__", None)
+                             or getattr(cb, "__qualname__", None)
+                             != getattr(callback, "__qualname__", None)]
+        _cleanup_hooks.append(callback)
+
+
 def _expire_if_needed(now: float) -> None:
     global _active
     if _active is not None and _active.expires_at <= now:
@@ -110,15 +124,27 @@ def require_product_run(run_token: str | None) -> ProductRunContext | None:
         return _active
 
 
-def end_product_run(run_token: str) -> None:
+def end_product_run(run_token: str):
+    """Release the active run. Returns the list of cleanup-hook results
+    (each hook's return value, e.g. structured cleanup errors) so callers
+    can surface real cleanup failures; raises ValueError for a bad token.
+    The hooks themselves always run — a failing hook never skips the rest
+    or the state drop."""
     global _active
     with _mutex:
         require_product_run(run_token)
         if _active is None:
             raise ValueError("product_run_expired")
         _active = None
+        results = []
         for callback in tuple(_cleanup_hooks):
-            callback()
+            try:
+                results.append(callback())
+            except Exception as exc:  # noqa: BLE001 — surfaced, never skipped
+                results.append({"errors": [
+                    f"{getattr(callback, '__name__', 'cleanup')}: "
+                    f"{type(exc).__name__}: {exc}"]})
+        return results
 
 
 def authorize_legacy_gui_call(tool_name: str) -> None:
@@ -168,3 +194,14 @@ def reset_for_tests() -> None:
     global _active
     with _mutex:
         _active = None
+        # 测试边界(0506 缺口2 修订):**仅移除 per-run 动态注册的
+        # tracker 清理 hook**(它们持有上个测试的 tracker/源/线程
+        # 引用);**保留导入时静态注册的 server 清理 hook**
+        # (_clear_product_run_state — 清 holder/facade/观测/锁)。
+        # 静态 hook 被清 = end 只跑 tracker hook → holder 残留、旧
+        # facade binding 泄漏(独立探针证实的确定性兼容回退)。
+        # per-run tracker hook 自身幂等(已停止 → 不重复操作源)。
+        _cleanup_hooks[:] = [
+            cb for cb in _cleanup_hooks
+            if getattr(cb, "__module__", None)
+            == "target.server"]

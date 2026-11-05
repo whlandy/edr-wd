@@ -46,6 +46,20 @@ class CompositeHookDriver:
             raise ValueError("CompositeHookDriver requires at least one driver")
         self._drivers = drivers
 
+    def window_hook_loss(self) -> int:
+        """Window events the platform hooks observed but could not attribute.
+
+        Aggregated from the children that report it; a driver without the
+        counter contributes zero (review 0457: hook-layer losses must reach
+        the final coverage block, not die at the hook).
+        """
+        total = 0
+        for driver in self._drivers:
+            counter = getattr(driver, "dropped_window_events", None)
+            if isinstance(counter, int) and not isinstance(counter, bool):
+                total += counter
+        return total
+
     def start(self, emit: Callable[[HookPacket], None]) -> None:
         started: list[HookDriver] = []
         try:
@@ -105,6 +119,9 @@ class QueuedCaptureSource:
         self.scope = scope
         self._sink = sink
         self._driver = driver
+        # Review 0517 P1-1: the composite's unattributable-window-event
+        # loss must be reachable from the session through THIS source.
+        self._hook_loss_consumed = 0
         self._correlator = correlator
         self._queue: queue.Queue[HookPacket | object] = queue.Queue(maxsize=queue_size)
         self._worker: threading.Thread | None = None
@@ -245,6 +262,19 @@ class QueuedCaptureSource:
         except Exception as exc:
             self.correlation_errors.append(str(exc))
             return None
+
+    def window_hook_loss(self) -> int:
+        """Window events the platform hooks could not attribute.
+
+        Absorbing read: each loss is reported exactly once, so repeated
+        recording()/status collection never re-accumulates the same
+        historical loss (review 0517 P1-1).
+        """
+        getter = getattr(self._driver, "window_hook_loss", None)
+        total = getter() if callable(getter) else 0
+        new_loss = total - self._hook_loss_consumed
+        self._hook_loss_consumed += max(0, new_loss)
+        return max(0, new_loss)
 
     def _enqueue(self, packet: HookPacket) -> None:
         """Native callback path: one non-blocking queue operation only."""

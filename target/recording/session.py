@@ -1262,6 +1262,32 @@ class RecordingSession:
         windows = tuple(
             dict(entry) for entry in getattr(correlator, "window_registry", ()) or ()
         )
+        # S1 (design 09 §4): the correlator's recorded-window timeline and the
+        # v2 schema ride along with the manifest it annotates. A correlator
+        # without a timeline (legacy) keeps producing v1 documents.
+        window_timeline = getattr(correlator, "window_timeline", None)
+        schema = ("edr.desktop-recording/v2"
+                  if isinstance(window_timeline, Mapping) or any(
+                      w.get("instanceId") for w in windows)
+                  else "edr.desktop-recording/v1")
+        dropped_packets = int(getattr(self._source, "dropped_packets", 0))
+        if window_timeline is not None and hasattr(correlator, "refresh_timeline_coverage"):
+            # Coverage reflects the losses this session actually observed --
+            # the platform hook's unattributable window events AND the
+            # capture queue's overflow (review 0457: driver loss must reach
+            # the final document, not die at the hook layer).
+            hook_loss = getattr(self._source, "window_hook_loss", None)
+            if callable(hook_loss):
+                correlator.note_hook_loss(hook_loss())
+            correlator.refresh_timeline_coverage(dropped_packets=dropped_packets)
+        timeline = None
+        if window_timeline is not None:
+            timeline = dict(window_timeline)
+            events = timeline.get("events")
+            if isinstance(events, tuple):
+                timeline["events"] = [dict(e) for e in events]
+            elif isinstance(events, list):
+                timeline["events"] = [dict(e) for e in events]
         return RawRecording(
             self.session_id,
             self.name,
@@ -1297,6 +1323,8 @@ class RecordingSession:
             rejections=tuple(
                 dict(entry) for entry in getattr(correlator, "rejections", ()) or ()
             ),
+            schema=schema,
+            window_timeline=timeline,
         )
 
 

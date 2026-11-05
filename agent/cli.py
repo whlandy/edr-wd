@@ -165,6 +165,60 @@ def recording_stop_advisories(result: dict, issues: list[dict],
             "回放只能锁住其中一个，无法证明步骤落在录制时的那个窗口里；"
             "请在每步操作前用稳定窗口根身份（automation id）重新锁定窗口，"
             "或避免流程跨越两个同标题窗口后 compile。")
+    window_source = [i for i in issues
+                     if i.get("code") == "compile_window_source_unresolved"]
+    if window_source:
+        advisories.append(
+            "golden 未就绪：存在无法从录制证据验证所属窗口的步骤"
+            "（窗口序列未生成，跨窗口回放契约不完整）；"
+            "在每步操作时确认目标窗口被录制器跟踪（handle/pid 稳定），"
+            "或拆分流程使每步都落在已跟踪窗口后 compile。")
+    coverage_incomplete = [i for i in issues
+                           if i.get("code") == "recording_window_coverage_incomplete"]
+    if coverage_incomplete:
+        advisories.append(
+            "golden 未就绪：录制窗口时间线的覆盖声明不完整"
+            "（destroy 能力 unknown 或有丢弃事件）——生命周期连续性无法证明；"
+            "重录以获得完整窗口事件覆盖后 compile。")
+    effect_unverified = [i for i in issues
+                         if i.get("code") == "compile_window_effect_unverified"]
+    if effect_unverified:
+        advisories.append(
+            "golden 未就绪：用户显式断言的目标窗口在窗口序列中没有声明身份"
+            "（显式效果无法构建，已保留诊断未静默丢弃）；"
+            "为该窗口补稳定身份或重录后 compile。")
+    window_conflict = [i for i in issues
+                       if i.get("code") == "compile_window_identity_conflict"]
+    if window_conflict:
+        advisories.append(
+            "golden 未就绪：同一录制窗口的证据出现矛盾的稳定身份"
+            "（快照 root 与步骤 selector 不一致）；"
+            "重新捕获该窗口的控件树，或为步骤补稳定窗口根身份后 compile。")
+    entry_identity = [i for i in issues
+                      if i.get("code") in {
+                          "entry_identity_no_manifest_match",
+                          "entry_identity_conflict",
+                          "entry_identity_unverifiable"}]
+    if entry_identity:
+        advisories.append(
+            "golden 未就绪：入口窗口身份无法从录制证据验证"
+            "（入口窗口恢复会被拒绝）；确认录制开始时入口窗口已被跟踪，"
+            "或重录以获得完整窗口清单。")
+    entry_root = [i for i in issues
+                  if i.get("code") in {"entry_root_unidentified",
+                                       "entry_root_ambiguous"}]
+    if entry_root:
+        seqs = ", ".join(str(i.get("sequence")) for i in entry_root)
+        advisories.append(
+            f"golden 未就绪：第 {seqs} 步入口/根窗口身份不唯一或不可辨识"
+            "（跨窗口重建需要唯一身份）；重录时使用稳定的窗口根 automation id，"
+            "或避免同标题多实例共存的流程后 compile。")
+    audit_failure = [i for i in issues
+                     if i.get("code") == "recovery_audit_write_failed"]
+    if audit_failure:
+        advisories.append(
+            "golden 未就绪：入口恢复的审计记录无法落盘"
+            "（按契约在任何目标副作用前停止）；检查 agent 本地磁盘/权限后重试。")
     missing_evidence = [i for i in issues
                         if i.get("code") == "recording_capture_evidence_unavailable"]
     if missing_evidence:
@@ -212,6 +266,12 @@ _STOP_ADVISORY_KNOWN_CODES = {
     "compile_transition_unbound", "compile_recording_empty",
     "recording_packets_dropped", "recording_correlation_errors",
     "recording_secret_review_required", "compile_window_identity_ambiguous",
+    "compile_window_source_unresolved", "compile_window_identity_conflict",
+    "recording_window_coverage_incomplete",
+    "compile_window_effect_unverified",
+    "entry_identity_no_manifest_match", "entry_identity_conflict",
+    "entry_identity_unverifiable", "entry_root_unidentified",
+    "entry_root_ambiguous", "recovery_audit_write_failed",
     "recording_capture_evidence_unavailable",
     "compile_weak_or_ambiguous_identity", "compile_weak_identity_unresolved",
     "compile_weak_identity_tree_undercount",

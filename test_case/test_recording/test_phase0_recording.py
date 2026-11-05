@@ -200,7 +200,9 @@ def test_window_transition_binds_to_preceding_action_by_causal_id():
         2, "window_transition", causal_id="cause-open-dialog",
         input_={
             "kind": "opened", "processName": "EDRClient.exe",
-            "titleRegex": "^Policy Dialog$", "timeoutSeconds": 15,
+            "titleRegex": "^Policy Dialog$",
+            "timeoutSeconds": 15,
+            "source": "native_transition",
         },
     )
     transition["observedTarget"] = None
@@ -215,6 +217,7 @@ def test_window_transition_binds_to_preceding_action_by_causal_id():
             "titleRegex": "^Policy Dialog$",
         },
         "timeoutSeconds": 15,
+        "source": "native_transition",
     }
 
 
@@ -1075,3 +1078,73 @@ def test_action_drift_into_same_titled_window_flags_the_earlier_step_too():
     assert "compile_window_identity_ambiguous" in result.case.steps[1].issues
     assert "compile_window_identity_ambiguous" in result.case.steps[2].issues
     assert "compile_window_identity_ambiguous" not in result.case.steps[0].issues
+
+
+def test_return_to_first_window_is_not_window_drift():
+    """S0 (design doc 09 §6.3): the collapsed-window check must compare a
+    recurring selector against the FIRST instance that sourced it, not the
+    immediately preceding action. Main window A -> dialog B -> main window A
+    is one window revisited, not two coexisting A windows: the handles of the
+    A steps match, so no drift is flaggable and the flow compiles ready."""
+    a1 = _event(1, causal_id="cause-1", ms=100)
+    b = _event(2, causal_id="cause-2", ms=200)
+    a2 = _event(3, causal_id="cause-3", ms=300, target={
+        "snapshotId": "OBS-3", "targetId": "T0003",
+        "fingerprint": "sha256:other", "controlType": "Button",
+        "automationId": "btnBack", "text": "返回", "protected": False,
+    })
+    a1["evidence"] = {"window": {
+        "title": "logo1", "processName": "EDRClient.exe",
+        "handle": 13239958, "rootAutomationId": "EdrMainWindow",
+    }}
+    b["evidence"] = {"window": {
+        "title": "日志中心", "processName": "EDRClient.exe",
+        "handle": 722784, "rootAutomationId": "LogCenterWindow",
+    }}
+    a2["evidence"] = {"window": {
+        "title": "logo1", "processName": "EDRClient.exe",
+        "handle": 13239958, "rootAutomationId": "EdrMainWindow",
+    }}
+    result = compile_recording(_recording(a1, b, a2))
+
+    assert result.golden.status == "ready", (
+        "A→B→A 的两个 A 步骤使用同一录制窗口 handle:同 selector 再次出现"
+        "与首次来源实例比较,不是与紧邻上一步比较")
+    flagged = [i.code for i in result.issues]
+    assert "compile_window_identity_ambiguous" not in flagged
+
+
+def test_recurring_selector_on_a_different_instance_still_refuses():
+    """S0 counterpart: a same selector reappearing on a DIFFERENT recorded
+    handle still proves two coexisting same-identity windows (or an
+    unprovable replacement) and must stay refused — the fix must not loosen
+    the real drift signal. The handles here differ between the first and the
+    recurring use of the same selector."""
+    a1 = _event(1, causal_id="cause-1", ms=100)
+    b = _event(2, causal_id="cause-2", ms=200)
+    a2 = _event(3, causal_id="cause-3", ms=300, target={
+        "snapshotId": "OBS-3", "targetId": "T0003",
+        "fingerprint": "sha256:other", "controlType": "Button",
+        "automationId": "btnBack", "text": "返回", "protected": False,
+    })
+    a1["evidence"] = {"window": {
+        "title": "logo1", "processName": "EDRClient.exe",
+        "handle": 101, "rootAutomationId": "EdrMainWindow",
+    }}
+    b["evidence"] = {"window": {
+        "title": "日志中心", "processName": "EDRClient.exe",
+        "handle": 202, "rootAutomationId": "LogCenterWindow",
+    }}
+    a2["evidence"] = {"window": {
+        "title": "logo1", "processName": "EDRClient.exe",
+        "handle": 303, "rootAutomationId": "EdrMainWindow",
+    }}
+    result = compile_recording(_recording(a1, b, a2))
+
+    assert result.golden.status == "incomplete"
+    flagged = [i.code for i in result.issues]
+    assert "compile_window_identity_ambiguous" in flagged, (
+        "同 selector 在另一录制 handle 上再现:两个同身份实例(或无法证明的替换)"
+        "仍必须拒绝")
+    assert "compile_window_identity_ambiguous" in result.case.steps[0].issues
+    assert "compile_window_identity_ambiguous" in result.case.steps[2].issues
