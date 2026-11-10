@@ -135,10 +135,13 @@ The compiler is honest by design:
   (`compile_transition_unbound` otherwise); same-process open/close pairs are
   folded into end-state verifiers.
 - A flow recorded across two coexisting same-titled windows cannot compile
-  `ready`: replay locks one window per collapsed identity, so action steps
-  whose recorded handles differ but whose replay window identity is identical
-  flag the whole group (`compile_window_identity_ambiguous`) and compile
-  `incomplete`. Capture a stable window root identity (automation id) instead.
+  `ready` unless declared identity evidence resolves them: replay locks one
+  window per collapsed identity, so action steps whose recorded handles
+  differ but whose replay window identity is identical flag the whole group
+  (`compile_window_identity_ambiguous`) and compile `incomplete`. Sequential
+  reopen (lifecycle-provable) and declared owner chains are the two
+  exemptions — see "Multi-Window Flows And Identity" below. Otherwise,
+  capture a stable window root identity (automation id) instead.
 - A weak-identity target (no automationId) must be proven unique against the
   recorded control tree before a step stays `ready`: zero candidates compile
   `incomplete` (`compile_weak_identity_unresolved`), multiple candidates
@@ -150,7 +153,9 @@ The compiler is honest by design:
   (`compile_recording_empty`), dropped input packets
   (`recording_packets_dropped`), correlation errors
   (`recording_correlation_errors`), a lifecycle screenshot that could not be
-  captured (`recording_capture_evidence_unavailable`), and protected text
+  captured (`recording_capture_evidence_unavailable` — except a step that
+  provably closed its own window, which carries the structural `afterFrame`
+  marker instead; see below), and protected text
   without an environment `textSource` (`recording_secret_review_required`)
   each compile `incomplete`.
 - A step whose event type is not in the action catalog (`compile_action_unsupported`),
@@ -230,6 +235,62 @@ Replay writes an append-only trace under `--trace-root`: `events.jsonl`,
 `evaluation.json`, and (with `--persist-screenshots`) source-redacted runtime
 frames. An interrupted replay still finalizes its trace with `TRACE_ABORTED`
 before re-raising.
+
+## Multi-Window Flows And Identity
+
+Flows that move between same-titled windows — a settings dialog opening
+language submenus, a window closed and reopened mid-flow — are compiled from
+window-identity evidence, never from title proximity or timing guesses:
+
+- **Sequential reopen**: two rounds of the same dialog whose lifecycle
+  intervals provably never overlap (first instance destroyed before the
+  second appeared, per the recorded timeline) are exempted from identity
+  collapse. Coexisting same-titled windows still refuse without a declared
+  relation (`compile_window_identity_ambiguous`).
+- **Owner chains**: when the capture proves a native owner edge
+  (`GetAncestor(GA_ROOTOWNER)` resolved to a recorded instance), the golden
+  declares `ownerWindowId` and replay narrows coexisting candidates through
+  the live owner handle. An unbound or dead owner keeps the gate closed.
+- **Menu-layout structural locators**: weak-identity menu items (Qt menus
+  expose no automationId) compile a `menu-layout/v1` contract — the complete
+  sibling row set normalized against the recorded menu geometry. Replay
+  re-resolves the contract in the current tree, verifies exactly one
+  candidate, and clicks with the freshly materialized hit (text from the
+  resolved projection, never the recorded label alone and never a recorded
+  screen point). When several same-titled windows coexist, the per-step
+  selector also narrows the binding: each candidate window's own tree must
+  resolve the structure uniquely, and windows already bound in the run are
+  excluded from re-resolution.
+- **Layout drag classification**: a drag whose start AND end identity are
+  title-bar features is a layout move and verifies position, not data; a
+  data object dragged onto a title bar keeps its business-result verifier
+  (`compile_drag_verifier_required` stays fail-closed on missing start
+  evidence).
+- **Self-closing steps**: a step that destroys its own locked window cannot
+  produce an after-frame. The evidence store probes the locked handle and
+  records a structural `afterFrame` marker (only a provably dead HWND
+  reclassifies — an unknown stays `recording_capture_evidence_unavailable`);
+  the close itself is proven by the folded window-transition verifiers.
+
+## Failure Trajectory Recovery (design 12)
+
+When a recorded flow fails to compile or replay, recovery runs in a fixed
+order — never by deleting steps, fabricating verifiers, or editing raw
+captures:
+
+1. **Repair**: bounded, evidence-constrained candidate derivations from the
+   original capture (parent hash, minimal diff, repair rule recorded);
+   validated statically, then through the real replay and independent
+   assertions. Only a real replay pass counts as recovered.
+2. **Step plan**: if no repair verifies, every raw business operation point
+   — not only the compiled ones — maps to an executable edr-wd step with
+   explicit gaps for unresolvable targets.
+3. **Agent re-record**: the plan executes through the controlled action
+   chain with the real recorder started before the first business action;
+   stop/persist/collect/compile and a fresh run/binding replay with
+   independent assertions follow. Only both layers failing yields an
+   `unrecovered` conclusion — authorization or environment gaps are
+   `blocked`, never counted as attempts.
 
 ## Robustness Boundaries
 

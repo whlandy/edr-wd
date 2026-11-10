@@ -19,6 +19,8 @@ visual locators — with an explicit honesty gate: only traces compiled
 | Target-local MCP server + GUI backends (pywinauto / macOS AX) | `target/` |
 | Semantic window/control automation | `references/element-click.md` |
 | Desktop recording → golden trace → replay | `references/recording.md` |
+| Multi-window flows: same-titled dialogs/menus, sequential reopen, owner chains | `references/recording.md`, `docs/architecture/09…12` |
+| Trajectory self-correction: repair candidates → step plan → agent re-record | `agent/recording/trace_repair.py`, `agent/recording/step_plan.py`, `agent/recording/rerecord_loop.py`, `docs/architecture/12-…` |
 | Fixed product verification SOPs | `sops/INDEX.md` |
 | Planner and evaluation | `agent/planner/`, `agent/eval/` |
 
@@ -120,7 +122,10 @@ python3 scripts/open_recorder.py        # target-local double-click entry
 - `references/testing.md` — test suites, live gates, failure triage.
 - `references/recording.md` — recording/replay end-to-end guide.
 - `references/agent-workflow.md` — lifecycle and deployment internals.
-- `docs/architecture/` — design documents (03 covers record→replay).
+- `docs/architecture/` — design documents: 03 record→replay, 09 cross-window
+  sequence & instance binding, 10 compiler disambiguation, 11 basic-action
+  usability & integrity (menu-layout locators, capture completeness C-rules),
+  12 failure trajectory self-correction & agent re-record.
 - `sops/INDEX.md` — fixed product verification procedures.
 
 ## Security Notes

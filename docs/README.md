@@ -31,6 +31,16 @@ Configuration assets:
   action IDs, observations, execution, trace, recovery, planner, and reports.
 - [`architecture/03-desktop-record-script-golden-replay-design.md`](architecture/03-desktop-record-script-golden-replay-design.md):
   manual desktop action capture, executable test generation, and semantic/visual golden replay.
+- [`architecture/09-cross-window-sequence-and-instance-binding-design.md`](architecture/09-cross-window-sequence-and-instance-binding-design.md):
+  instance/window separation, causal window transitions, and per-run binding.
+- [`architecture/10-cross-window-compiler-disambiguation-r0.md`](architecture/10-cross-window-compiler-disambiguation-r0.md):
+  same-title window disambiguation and ready-gate semantics.
+- [`architecture/11-recording-basic-actions-usability-and-integrity-design.md`](architecture/11-recording-basic-actions-usability-and-integrity-design.md):
+  language menus/multi-window identity, capture completeness rules (C01–C13),
+  menu-layout structural locators, layout-drag classification.
+- [`architecture/12-trace-self-correction-and-agent-rerecord-design.md`](architecture/12-trace-self-correction-and-agent-rerecord-design.md):
+  failed-trajectory recovery: evidence-constrained repair, full operation-point
+  step plans, agent re-record with record-before-act, budgeted conclusions.
 - [`todo/desktop-recording-golden-replay.md`](todo/desktop-recording-golden-replay.md):
   phased implementation and verification tracker for desktop recording and replay.
 
@@ -44,12 +54,15 @@ Implementation ownership:
 ```text
 agent/execution/       execute and recover
 agent/trace/           persist events/evidence and render projections/reports
+agent/recording/       compile, repair, step-plan, re-record loop, ledger
 agent/planner/         create and validate structured plans
 agent/eval/            evaluate datasets, metrics, thresholds, and CI gates
 target/action_catalog/ define stable actions
 target/action_dispatcher/ validate and dispatch target actions
 target/observations/   snapshot and resolve observation-local targets
 target/automation/     platform-native GUI implementations
+target/windowing/      instance tracking, binding, effects, lifecycle
+target/recording/      capture sources, correlator, evidence, result store
 ```
 
 ## Historical Records

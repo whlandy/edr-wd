@@ -35,6 +35,8 @@ before executing GUI/PowerShell actions.
 | Add fixed product verification | `sops/INDEX.md` | `sops/TEMPLATE.md` |
 | Plan/evaluate action sequences | `agent/planner/`, `agent/eval/` | `references/mcp-tools.md`, `references/testing.md` |
 | Record, assert, generate golden trace, replay | `edr-wd record start` | `references/recording.md`, `references/testing.md` |
+| Debug multi-window / same-titled flows (dialogs, language menus, reopen) | `compile-report.json` issue codes | `references/recording.md`, `docs/architecture/09…12` |
+| Recover a failed recording/replay (repair → step plan → agent re-record) | `agent/recording/trace_repair.py` | `docs/architecture/12-trace-self-correction-and-agent-rerecord-design.md` |
 | Compare end/client and cloud state | Browser Use cloud observation + EDR-WD client observation | `references/end-cloud-consistency.md` |
 | Use CHM manuals / RAG / action knowledge | separate `edr-rag` repo | `docs/requirements/EDR-RAG-INTEGRATION.md` |
 
@@ -214,6 +216,33 @@ same-target step), proving the movement changed state. This is an intentional
 safety gate — do not weaken it by fabricating a verifier. To make a scroll/drag
 replayable, use `record assert` after the gesture, then recompile. See
 `references/testing.md` for the readiness gate and the diagnostic command.
+
+Multi-window flows (a settings dialog opening same-titled submenus, or a
+window closed and reopened mid-flow) compile honestly rather than guessing:
+
+- Two rounds of the same dialog that never coexist (sequentially provable
+  from the lifecycle timeline) are exempted from identity collapse;
+  coexisting same-titled windows still refuse without declared owner
+  evidence (`compile_window_identity_ambiguous`).
+- Menus and popups that expose no automationId compile with a
+  `menu-layout/v1` structural contract: complete sibling layout normalized
+  against the recorded menu geometry, replay re-resolves it in the current
+  tree and clicks with the fresh hit — never the recorded label or screen
+  point.
+- Scroll/drag classification: layout drags (title-bar endpoints on both
+  ends) exempt from data assertions; a data object dragged onto a title bar
+  does NOT qualify — start evidence must corroborate
+  (`compile_drag_verifier_required` stays fail-closed).
+- A step that closes its own window records a structural `afterFrame`
+  marker instead of a capture error; the close is proven by the folded
+  window-transition verifiers, never by a fabricated frame.
+
+Recovery of a failed trajectory follows design 12: evidence-constrained
+repair candidates first (bounded, sourced, never fabricating lifecycle
+facts), then a full operation-point step plan from the raw capture, then an
+agent re-record that starts the real recorder before the first business
+action and validates through a fresh run. See
+`docs/architecture/12-trace-self-correction-and-agent-rerecord-design.md`.
 
 ## MaaFramework Node Table
 
