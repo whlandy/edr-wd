@@ -39,6 +39,16 @@ except ImportError:
 
 logger = logging.getLogger("edr_wd.pywinauto_client")
 
+try:
+    from automation.native_pointer import send_left_click
+except ImportError:
+    from target.automation.native_pointer import send_left_click
+
+try:
+    from automation.native_inventory import native_top_windows
+except ImportError:
+    from target.automation.native_inventory import native_top_windows
+
 #: The service that actually draws the EDR UI. `HisecEndpointAgent.exe cmd ui`
 #: is not a launcher — it is a gRPC client that asks this service, over local
 #: IPC, to show the window. With the service absent nothing is listening, the
@@ -142,12 +152,7 @@ class WindowsGUI:
         from pywinauto import Desktop
 
         windows = []
-        for win in Desktop(backend=self.backend).windows():
-            try:
-                if not win.is_top_level():
-                    continue
-            except Exception:
-                pass
+        for win in native_top_windows(Desktop, backend=self.backend):
             try:
                 if win.process_id() != pid:
                     continue
@@ -319,6 +324,32 @@ class WindowsGUI:
         except Exception:
             enabled = False
         handle = self._wrapper_handle(win)
+        # Design 11 D2: native owner edge for coexisting same-titled windows
+        # (settings dialog + its language submenu both read "EDRClient").
+        # GA_ROOTOWNER; 0/no-owner → absent key, never fabricated.
+        owner_handle = None
+        if isinstance(handle, int) and handle:
+            try:
+                import ctypes
+                owner_handle = int(
+                    ctypes.WinDLL("user32", use_last_error=True).GetAncestor(
+                        handle, 3)) or None  # GA_ROOTOWNER
+            except Exception:
+                owner_handle = None
+        # §7.2: focus verification reads the inventory's foreground fact —
+        # the enumeration never carried it, so the live refresh answered
+        # foreground=False for every window and refused all binds
+        # (live run 47e0aac2: "bound instance is not foreground after
+        # focus"). GetForegroundWindow() == handle.
+        foreground = False
+        if isinstance(handle, int) and handle:
+            try:
+                import ctypes
+                foreground = int(
+                    ctypes.WinDLL("user32", use_last_error=True)
+                    .GetForegroundWindow()) == handle
+            except Exception:
+                foreground = False
 
         return {
             "title": title,
@@ -329,6 +360,8 @@ class WindowsGUI:
             "visible": visible,
             "enabled": enabled,
             "rectangle": rect_dict,
+            "owner_handle": owner_handle,
+            "foreground": foreground,
         }
 
     def _find_windows(self, title_re: str = None, process_name: str = None,
@@ -343,16 +376,7 @@ class WindowsGUI:
 
         matched = []
         try:
-            desktop = Desktop(backend=self.backend)
-            for win in desktop.windows():
-                try:
-                    is_top = win.is_top_level()
-                except Exception:
-                    is_top = True  # keep window if is_top_level() is unavailable
-
-                if not is_top:
-                    continue
-
+            for win in native_top_windows(Desktop, backend=self.backend):
                 info = self._win_info(win)
                 if info is None:
                     continue
@@ -406,12 +430,7 @@ class WindowsGUI:
         try:
             from pywinauto import Desktop
             windows = []
-            for win in Desktop(backend=self.backend).windows():
-                try:
-                    if not win.is_top_level():
-                        continue
-                except Exception:
-                    pass  # keep window if is_top_level() is unavailable
+            for win in native_top_windows(Desktop, backend=self.backend):
                 info = self._win_info(win)
                 if info:
                     windows.append(info)
@@ -1255,41 +1274,12 @@ class WindowsGUI:
                 if isinstance(guarded, dict):
                     return guarded
 
-            try:
-                ctrl.click_input()
-                time.sleep(0.1)
-                return {"ok": True, "method": "click_input", "control_id": control_id,
-                        "automation_id": getattr(ctrl, "automation_id", lambda: None)()}
-            except Exception as click_error:
-                if physical_required:
-                    # 显式物理声明的控件：click_input 失败必须如实失败，
-                    # 坐标 fallback 不得冒充物理控件点击通过。
-                    logger.warning("physical click_input failed for %r: %s",
-                                   getattr(ctrl, "automation_id", lambda: None)(),
-                                   click_error)
-                    return {
-                        "ok": False,
-                        "method": "click_input_failed",
-                        "control_id": control_id,
-                        "automation_id": getattr(ctrl, "automation_id", lambda: None)(),
-                        "click_input_error": str(click_error),
-                    }
-                logger.warning("click_input failed; falling back to coordinates: %s", click_error)
-                if callable(pointer_guard):
-                    guarded = pointer_guard(x, y)
-                    if isinstance(guarded, dict):
-                        return guarded
-                mouse.click(button="left", coords=(x, y))
-                time.sleep(0.1)
-                return {
-                    "ok": True,
-                    "method": "coordinate_fallback",
-                    "control_id": control_id,
-                    "automation_id": getattr(ctrl, "automation_id", lambda: None)(),
-                    "x": x,
-                    "y": y,
-                    "click_input_error": str(click_error),
-                }
+            # Submission facts only. Never retry via another primitive after
+            # an unknown/partial send; the caller verifies the declared effect.
+            result = send_left_click(x, y)
+            result.update(control_id=control_id,
+                          automation_id=getattr(ctrl, "automation_id", lambda: None)())
+            return result
         except Exception as e:
             logger.exception("click failed")
             return {"ok": False, "error": str(e)}
@@ -1357,9 +1347,7 @@ class WindowsGUI:
         dump_tree's window_rectangle + control rectangle center.
         """
         try:
-            mouse.click(button="left", coords=(int(x), int(y)))
-            time.sleep(0.1)
-            return {"ok": True, "method": "mouse.click", "x": int(x), "y": int(y)}
+            return send_left_click(int(x), int(y))
         except Exception as e:
             logger.exception("click_at failed")
             return {"ok": False, "error": str(e)}

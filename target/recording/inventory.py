@@ -26,6 +26,17 @@ import threading
 import time
 from typing import Any, Mapping
 
+#: One bounded re-read after a window_changed walk found the tree empty.
+#: The SHOW walk races the window's own population: a menu's items are
+#: inserted after the popup window itself is shown, so the walk can read an
+#: empty container and a single empty read must not end that instance's
+#: capture — the click that follows may be its only observer and its own
+#: debounced walk can land after DESTROY (live RI-0010 ended with zero
+#: snapshots exactly this way). Bounded: exactly one retry; a retry that
+#: reads empty again is a structured no_controls skip, never an infinite
+#: loop (design 11 §5.3).
+_EMPTY_WALK_RETRY_MS = 500
+
 #: Fields kept for each control. The walk reports more than this; what is
 #: dropped is either per-run noise (`depth`) or unusable for identifying a
 #: control later.
@@ -204,6 +215,11 @@ class ControlInventory:
         #: last recording hard to explain.
         self.skipped: dict[str, int] = {}
         self.errors: list[str] = []
+        #: Bounded re-reads taken because a window_changed walk read an
+        #: empty tree. Keyed by skip reason (currently only "no_controls").
+        #: Transparent accounting for the retry itself (design 11 §5.1:
+        #: fallbacks must be counted and explainable, not silent).
+        self.retried: dict[str, int] = {}
 
     # -- request side ---------------------------------------------------
 
@@ -268,6 +284,51 @@ class ControlInventory:
 
     def _skip(self, reason: str) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
+
+    def _retry_empty_window_changed(self, request: Mapping[str, Any]) -> None:
+        """One bounded re-read for an empty window_changed walk.
+
+        Only the window_changed reason qualifies: that walk fires the moment
+        a window enters the flow, and a menu that has not finished populating
+        reads empty before its items are inserted. The ordinary step walk
+        keeps its existing semantics — debounced, deduplicated, and an empty
+        read there is an honest terminal skip, not something to paper over
+        with retries. The re-read is a normal pending request: it merges with
+        anything already queued for the handle (accelerating a pending step
+        walk instead of paying a second walk), carries the same instance
+        attribution, and the authority check at publish time applies to its
+        result as to any other. A re-read that reads empty again is final —
+        the retry request is marked and never re-queued, so the bound is
+        exactly one extra walk. The attempt is counted in ``retried`` so the
+        recovery itself is visible in diagnostics (design 11 §5.1).
+        """
+        if request.get("reason") != "window_changed" or request.get("isRetry"):
+            return
+        self.retried["no_controls"] = self.retried.get("no_controls", 0) + 1
+        now_ms = int(time.monotonic() * 1000)
+        due_ms = now_ms + _EMPTY_WALK_RETRY_MS
+        with self._wake:
+            if self._stopping:
+                return
+            existing = self._pending.get(request["handle"])
+            if existing is not None:
+                # A queued walk for the same handle re-reads the window
+                # anyway; pulling its due time earlier gives it the retry's
+                # job. Its reason stays whatever it was (a pending step walk
+                # still walks as a step).
+                existing["dueMs"] = min(int(existing["dueMs"]), due_ms)
+            else:
+                self._pending[request["handle"]] = {
+                    "handle": request["handle"],
+                    "title": request.get("title") or "",
+                    "processName": request.get("processName") or "",
+                    "reason": "window_changed",
+                    "dueMs": due_ms,
+                    "requestedAtMs": request.get("requestedAtMs"),
+                    "instanceId": request.get("instanceId"),
+                    "isRetry": True,
+                }
+            self._wake.notify()
 
     # -- lifecycle ------------------------------------------------------
 
@@ -345,6 +406,7 @@ class ControlInventory:
         controls = normalize_controls(tree.get("controls"))
         if not controls:
             self._skip("no_controls")
+            self._retry_empty_window_changed(request)
             return
         digest = content_hash(controls)
         observed_state_digest = state_hash(controls)
@@ -432,6 +494,9 @@ class ControlInventory:
             return {
                 "snapshotCount": len(self._snapshots),
                 "skipped": dict(self.skipped),
+                # Retry accounting rides the same read (design 11 §5.1):
+                # the bounded re-reads 1500 added were invisible here too.
+                "retried": dict(self.retried),
                 "errors": list(self.errors[-8:]),
             }
 

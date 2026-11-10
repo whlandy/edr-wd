@@ -422,11 +422,54 @@ class RecordingEvidenceStore:
             return replace(event, evidence=evidence)
         except Exception as exc:
             evidence = dict(event.evidence)
-            evidence["captureError"] = {
-                "code": "recording_capture_evidence_unavailable",
-                "message": str(exc),
-            }
+            # A step that closes its own locked window (the close-button
+            # click this store exists to record) destroys its evidence
+            # surface before the after-frame can be taken. That is a
+            # structural fact, not a capture failure: the disappearance is
+            # separately proven by the window_transition facts the
+            # correlator records. Probe the locked handle; only a provably
+            # dead locked window reclassifies — every other failure keeps
+            # the captureError path.
+            if self._locked_window_destroyed():
+                evidence["afterFrame"] = {
+                    "state": "window_destroyed_by_action",
+                    "reason": str(exc),
+                }
+            else:
+                evidence["captureError"] = {
+                    "code": "recording_capture_evidence_unavailable",
+                    "message": str(exc),
+                }
             return replace(event, evidence=evidence)
+
+    def _locked_window_destroyed(self) -> bool:
+        """Is the backend's locked window provably gone right now?
+
+        Only a definitive dead HWND counts. An unverifiable answer (no
+        lock, probe failure, foreign backend) keeps the error path: an
+        unknown must never be quietly turned into a structural exemption.
+        """
+        get_lock = getattr(self._backend, "get_window_lock", None)
+        if not callable(get_lock):
+            return False
+        try:
+            lock = (get_lock() or {}).get("lock") or {}
+        except Exception:
+            return False
+        handle = lock.get("handle")
+        if not isinstance(handle, int) or isinstance(handle, bool) or handle <= 0:
+            return False
+        owner = getattr(self._backend, "_win32_window_owner", None)
+        if not callable(owner):
+            return False
+        try:
+            result = owner(handle)
+        except Exception:
+            return False
+        if not isinstance(result, Mapping):
+            return False
+        reason = str(result.get("reason") or "")
+        return result.get("ok") is False and "no longer exists" in reason
 
     def get(self, capture_id: str) -> dict[str, Any]:
         with self._lock:

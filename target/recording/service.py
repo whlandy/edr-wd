@@ -78,15 +78,35 @@ class RecordingService:
             current = getattr(source, "current_observed_target", None)
             return current() if callable(current) else None
 
+        def mark_then(action):
+            """Stamp the correlator before running a panel-button callback.
+
+            The button's own down/up packets reach the hook right after this
+            fires; the correlator reads the mark window to tell the recorder
+            operating itself from the panel swallowing a click aimed at the
+            target (C08).  Failure to stamp must never block the action —
+            the action owns recording state, the mark is only diagnostics.
+            """
+            def run(*args, **kwargs):
+                correlator = getattr(source, "_correlator", None)
+                mark = getattr(correlator, "mark_recorder_control", None)
+                if callable(mark):
+                    try:
+                        mark()
+                    except Exception:
+                        pass
+                return action(*args, **kwargs)
+            return run
+
         indicator = self.indicator_factory(
             name,
             scope,
             IndicatorCallbacks(
-                pause=session.pause,
-                resume=session.resume,
+                pause=mark_then(session.pause),
+                resume=mark_then(session.resume),
                 # 面板/浮窗的 Stop 必须走与 CLI stop 相同的持久化链
                 # （result_store），否则浮窗停止后 Agent 断连即丢录制。
-                stop=self.stop,
+                stop=mark_then(self.stop),
                 add_assertion=session.add_assertion,
                 read_target=read_target,
             ),
@@ -190,13 +210,35 @@ class RecordingService:
                 pass
         return result
 
+    def _mark_recorder_control(self) -> None:
+        """C08 stamp for EVERY stop/pause/resume entry point.
+
+        The panel's stop (RecorderUIController.apply_ui_request → service)
+        previously bypassed the indicator's mark_then wrapper, so the stop
+        click's own down/up packets classified as recorder_ui — the panel
+        "swallowing input aimed at the target" — and flagged every honest
+        capture with a false occlusion advisory (live REC-079b4008 and the
+        three rounds before it). Same stamp, every door."""
+        session = self.manager.current()
+        source = getattr(session, "_source", None)
+        correlator = getattr(source, "_correlator", None)
+        mark = getattr(correlator, "mark_recorder_control", None)
+        if callable(mark):
+            try:
+                mark()
+            except Exception:
+                pass
+
     def pause(self) -> dict:
+        self._mark_recorder_control()
         return {"ok": True, **self.manager.current().pause().to_dict()}
 
     def resume(self) -> dict:
+        self._mark_recorder_control()
         return {"ok": True, **self.manager.current().resume().to_dict()}
 
     def stop(self) -> dict:
+        self._mark_recorder_control()
         receipt, recording = self.manager.current().stop()
         result = {"ok": True, **receipt.to_dict(), "recording": recording.to_dict()}
         # Persist before handing the document back: the caller may disconnect

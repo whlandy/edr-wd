@@ -222,6 +222,17 @@ def test_window_transition_binds_to_preceding_action_by_causal_id():
 
 
 def test_root_identified_action_does_not_mix_post_action_title_into_selector():
+    """post-action title 不得混入 selector（三层防护后的联合身份形态）。
+
+    历史缺陷是 mouse-down 后窗口改名、post-action title 与 pre-action
+    control root 拼出从未共存的窗口。当前由三层防护: (1) 采集侧 stamp
+    取 mouse-down 时刻的 press["window"]（title 与 handle 同源）;
+    (2) D2-0335 F1: root 来自同 handle 快照，不用 hit-test 控件链;
+    (3) 编译侧 identity 归一化拒绝同 RI 矛盾身份。title 与 root 同源后，
+    selector 携带联合身份 {root, titleRegex} —— 回放 binding 联合匹配
+    （root AND title），同 root 父子窗口得以区分（live REC-ccd6612:
+    Select Folder 与 Trusted List 同 root 不同 title）。
+    """
     click = _event(1, causal_id="cause-open-log")
     click["scope"]["windowTitle"] = "^(logo1|Log Center)$"
     click["observedTarget"]["automationId"] = "EdrMainWindow.openLog"
@@ -239,6 +250,7 @@ def test_root_identified_action_does_not_mix_post_action_title_into_selector():
 
     assert step.selector.window == {
         "processName": "EDRClient.exe", "rootAutomationId": "EdrMainWindow",
+        "titleRegex": "^Log\\ Center$",
     }
     assert step.verifiers[-1]["expected"]["title"] == "Log Center"
 

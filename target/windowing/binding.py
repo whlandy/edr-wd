@@ -469,10 +469,103 @@ class WindowBindingFacade:
                 "window_binding_not_found",
                 "no live window matches the declared identity")
         if len(candidates) > 1:
+            # Design 11 D2: a declared ownerWindowId narrows coexisting
+            # same-titled windows through the live owner chain — the submenu
+            # of the settings dialog is owned by THAT dialog's live HWND.
+            # Narrowing requires the owner window to be ALREADY BOUND in
+            # this run: no owner binding, no narrowing (fail closed, no
+            # guess). The owner's live native handle must still be present
+            # in the refreshed inventory; a stale/hidden owner refuses.
+            owner_wid = identity.get("ownerWindowId")
+            if isinstance(owner_wid, str) and owner_wid:
+                owner_binding = self._bindings.get(owner_wid)
+                owner_usable = (
+                    owner_binding is not None
+                    and owner_binding.state == "BOUND")
+                if owner_usable:
+                    live = self._session.refresh()
+                    owner_live = [
+                        item for item in live
+                        if _field(item, 'native_id') == owner_binding.native_id]
+                    owner_handle = _field(
+                        owner_live[0], 'handle') if owner_live else None
+                    if owner_handle is not None:
+                        owned = [
+                            item for item in candidates
+                            if _field(item, 'owner_handle') == owner_handle]
+                        if len(owned) == 1:
+                            return owned[0]
             raise WindowBindingRefusal(
                 "window_binding_ambiguous",
                 f"{len(candidates)} live windows match the declared identity")
         return candidates[0]
+
+    def _structure_narrow(self, candidates: list, identity: Mapping,
+                          control_selector: Mapping | None) -> WindowIdentity:
+        """父上下文约束下独立识别子菜单（design 11 D2 续）。
+
+        多个同名候选并存时，逐候选在其**自身控件树**内应用声明的
+        结构选择器（menu-layout/v1 等）：恰好一个候选内唯一解析 → 该
+        候选胜出；零个或多个候选唯一解析 → 拒绝，不选"最新窗口"。
+        选择器来自当前步骤的声明（golden），不来自时间邻近或
+        causalId。菜单类型/进程/可见性作为候选前置过滤。
+        """
+        if not isinstance(control_selector, Mapping) \
+                or not control_selector:
+            raise WindowBindingRefusal(
+                "window_binding_ambiguous",
+                "structure narrowing requires a declared control selector")
+        backend = getattr(self._session, "backend", None)
+        dump = getattr(backend, "dump_tree_for_window", None)
+        if not callable(dump):
+            raise WindowBindingRefusal(
+                "window_binding_ambiguous",
+                "structure narrowing unavailable: no per-window tree reader")
+        try:
+            from agent.locator import HybridLocator, LocatorRequest, LocatorError
+        except ImportError:  # target-local deployment: vendored locator
+            from locator import HybridLocator, LocatorRequest, LocatorError
+        locator = HybridLocator()
+        resolved_candidates = []
+        for item in candidates:
+            handle = _field(item, 'handle')
+            if handle is None:
+                continue
+            tree = dump(int(handle), max_depth=15)
+            if not isinstance(tree, Mapping) or not tree.get("ok"):
+                continue
+            controls = tree.get("controls")
+            if not isinstance(controls, list):
+                continue
+            # Normalize to the observation projection: dump rows carry the
+            # Mapping rectangle form, which the locator's rect reader
+            # (list/tuple only) would drop — the projection converts it to
+            # [l, t, r, b] and adds the stable fingerprint/target ids.
+            try:
+                from .observation import normalize_observed_control
+                controls = [normalize_observed_control(c, {}, i + 1)
+                            for i, c in enumerate(controls)
+                            if isinstance(c, Mapping)]
+            except ImportError:
+                from windowing.observation import normalize_observed_control
+                controls = [normalize_observed_control(c, {}, i + 1)
+                            for i, c in enumerate(controls)
+                            if isinstance(c, Mapping)]
+            try:
+                hits = locator.collect_candidates(
+                    LocatorRequest("gui.click", {}, dict(control_selector)),
+                    {"observation_id": f"bind-narrow-{_field(item, 'native_id')}",
+                     "controls": controls})
+            except (LocatorError, ValueError):
+                hits = ()
+            if len(hits) == 1:
+                resolved_candidates.append(item)
+        if len(resolved_candidates) == 1:
+            return resolved_candidates[0]
+        raise WindowBindingRefusal(
+            "window_binding_ambiguous",
+            f"{len(candidates)} live windows match the declared identity; "
+            f"structure narrowing resolved {len(resolved_candidates)}")
 
     def _reverify_fields(self, binding: _WindowBinding, observed: Mapping) -> None:
         """§7.2 step 3: full declared-field re-verification. ANY failure
@@ -515,7 +608,8 @@ class WindowBindingFacade:
     # ---- public protocol ----
 
     def bind(self, window_id: str, identity: Mapping,
-             run_token: str | None = None) -> dict:
+             run_token: str | None = None,
+             control_selector: Mapping | None = None) -> dict:
         with self._lock:
             self._require_capability()
             token = run_token or self._lease_token
@@ -535,7 +629,36 @@ class WindowBindingFacade:
                 return self.reverify(window_id, prior.token,
                                      run_token=token)
             with self._policy.authorized_dispatch(token):
-                resolved = self._resolve_unique(declared)
+                try:
+                    resolved = self._resolve_unique(declared)
+                except WindowBindingRefusal as exc:
+                    # 父上下文约束下独立识别子菜单：多候选且声明了
+                    # 结构选择器时，逐候选树内唯一解析（design 11 D2 续）。
+                    if "ambiguous" not in str(getattr(exc, "code", "")) \
+                            or not control_selector:
+                        raise
+                    live_now = self._session.refresh()
+                    candidates = [
+                        item for item in live_now
+                        if _field(item, 'process_name')
+                        == declared.get("processName")
+                        and not _field(item, 'lost')]
+                    # A window already BOUND in this run belongs to its own
+                    # W and is never another W's instance — offering it as a
+                    # candidate lets the structural matcher re-resolve the
+                    # SAME window (its tree contains nested submenu rows when
+                    # a child popup is open) and end in the shared-instance
+                    # refusal instead of the real match. Exclude bound
+                    # natives before narrowing.
+                    bound_natives = {b.native_id for wid, b in
+                                     self._bindings.items()
+                                     if wid != window_id
+                                     and b.state == "BOUND"}
+                    narrowed_candidates = [
+                        c for c in candidates
+                        if _field(c, 'native_id') not in bound_natives]
+                    resolved = self._structure_narrow(
+                        narrowed_candidates, declared, control_selector)
             native_id = _field(resolved, 'native_id')
             if self._tracker is not None:
                 # §7.4:绑定目标代际必须来自覆盖充分的**本次**实例

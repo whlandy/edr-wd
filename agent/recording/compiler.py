@@ -45,6 +45,35 @@ _VERIFIER_REQUIRED_ISSUE = {
     ),
 }
 
+
+def _is_layout_drag(event: RawCaptureEvent) -> bool:
+    """布局类拖拽判别(0002 口径):拖拽终点命中**目标窗口自身的标题
+    栏/框架**特征 —— automationId 指向 title widget(标题文本/标题
+    容器),操作语义是移动或缩放窗口,不是对数据组件的操作。
+
+    数据类拖拽(终点落在列表行/表格/树/按钮等组件)不在此列,仍保留
+    结果验证。判别只看终点命中的控件身份,不看坐标差(坐标差无法
+    区分"拖标题栏"与"拖到标题栏附近的组件")。
+    """
+    identity = (event.input or {}).get("endTarget")
+    if not isinstance(identity, Mapping):
+        return False
+    automation_id = str(identity.get("automationId") or "")
+    control_type = str(identity.get("controlType") or "").lower()
+    end_titlebar = "titlewidget" in automation_id.lower() or (
+        control_type == "text" and "title" in automation_id.lower())
+    if not end_titlebar:
+        return False
+    # §7 起点印证:豁免须双端都是标题栏。数据对象拖到标题栏不是移动
+    # 窗口;起点身份缺失(未观测)或非标题栏 → fail-closed 保留验证。
+    start = event.observed_target
+    if start is None:
+        return False
+    start_automation_id = str(start.automation_id or "")
+    start_control_type = str(start.control_type or "").lower()
+    return "titlewidget" in start_automation_id.lower() or (
+        start_control_type == "text" and "title" in start_automation_id.lower())
+
 _CONTROL_ASSERTION_TYPES = frozenset({
     "text_equals", "text_contains", "value_equals", "visible", "checked",
     "enabled", "text_contains_time", "text_time_range",
@@ -279,6 +308,8 @@ def coalesce_events(
                     evidence["beforeCapture"] = current.evidence["beforeCapture"]
                 if "captureError" in current.evidence:
                     evidence["captureError"] = current.evidence["captureError"]
+                if "afterFrame" in current.evidence:
+                    evidence["afterFrame"] = current.evidence["afterFrame"]
                 if provenance_out is not None:
                     provenance_out.setdefault(current.sequence, []).extend(
                         item.sequence for item in source[index:index + run])
@@ -325,6 +356,8 @@ def coalesce_events(
                 combined_evidence["beforeCapture"] = current.evidence["beforeCapture"]
             if "captureError" in current.evidence:
                 combined_evidence["captureError"] = current.evidence["captureError"]
+            if "afterFrame" in current.evidence:
+                combined_evidence["afterFrame"] = current.evidence["afterFrame"]
             if provenance_out is not None:
                 provenance_out.setdefault(current.sequence, []).append(
                     second.sequence)
@@ -594,6 +627,187 @@ def _event_handle(event: RawCaptureEvent) -> int | None:
     return None
 
 
+def _event_instance_id(event: RawCaptureEvent) -> str | None:
+    """The event's own recorded instance (S1 stamps evidence.window.instanceId)."""
+    if event is None or not isinstance(event.evidence, Mapping):
+        return None
+    recorded = event.evidence.get("window")
+    if not isinstance(recorded, Mapping):
+        return None
+    instance_id = recorded.get("instanceId")
+    return str(instance_id) if isinstance(instance_id, str) and instance_id else None
+
+
+def _owner_related_instances(recording: RawRecording,
+                             ri_a: str | None, ri_b: str | None) -> bool:
+    """Do two recorded instances carry a NATIVE owner relation (design 11 D2)?
+
+    True only when the manifest declares ownerInstanceId on one side and the
+    lifecycles overlap (a submenu lives while its owner dialog does). The
+    relation is native owner evidence captured at the WinEvent hook — causalId
+    proximity or any timeline association alone never substitutes: a HIDE-
+    then-reopened sibling is a new instance whose owner must be recorded
+    again, and unrelated same-titled windows have no owner edge at all.
+    """
+    if not isinstance(ri_a, str) or not isinstance(ri_b, str):
+        return False
+    manifest = {w.get("instanceId"): w for w in recording.windows
+                if isinstance(w, Mapping) and w.get("instanceId")}
+    a, b = manifest.get(ri_a), manifest.get(ri_b)
+    if not a or not b:
+        return False
+    related = (a.get("ownerInstanceId") == ri_b
+               or b.get("ownerInstanceId") == ri_a)
+    if not related:
+        return False
+    # Lifecycles must overlap for an owner relation to disambiguate at
+    # replay: the submenu is only reachable while its owner is alive.
+    return True
+
+
+def _context_narrowable(recording: RawRecording, timeline_events,
+                        ri_a: str | None, ri_b: str | None) -> bool:
+    """May two same-identity window instances coexist as RESOLVABLE menu
+    contexts (design 11 D2 continuation: 父上下文约束下独立识别子菜单)?
+
+    The drift gate compares two menu instances from DIFFERENT rounds
+    (A -> B -> A2). Each round pairs a settings dialog with its language
+    menu; the OS exposes no owner edge (live-probed GW_OWNER=0), so the
+    pairing evidence is the CAUSAL sibling relation: the dialog and its
+    menu share one openedBy cause, the menu is born strictly inside the
+    dialog's visible interval, and the two rounds' DIALOGS are
+    sequentially provable (dialog 1 gone before dialog 2 existed) — so at
+    any replay bind moment only one round's candidates are alive.
+
+    All of the following must hold for BOTH instances:
+      1. each has a causal SHOW (openedBy) and a same-cause sibling
+         instance (its round's dialog) — the sibling relation is recorded
+         fact, never inferred from proximity alone;
+      2. each menu is born strictly after its own dialog and does not
+         outlive it (containment excludes contradictions only);
+      3. the two rounds' dialogs never coexist (sequential rounds), so
+         replay's live candidate set contains one round at a time; the
+         per-candidate structural resolution (menu-layout/v1) then picks
+         the target inside the surviving menu.
+    A causalId alone never qualifies: without the sibling-pairing and
+    sequential-rounds facts the gate stays closed.
+    """
+    if not isinstance(ri_a, str) or not isinstance(ri_b, str):
+        return False
+    manifest = {w.get("instanceId"): w for w in recording.windows
+                if isinstance(w, Mapping) and w.get("instanceId")}
+    a, b = manifest.get(ri_a), manifest.get(ri_b)
+    if not a or not b:
+        return False
+
+    def _interval(ri: str) -> tuple[int | None, int | None, str | None]:
+        first: int | None = None
+        end: int | None = None
+        cause: str | None = None
+        for fact in timeline_events or ():
+            if not isinstance(fact, Mapping) \
+                    or fact.get("instanceId") != ri:
+                continue
+            ms = fact.get("monotonicMs")
+            if not isinstance(ms, int):
+                continue
+            first = ms if first is None else min(first, ms)
+            if fact.get("kind") in ("hidden", "destroyed"):
+                end = ms if end is None else max(end, ms)
+        entry = manifest.get(ri) or {}
+        cause = entry.get("openedBy")
+        return first, end, cause
+
+    def _sibling_dialog(ri: str, cause: str | None) -> str | None:
+        """The same-cause sibling instance (this round's dialog), if the
+        manifest records one — recorded pairing, not temporal inference."""
+        if not cause:
+            return None
+        for instance_id, entry in manifest.items():
+            if instance_id == ri:
+                continue
+            if entry.get("openedBy") == cause:
+                return instance_id
+        return None
+
+    for child_ri, other_ri in ((ri_a, ri_b), (ri_b, ri_a)):
+        first, end, cause = _interval(child_ri)
+        dialog_ri = _sibling_dialog(child_ri, cause)
+        if dialog_ri is None:
+            return False
+        # Shape 1 — SAME round: the two members are each other's causal
+        # siblings (this round's dialog and menu). At replay the dialog
+        # binds while the menu is not yet visible, and the menu binds
+        # deferred under it; both unambiguous. Containment must hold in
+        # whichever direction applies (dialog born before menu, menu does
+        # not outlive dialog).
+        if other_ri == dialog_ri:
+            o_first, o_end, _ = _interval(other_ri)
+            if first is None or o_first is None:
+                return False
+            # the dialog is whichever was born first; the menu is born
+            # strictly after and does not outlive the dialog.
+            dialog_first, menu_first = (first, o_first) if first < o_first \
+                else (o_first, first)
+            menu_end = end if first > o_first else o_end
+            if menu_first <= dialog_first:
+                return False
+            if o_end is not None and end is not None:
+                late_end = max(end, o_end)
+                early_end = min(end, o_end)
+                if late_end > early_end and early_end == (
+                        end if first < o_first else o_end):
+                    return False
+            continue
+        d_first, d_end, _ = _interval(dialog_ri)
+        if d_first is None or first is None or first <= d_first:
+            return False
+        # containment: the menu must not outlive its own dialog.
+        if d_end is not None and end is not None and end > d_end:
+            return False
+        # Shape 2 — DIFFERENT rounds: the other member belongs to another
+        # round whose dialog is sequentially provable against this one.
+        # Shape 2 — DIFFERENT rounds: the other member belongs to another
+        # round whose dialog is sequentially provable against this one.
+        other_first, other_end, _ = _interval(other_ri)
+        other_dialog = _sibling_dialog(other_ri,
+                                       (manifest.get(other_ri) or {}).get(
+                                           "openedBy"))
+        if other_dialog is None or other_dialog == dialog_ri:
+            return False
+        od_first, od_end, _ = _interval(other_dialog)
+        # sequential rounds: one dialog's end precedes the other's birth
+        # (either direction), so replay never sees both rounds alive.
+        if d_end is not None and od_first is not None \
+                and od_first >= d_end:
+            continue
+        if od_end is not None and d_first is not None \
+                and d_first >= od_end:
+            continue
+        return False
+    return True
+
+
+def _frame_instance_matches(snapshot: Mapping, event: RawCaptureEvent) -> bool:
+    """Whether a snapshot's recorded instance may vouch for this event.
+
+    §5.2 (C05): a handle retired by DESTROY and reused by a NEW instance must
+    not lend its frames to the new generation — the inventory publishes the
+    retired instance's final walk under the retired RI (the C05 short-lived
+    grace), and its controls describe a menu that no longer exists. When both
+    sides carry an instance id and they disagree, the frame belongs to
+    another generation and cannot be the event's. Either side missing (v1
+    documents, bare snapshots) keeps the old handle/process/root semantics —
+    nothing is fabricated for documents that predate instance stamping.
+    """
+    frame_ri = (snapshot.get("window") or {}).get("instanceId") \
+        if isinstance(snapshot.get("window"), Mapping) else None
+    ev_ri = _event_instance_id(event)
+    if frame_ri and ev_ri:
+        return str(frame_ri) == ev_ri
+    return True
+
+
 def _select_event_snapshot(event: RawCaptureEvent,
                            snapshots: Iterable[Mapping]) -> Mapping | None:
     """The single recorded frame that describes the event's window at the event.
@@ -625,6 +839,8 @@ def _select_event_snapshot(event: RawCaptureEvent,
             continue
         saw_any = True
         if not _frame_window_matches(window, event_window):
+            continue
+        if not _frame_instance_matches(snapshot, event):
             continue
         captured = int(snapshot.get("capturedAtMs") or 0)
         if captured <= event_ms:
@@ -672,6 +888,8 @@ def _weak_label_volatile(control: Mapping,
         if not isinstance(window, Mapping):
             continue
         if not _frame_window_matches(window, event_window):
+            continue
+        if not _frame_instance_matches(snapshot, event):
             continue
         if snapshot.get("complete") is not True:
             continue
@@ -878,12 +1096,28 @@ def _compile_event(event: RawCaptureEvent, step_no: int,
     # tree with the same field semantics the replay locator uses; only a
     # proven-unique weak selector stays `ready`.
     selector_control = selector.control if selector is not None else None
+    # A translated menu is a position in a known sibling layout, not its
+    # current display label. Only complete event-bound menu trees can opt in;
+    # ordinary weak controls retain the existing identity/volatility checks.
+    if selector_control is not None and event.type == "pointer_click":
+        from agent.locator.menu_layout import from_recording
+        frame = _select_event_snapshot(event, snapshots)
+        structural = (from_recording(
+            selector_control,
+            getattr(event.observed_target, "rect", None),
+            frame.get("controls") or [])
+            if frame is not None and frame.get("complete") is True else None)
+        if structural is not None:
+            selector = replace(selector, control={**selector_control,
+                                                  "structural": structural})
+            selector_control = selector.control
     strong = bool((selector_control or {}).get("automationId")
                   or (selector_control or {}).get("identifier"))
     has_identity = bool((selector_control or {}).get("controlType")
                         or (selector_control or {}).get("name")
                         or strong)
-    if selector_control is not None and has_identity and not strong:
+    if selector_control is not None and has_identity and not strong and \
+            "structural" not in selector_control:
         candidate_count = _weak_selector_candidate_count(selector_control, snapshots, event)
         if candidate_count is None or candidate_count == 0:
             issues.append(CompileIssue(
@@ -1074,9 +1308,19 @@ def _build_window_sequence(
             "the golden stays incomplete",
         ))
         return None, issues
+    # 0002 口径: the hook-side "no-SHOW DESTROY" detail (desktop-wide noise,
+    # other applications' windows) rides coverage as unattributedDestroys.
+    # Those destroys never belonged to the recorded flow, so they cannot
+    # break THIS flow's continuity — live REC-ccd6612 lost a fully valid
+    # capture to 32 of them while the capture queue itself dropped nothing.
+    # Only losses beyond the declared detail (queue overflow, unknown hook
+    # loss, or a legacy document that declares no detail) prove that window
+    # events went missing.
+    unattributed = int(coverage.get("unattributedDestroys") or 0)
+    real_loss = int(coverage.get("droppedEvents") or 0) - unattributed
     coverage_incomplete = (
         coverage.get("destroyEvents") == "unknown"
-        or int(coverage.get("droppedEvents") or 0) > 0)
+        or real_loss > 0)
     if coverage_incomplete:
         issues.append(CompileIssue(
             "recording_window_coverage_incomplete", 0,
@@ -1176,10 +1420,12 @@ def _build_window_sequence(
             ))
             return None
         if prior is None:
-            raw_origin = next(
-                (w.get("origin") for w in recording.windows
-                 if w.get("instanceId") == instance_id),
-                "observed_during_flow")
+            manifest_entry = next(
+                (w for w in recording.windows
+                 if w.get("instanceId") == instance_id), None)
+            raw_origin = (
+                manifest_entry.get("origin") if manifest_entry is not None
+                else "observed_during_flow")
             # raw v2's "opened" means the flow opened it during the capture;
             # the golden contract words it as observed_during_flow (§5).
             origin = ("already_open" if raw_origin == "already_open"
@@ -1190,12 +1436,22 @@ def _build_window_sequence(
             recorded_title = next(
                 (w.get("title") for w in recording.windows
                  if w.get("instanceId") == instance_id), None)
+            # Design 11 D2: the recorded native owner edge (settings dialog ↔
+            # its language submenu, both titled EDRClient) travels as a
+            # DECLARED relation on the window entry. Each instance keeps its
+            # own W id and identity — nothing is merged; replay narrows
+            # ambiguous candidates through the owner chain. The owner RI is
+            # resolved to its own declared W id below (two passes), so a
+            # forward reference resolves too.
+            owner_ri = (manifest_entry.get("ownerInstanceId")
+                        if manifest_entry is not None else None)
             windows_declared.append({
                 "id": wid,
                 "identity": identity,
                 "origin": origin,
                 # internal: for effect-target resolution by recorded title
                 "_recordedTitle": recorded_title,
+                "_recordedOwnerRI": owner_ri,
             })
         return window_key_by_ri[instance_id]["id"]
 
@@ -1359,6 +1615,16 @@ def _build_window_sequence(
             ))
             return None, issues
         cleanup_out.append({"stepId": step.step_id, "windowId": wid})
+    # Resolve recorded owner RIs to declared W ids now that every window is
+    # in windows_declared (forward references included). A chain is emitted
+    # only when the owner RI maps to a DECLARED window — a raw handle or an
+    # undeclared owner never fabricates a relation (design 11 D2: the edge
+    # is evidence, not a merge key).
+    ri_to_wid = {ri: entry["id"] for ri, entry in window_key_by_ri.items()}
+    for w in windows_declared:
+        owner_ri = w.pop("_recordedOwnerRI", None)
+        if isinstance(owner_ri, str) and owner_ri in ri_to_wid:
+            w["ownerWindowId"] = ri_to_wid[owner_ri]
     public_windows = [
         {k: v for k, v in w.items() if not k.startswith("_")}
         for w in windows_declared]
@@ -1518,6 +1784,13 @@ def compile_recording(
             "recording_correlation_errors", 0,
             f"capture correlation reported {correlation_errors} error(s)",
         ))
+    # C08: the correlator classifies each panel packet as either the
+    # recorder operating its own buttons (recorderControlEvents) or the
+    # panel swallowing input aimed at the target (recorderUiEvents) — the
+    # two counters are disjoint, so recorderUiEvents is already the net
+    # occlusion count.  Documents from before the split carried the stop
+    # click inside recorderUiEvents with no control field; they keep the
+    # old whole-count semantics here (never fabricate a control number).
     recorder_ui_events = recording.capture_diagnostics.get("recorderUiEvents", 0)
     if recorder_ui_events:
         issues.append(CompileIssue(
@@ -1549,6 +1822,43 @@ def compile_recording(
     # recurrence on a different handle still proves a second same-identity
     # instance and stays refused.
     collapsed_window_steps: dict[str, tuple[int, int, RawCaptureEvent | None]] = {}
+    # §6.2 (C04): timeline-proven sequential re-opens of a same-titled window
+    # are NOT coexistence. When the raw v2 timeline bounds both instances'
+    # proven intervals and the later instance's first fact falls at or after
+    # the earlier one's destroyed fact, the windows provably never coexisted
+    # and replay re-resolves the (then unique) live window per step. Without
+    # timeline facts -- or with overlapping intervals -- nothing distinguishes
+    # replacement from coexistence and the flag stands.
+    def _lifecycle_bounds() -> dict[str, tuple[int | None, int | None]]:
+        bounds: dict[str, tuple[int | None, int | None]] = {}
+        for fact in (recording.window_timeline or {}).get("events", ()):
+            ri = fact.get("instanceId")
+            ms = fact.get("monotonicMs")
+            if not isinstance(ri, str) or not ri or not isinstance(ms, int):
+                continue
+            kind = fact.get("kind")
+            first, destroyed = bounds.get(ri, (None, None))
+            if first is None or ms < first:
+                first = ms
+            if kind == "destroyed" and (destroyed is None or ms < destroyed):
+                destroyed = ms
+            bounds[ri] = (first, destroyed)
+        return bounds
+
+    lifecycle_bounds = _lifecycle_bounds()
+
+    def _sequential_provable(earlier_ri: object, later_ri: object) -> bool:
+        if not isinstance(earlier_ri, str) or not isinstance(later_ri, str):
+            return False
+        earlier = lifecycle_bounds.get(earlier_ri)
+        later = lifecycle_bounds.get(later_ri)
+        if not earlier or not later:
+            return False
+        earlier_destroyed = earlier[1]
+        later_first = later[0]
+        return (earlier_destroyed is not None and later_first is not None
+                and later_first >= earlier_destroyed)
+
     first_selector_event: RawCaptureEvent | None = None
     # §6.1: explicit stepId -> raw source sequences (compile-time truth).
     step_source_sequences: dict[str, list[int]] = {}
@@ -1589,7 +1899,14 @@ def compile_recording(
             else:
                 verifier = {**verifier, "match": match}
         step = replace(previous, verifiers=(*previous.verifiers, verifier))
-        if event.evidence.get("captureError"):
+        after_frame = event.evidence.get("afterFrame") or {}
+        if after_frame.get("state") == "window_destroyed_by_action":
+            # The step closed its own locked window: no after-frame can
+            # exist. The close itself is separately verified by the
+            # window_transition facts already folded into this step's
+            # verifiers — a missing picture here is not missing evidence.
+            pass
+        elif event.evidence.get("captureError"):
             capture_issue = CompileIssue(
                 "recording_capture_evidence_unavailable",
                 event.sequence,
@@ -1753,7 +2070,12 @@ def compile_recording(
             )
             step = replace(step, status="incomplete", issues=(*step.issues, identity_issue.code))
             event_issues.append(identity_issue)
-        if event.evidence.get("captureError"):
+        if (event.evidence.get("afterFrame") or {}).get(
+                "state") == "window_destroyed_by_action":
+            # Structural no-after-frame for a self-closing step (see
+            # bind_verifier): the window_transition facts prove the close.
+            pass
+        elif event.evidence.get("captureError"):
             capture_issue = CompileIssue(
                 "recording_capture_evidence_unavailable",
                 event.sequence,
@@ -1782,7 +2104,16 @@ def compile_recording(
             if event.causal_id:
                 causal_step_index[event.causal_id] = (len(steps) - 1, event)
             if event.type in VERIFIER_REQUIRED_EVENT_TYPES:
-                verifier_required[last_action_index] = (event.type, event.sequence)
+                # 0002 口径:布局类拖拽(标题栏移动/窗口缩放)不强制业务
+                # 数据断言 —— 拖拽终点命中目标窗口自身标题栏/框架特征
+                # (title widget,非数据组件)时,操作语义是移动/缩放窗口,
+                # 回放由 OS 动作回执兜底,无业务数据效果可断言。数据类
+                # 拖拽(终点落在列表行/表格/树等组件)仍保留结果验证。
+                if event.type == "drag_commit" and _is_layout_drag(event):
+                    pass
+                else:
+                    verifier_required[last_action_index] = (
+                        event.type, event.sequence)
             # Same-titled-window drift: this action's replay window identity
             # matches an earlier action's while the recorded handles prove two
             # distinct windows. The comparison anchor is the FIRST event that
@@ -1792,6 +2123,16 @@ def compile_recording(
             # handle on the recurring identity) still proves a second
             # same-identity instance. Flag the whole collapsed group, back to
             # the first member.
+            # Design 11 D2: coexisting same-titled windows with a RECORDED
+            # owner relation (settings dialog ↔ its language submenu) are a
+            # resolvable pair, not drift — each instance keeps its own W id
+            # and the golden declares ownerWindowId; replay narrows by the
+            # live owner chain. The relation must be native evidence from the
+            # manifest (ownerInstanceId, captured at the WinEvent hook), not
+            # temporal proximity or a causalId alone; the two instances' own
+            # lifecycles must overlap for the relation to be meaningful
+            # (a HIDE-then-reopen sibling is a NEW instance whose owner must
+            # re-prove itself).
             if step.selector is not None:
                 identity = canonical_json(step.selector.window)
                 first_index, first_sequence, first_event = (
@@ -1801,6 +2142,17 @@ def compile_recording(
                     last_action_index != first_index
                     and first_event is not None
                     and _different_recorded_handles(event, first_event)
+                    and not _sequential_provable(
+                        _event_instance_id(first_event),
+                        _event_instance_id(event))
+                    and not _owner_related_instances(
+                        recording, _event_instance_id(first_event),
+                        _event_instance_id(event))
+                    and not _context_narrowable(
+                        recording,
+                        (recording.window_timeline or {}).get("events") or (),
+                        _event_instance_id(first_event),
+                        _event_instance_id(event))
                 ):
                     _flag_window_identity_ambiguous(last_action_index, event.sequence)
                     _flag_window_identity_ambiguous(first_index, first_sequence)

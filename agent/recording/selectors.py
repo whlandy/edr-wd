@@ -30,11 +30,33 @@ def window_for_event(event: RawCaptureEvent) -> dict[str, Any]:
     # titles while running. The control tree's root names the window and does
     # not move, so replay matches on that and keeps the title as a fallback
     # for windows that expose no hierarchical identity.
-    root = (recorded or {}).get("rootAutomationId") or window_root_identity(
-        event.observed_target
-    )
+    # Same-source only: the root comes from the recorded window stamp (which
+    # the recorder takes from the input window's own snapshot), never from the
+    # hit-test control chain. A closing dialog can make the hit test resolve
+    # content of a DIFFERENT window than the stamped title/handle — mixing
+    # that root here builds a window identity that never existed and the
+    # compiler then rejects the step's own instance snapshots as conflicting
+    # (live REC-996dda21 step-0006). The compiler's snapshot-root promotion
+    # restores the root from the stamped instance's own snapshots.
+    # The hit-test chain root remains the fallback ONLY for events with no
+    # window stamp at all (v1-era recordings): there the ancestry is the one
+    # same-source signal that tells same-application windows apart.
+    recorded_window = recorded if isinstance(recorded, Mapping) else None
+    if recorded_window is None:
+        root = window_root_identity(event.observed_target)
+    else:
+        root = recorded_window.get("rootAutomationId")
     if root:
         window["rootAutomationId"] = str(root)
+        # Same-root parent/child windows (a modal dialog shares its owner's
+        # UIA tree root) otherwise collapse into one replay identity and
+        # false-flag same-selector window drift. The recorded title is
+        # same-source with the handle — the correlator reads both from the
+        # ONE input-resolved window (never the hit-test chain) — so the
+        # conjunctive titleRegex is safe here and replay's window binding
+        # matches root AND title together (binding._resolve_unique).
+        if title:
+            window["titleRegex"] = f"^{re.escape(title)}$"
     else:
         # A root identity is stronger than a title and is sufficient on its
         # own. Windows can process mouse-down and rename (or replace the

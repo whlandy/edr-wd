@@ -215,7 +215,7 @@ class ReplaySelector:
         allowed_window = {"processName", "titleRegex", "bundleId", "rootAutomationId"}
         allowed_control = {
             "automationId", "identifier", "controlType", "name", "ancestry",
-            "anchor", "fingerprint",
+            "anchor", "fingerprint", "structural",
         }
         allowed_visual = {
             "template", "contextTemplate", "elementSha256", "contextSha256",
@@ -260,6 +260,15 @@ class ReplaySelector:
                 path="selector.control.ancestry",
             )
         anchor = self.control.get("anchor")
+        if "structural" in self.control:
+            from agent.locator.menu_layout import valid_contract
+            if (self.control.get("controlType") != "MenuItem" or
+                    self.control.get("automationId") or
+                    self.control.get("identifier") or not ancestry or
+                    not valid_contract(self.control["structural"])):
+                raise RecordingModelError(
+                    "type_error", "invalid bounded menu structural selector",
+                    path="selector.control.structural")
         if anchor is not None and not isinstance(anchor, Mapping):
             raise RecordingModelError(
                 "type_error", "selector.control.anchor must be an object or null",
@@ -605,7 +614,8 @@ def _validate_window_sequence(sequence: "WindowSequence",
     window_ids = set()
     for index, window in enumerate(sequence.windows):
         path = f"golden.windowSequence.windows[{index}]"
-        d = _strict(window, {"id", "identity", "origin"}, path)
+        d = _strict(window, {"id", "identity", "origin", "ownerWindowId"},
+                    path)
         wid = d.get("id")
         if not isinstance(wid, str) or not wid:
             raise RecordingModelError(
@@ -616,6 +626,21 @@ def _validate_window_sequence(sequence: "WindowSequence",
                 "window_sequence_invalid", f"duplicate window id {wid!r}",
                 path=f"{path}.id")
         window_ids.add(wid)
+        # Design 11 D2: the declared owner relation is evidence between two
+        # INDEPENDENT window entries — it must reference a declared window,
+        # never replace one. Self-reference and dangling ids are invalid.
+        owner_wid = d.get("ownerWindowId")
+        if owner_wid is not None:
+            if not isinstance(owner_wid, str) or not owner_wid:
+                raise RecordingModelError(
+                    "type_error",
+                    f"{path}.ownerWindowId must be a non-empty string",
+                    path=f"{path}.ownerWindowId")
+            if owner_wid == wid:
+                raise RecordingModelError(
+                    "window_sequence_invalid",
+                    f"{path}.ownerWindowId must not reference itself",
+                    path=f"{path}.ownerWindowId")
         if d.get("origin") not in WindowSequence.ALLOWED_ORIGINS:
             raise RecordingModelError(
                 "window_sequence_invalid",
@@ -662,6 +687,15 @@ def _validate_window_sequence(sequence: "WindowSequence",
             "windowSequence must declare at least one window",
             path="golden.windowSequence.windows",
         )
+    for index, window in enumerate(sequence.windows):
+        owner_wid = window.get("ownerWindowId")
+        if owner_wid is not None and owner_wid not in window_ids:
+            raise RecordingModelError(
+                "window_sequence_invalid",
+                f"golden.windowSequence.windows[{index}].ownerWindowId "
+                f"{owner_wid!r} is not a declared window",
+                path=f"golden.windowSequence.windows[{index}].ownerWindowId",
+            )
     # Every executable node exactly one ownership entry; step refs valid.
     owner_of = {}
     main_step_ids = {s.step_id for s in steps}

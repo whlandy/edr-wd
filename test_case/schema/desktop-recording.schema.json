@@ -134,6 +134,21 @@
           "type": "integer",
           "minimum": 0,
           "description": "Clicks that landed on no control the application can name. They are not recorded as steps — replaying one would click a coordinate and hit whatever happened to be there — but they are counted so a recording never looks shorter than it was without saying why."
+        },
+        "recorderControlEvents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The subset of recorderUiEvents that were the recorder's own panel buttons (Pause/Stop) operating. These are control input, not occlusion: the recorder intentionally consumes its own button clicks. Absent on documents written before this split — they read as zero and the whole recorderUiEvents count keeps its old occlusion meaning."
+        },
+        "inventorySkipped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total control-tree walks that were asked for but never taken, by every structured skip reason combined (no window handle, walk failure, empty read). A snapshot table that is short must be explainable, not silent. Absent on documents written before this — they read as zero. The per-reason split is in the status diagnostics."
+        },
+        "inventoryRetried": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total bounded re-reads the control inventory took because a window_changed walk read an empty tree. Each retry is counted transparently (design §5.1: fallbacks are counted and explainable, not silent). Absent on documents written before this — they read as zero."
         }
       }
     },
@@ -333,6 +348,11 @@
             "droppedEvents": {
               "type": "integer",
               "minimum": 0
+            },
+            "unattributedDestroys": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "DESTROY events with no SHOW-time identity record (desktop-wide environment noise, not target-app capture loss). Subset context for droppedEvents."
             }
           }
         }

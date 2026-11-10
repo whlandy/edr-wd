@@ -119,14 +119,14 @@ def _get_user32():
         # 传入;注册时经 _win_event_proc_prototype 构建真实回调)。
         user32.SetWinEventHook.restype = _HWINEVENTHOOK
         user32.SetWinEventHook.argtypes = [
-            ctypes.c_ulong, ctypes.c_ulong, _HWINEVENTHOOK,
+            ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
         user32.UnhookWinEvent.restype = ctypes.c_long
         user32.UnhookWinEvent.argtypes = [_HWINEVENTHOOK]
         user32.GetMessageW.restype = ctypes.c_long
         user32.GetMessageW.argtypes = [
-            ctypes.POINTER(_MSG), _HWINEVENTHOOK,
+            ctypes.POINTER(_MSG), ctypes.c_void_p,
             ctypes.c_uint, ctypes.c_uint]
         _user32 = user32
         _user32_loaded = True
@@ -349,12 +349,29 @@ class WindowsEventHookSource:
 
     def _on_win_event_raw(self, hook, event, hwnd, id_object, id_child,
                           thread_id, time_ms):
+        owner = None
+        if hwnd:
+            try:
+                # Design 11 D2 R1: native owner edge captured at the hook —
+                # cheap Win32, no UIA; 0/self → absent, never fabricated.
+                owner = self._user32().GetAncestor(hwnd, 3) or None  # GA_ROOTOWNER
+            except Exception:
+                owner = None
         self.on_win_event(event, native_id=str(hwnd or ""),
-                          id_object=id_object, id_child=id_child)
+                          id_object=id_object, id_child=id_child,
+                          owner_handle=int(owner) if owner else None)
+
+    def _user32(self):
+        import ctypes
+        dll = ctypes.WinDLL("user32", use_last_error=True)
+        dll.GetAncestor.restype = ctypes.c_void_p
+        dll.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        return dll
 
     def on_win_event(self, event_id: int, *, native_id: str,
                      id_object: int = OBJID_WINDOW,
-                     id_child: int = 0) -> None:
+                     id_child: int = 0,
+                     owner_handle: int | None = None) -> None:
         """生命周期事件入口(hook 回调或测试注入)。过滤:仅顶层窗口
         对象(OBJID_WINDOW, idChild=0)进入实例事实 — 控件级
         (OBJID_CLIENT/child!=0)不映射为窗口生命周期。"""
@@ -366,7 +383,10 @@ class WindowsEventHookSource:
         if kind is None:
             return
         try:
-            self._queue.put_nowait({"kind": kind, "native_id": native_id})
+            event_row = {"kind": kind, "native_id": native_id}
+            if owner_handle:
+                event_row["ownerHandle"] = owner_handle
+            self._queue.put_nowait(event_row)
         except queue.Full:
             # 有界队列:溢出 = 事件丢失事实(丢事件可检测性)。
             self._healthy = False

@@ -170,8 +170,11 @@ def test_hotkey_authored_assertion_replays_in_its_actual_product_window(assertio
     golden = compile_recording(session.recording()).golden
 
     assert golden.status == "ready"
+    # D2-0335 F1b: title 与 handle 同源后 selector 携带联合身份
+    # {root, titleRegex}（回放 binding 联合匹配，同 root 父子窗口可区分）。
     assert golden.steps[-1].selector.window == {
         "processName": "EDRClient.exe", "rootAutomationId": "LogCenterRoot",
+        "titleRegex": "^日志中心$",
     }
 
 

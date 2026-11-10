@@ -1279,6 +1279,18 @@ class RecordingSession:
             hook_loss = getattr(self._source, "window_hook_loss", None)
             if callable(hook_loss):
                 correlator.note_hook_loss(hook_loss())
+            # The unattributed-DESTROY detail rides the same absorbed read:
+            # window_hook_loss() refreshes the source-side cumulative total
+            # (an int attribute on the source, NOT the composite's method),
+            # transfer it to the correlator so the final coverage block
+            # reports it instead of keeping a permanently-zero field (C06).
+            ua_total = getattr(self._source,
+                               "unattributed_destroy_events_total", None)
+            if isinstance(ua_total, int) and not isinstance(ua_total, bool):
+                note_ua = getattr(correlator,
+                                  "note_unattributed_destroys_total", None)
+                if callable(note_ua):
+                    note_ua(ua_total)
             correlator.refresh_timeline_coverage(dropped_packets=dropped_packets)
         timeline = None
         if window_timeline is not None:
@@ -1288,6 +1300,21 @@ class RecordingSession:
                 timeline["events"] = [dict(e) for e in events]
             elif isinstance(events, list):
                 timeline["events"] = [dict(e) for e in events]
+        # Control-inventory walk accounting (C05→落盘, design 11 §5.1):
+        # structured skips and bounded re-reads, as totals. Absent on
+        # documents written before this — they read as zero. The per-reason
+        # split lives in the status diagnostics
+        # (source.diagnostics().inventorySkipped / .inventoryRetried); the
+        # document keeps the auditable sum.
+        inventory = getattr(self._source, "_inventory", None)
+        inventory_skipped = getattr(inventory, "skipped", None)
+        inventory_retried = getattr(inventory, "retried", None)
+        inventory_skipped_total = (
+            int(sum(inventory_skipped.values()))
+            if isinstance(inventory_skipped, dict) else 0)
+        inventory_retried_total = (
+            int(sum(inventory_retried.values()))
+            if isinstance(inventory_retried, dict) else 0)
         return RawRecording(
             self.session_id,
             self.name,
@@ -1304,6 +1331,13 @@ class RecordingSession:
                     getattr(self._source, "_correlator", None),
                     "recorder_ui_events", 0,
                 ) or 0),
+                # The subset of recorderUiEvents that were the recorder
+                # operating its own buttons (C08): the stop click every
+                # recording ends with must not read as occlusion.
+                "recorderControlEvents": int(getattr(
+                    getattr(self._source, "_correlator", None),
+                    "recorder_control_events", 0,
+                ) or 0),
                 # Clicks that landed on nothing the application can name.
                 # Not steps — replaying one would click a coordinate and hit
                 # whatever happened to be there — but never silently dropped.
@@ -1311,6 +1345,11 @@ class RecordingSession:
                     getattr(self._source, "_correlator", None),
                     "unidentified_target_events", 0,
                 ) or 0),
+                # Control-inventory walk accounting (C05→落盘, design 11
+                # §5.1): totals computed above; per-reason split lives in
+                # the status diagnostics.
+                "inventorySkipped": inventory_skipped_total,
+                "inventoryRetried": inventory_retried_total,
             },
             windows=windows,
             control_snapshots=tuple(

@@ -1,0 +1,75 @@
+# 基础操作完整录制回放：执行进度
+
+## 2026-11-10 用户授权 Codex 直接修复：原生点击与 A/B
+
+本轮例外授权仅覆盖本片本地修复、11.26两文件同步、MCP server重启和settingBtn开/关验证，非全面解除冻结/部署权限。报告 `result-report/trace-self-correction/20261109-2354-pointer-submission/report.md`。新增 `target/automation/native_pointer.py`（真实SendInput/固定ABI/返回计数/partial unknown），client click/click_at复用，原安全门保留；远端已备份并校验两文件，新server PID8580/Session2。已实测server坐标点击、控件点击与PowerShell对照均从菜单关闭初态打开菜单；最终菜单关闭、锁释放、无录制，EDR进程未重启。原菜单开着再次点会换HWND但仍可见，不能据toggle假设判无效果。完整语言录制/回放与设计12验收不由此宣称完成，详见报告和原件；其他WIP保留。
+
+权威：[统一设计11 R1](../architecture/11-recording-basic-actions-usability-and-integrity-design.md)。本文件仅为执行/覆盖账本，不另立需求。
+
+## 当前事实（2026-11-06）
+
+**本地开发冻结（2026-11-07 00:0x 上海时间起）**：用户通知即将开始 Windows 实机测试，2344 片交付后本任务链不再改业务代码/测试；后续轮次仅只读核查与停等。一次性 D5 差额清单见 result-report/recording-basic-actions/20261106-2344/report.md。
+
+- 0046本地独立验收范围已关闭，锁定不重新排障；Windows未通过、公共v3门未开放。
+- 0315多语言菜单片已实现并自验，22新用例、定向69/录制1815/全库3385/显式331/legacy26；不是独立实机验收。
+- 原语言流程仍有菜单完整帧、弹窗实例身份与覆盖/面板输入差额。target采集和布局drag WIP须实测核查，不根据注释宣称已修。
+- 只合并设计/交接，不在本轮并发改业务实现。用户现授权原CC建立唯一20分钟定时任务，替代旧文档“不建CC内部任务”的历史限制。
+- 0911片：C06 unattributedDestroys 已实测接线修复（此前三层有字段、correlator计数器无人递增、恒0）；C09分型当前行为已探针固定（数据起点→标题栏终点被豁免，§7误分类面，属D3整片）。回归录制1818/全库3388退出码0。本地自验，非独立复验。
+- 1000片：C05 短生命周期菜单当前帧竞态已成对修复。首次失败点实测：walk在途期间DESTROY退役未复用 → authority查不到 → instance_superseded 丢弃 → 第4菜单唯一complete帧丢失（live-REC-647312第4次点击缺树机制的采集侧定位）。最小修复：correlator记录"退役未复用"映射，authority对其回答退役实例id（复用后清除恢复0517契约，未见过的handle仍None）。windows.py 1b5b5a05d525→5e44f618628e；新探针test_c05_short_lived_menu_probe.py 2用例先红后绿。回归录制1823/全库3393退出码0。0517 P1-2丢弃契约定向+全库均过不回退。本地自验，非独立复验。C05另一向（walk先于SHOW的延迟发布）与C07/C08未动。
+- 1500片：C05另一向（SHOW walk空population竞态）成对修复。live-REC-647312只读重建实测：RI-0010（第4菜单6751880）SHOW walk与菜单population竞态读空→no_controls结构化终态无重试，点击step walk被1500ms debounce排到DESTROY后死HWND→该实例全程零快照（CS-0005/CS-0015均SHOW后数百ms只读到1个容器的population滞后实锤；droppedPackets=0无丢包）。最小修复：inventory.py对window_changed空读安排恰一次有界补拍（500ms，isRetry标记防循环——首版无标记被探针B当场抓住无限重试，retried透明计数，step语义不变，补拍与同handle已排队请求合并提前其dueMs）。inventory.py 6c173d5784e3→7b883f6a03b9；新探针test_c05_delayed_population_probe.py 3用例先红后绿；3变异精准红（M1禁补拍/M2去有界标记/M3放宽step）。定向39+126+36+5过；0517 P1-2契约不回退。回归录制1826/全库3396退出码0（各+3零回归）。本地自验，非独立复验。C07/C08未动；inventory skipped/retried落盘captureDiagnostics待接。
+- 1745片：C07 burst→立即停止→收集基线成对修复（三处账实计数缺口，先红后绿）。首次失败点实测：①worker对STOP哨兵计_dequeued→dequeued比packetsEnqueued多0或1（时序硬币，实测51vs50），账实核对恒不可对账；②pause期间_enqueue直接return（连队列不进），worker侧_paused_dropped递增点不可达→10包丢弃pausedDropped=0（C06同型"字段在、无人递增"）；③stop()有界但drain实际耗时无落点。最小修复（source.py 4914fb154317→b4f8f503179d，+44/-1）：_dequeued只计非STOP包；_enqueue paused分支计数（唯一可见点）；stop_drain_ms每路径实测（含timeout满额）+diagnostics暴露stopDrainMs。新探针test_c07_burst_stop_collection_probe.py 4用例先红后绿；3变异精准红（M1撤哨兵排除/M2撤pause计数/M3撤stopDrainMs）。真实链探针A用RecordingSession+source(sink=session.ingest)真实接线。回归录制1830/全库3400退出码0（各+4零回归）。耗时基线：50包burst立即stop毫秒级；慢sink timeout路径stopDrainMs≈200满额。本地自验，非独立复验。C08未动。
+- 1900片：C08 面板控制输入与遮挡目标输入分开（先红后绿）。首次失败点实测：0046原件 live-REC-ec395765861244bdb27a3d976aa6e136（正常录制、仅Stop点击）captureDiagnostics.recorderUiEvents=2=Stop按钮down+up两包——每次正常录制的停止按钮点击都被计成"面板吞掉想点目标的输入"，当前compiler.py:1562对任何非零recorderUiEvents发recording_recorder_ui_events失实诊断→每份正常录制被标incomplete（§5.1"正常录制控制不无条件污染整份业务录制"违例；控制类与真遮挡类共用同一计数无法判别）。最小修复：①correlator新增mark_recorder_control()（控制回调时刻）+in_recorder_control_window()（±2s真实时刻窗）+recorder_control_events明细；_correlate_inner面板矩形拒绝点按mark窗口分流：窗内=recorder_control（reason=recorder_control拒绝明细），窗外=recorder_ui（原语义）；②source._enqueue paused分支：pause按钮down/up在pause生效后到达，同按mark窗口分流（有账，不再混入pausedDropped）；③service.py start()接线mark_then包装（pause/resume/stop回调先mark再执行，mark失败不阻塞动作）；④session.py recording()搬运recorderControlEvents；⑤models.py captureDiagnostics允许集+默认加recorderControlEvents（旧文档无字段读0，compiler保持旧语义不伪造）；⑥compiler.py注释修正（两计数器互斥分流，recorderUiEvents即净遮挡；无减法）；⑦schema captureDiagnostics加recorderControlEvents可选字段。文件hash：windows 5e44f618628e→79c856ac5400、source b4f8f503179d→b1a68be2f214、models 2390ef66d3c6→38a9658bc0ba、session 957cc3afb625→322ef87d8d94、service dc3c0bda541c→0d662cd6c12c、compiler 5d8bd9a4e05a→522ac899e177；新探针test_c08_panel_control_vs_occlusion_probe.py 5用例（2锁定既有遮挡行为+3先红后绿）；3变异精准红（M1撤mark窗口判定→3红/M2撤pause分支分流→1红/M3 compiler回退减法→1红），SHA验证恢复。service接线形状另验：pause按钮（paused分支）+resume按钮（worker路径）4包全记control、零失实遮挡。test_windows_capture.py诊断断言补新字段。回归录制1835/1 skipped退出码0（+5零回归）；全库3405/1 skipped/614 deselected退出码0（+5零回归）。本地自验，非独立复验。C08成对通过（控制不混业务+真遮挡有诊断保持）。
+- 2030片：C05 误挂向（同handle前代退役帧挂新实例）成对修复（先红后绿）。首次失败点实测：编译侧帧选择 `_frame_window_matches`（compiler.py:572）只比handle/process/root不比instanceId——同handle复用后，1000轮宽限发布的退役RI-A帧（capturedAtMs早于点击）被选为RI-B点击事件的绑定帧，menu_layout.from_recording按退役4行布局构建结构化契约（structural={'kind':'menu-layout/v1','index':1,'layout':[4行]}，RI-B菜单3项），§5.2"失效结果不挂到新菜单"违例；第二向`_weak_label_volatile`扫退役帧同位置不同标签误报volatile（失效帧既不能证ready也不能证volatile）。最小修复：compiler.py新增`_event_instance_id`+`_frame_instance_matches`（两侧都有instanceId且不同→拒绝该帧；任一侧缺→保持旧handle/process/root语义，v1文档不伪造），`_select_event_snapshot`候选过滤（685行）与`_weak_label_volatile`扫描过滤（734行）两处接线。compiler 522ac899e177→f1712a8dc47b（+34/-0）。新探针test_c05_stale_frame_misattribution_probe.py 2用例（探针A结构化契约不得来自退役4行布局+探针B volatility不得借退役帧），包时间用真实monotonic clock与capturedAtMs同量纲（固定小值会使时间过滤失效，探针初版教训）。3变异精准红：M1撤两处过滤→2红/M2撤volatility处→探针B红/M3撤select处→探针A红。0517 P1-2采集侧丢弃契约、1000宽限发布、1500有界补拍全部保持（C05三探针+weak_identity_volatile_label+control_inventory定向41过）。回归录制1837/1 skipped退出码0（+2零回归）；全库3407/1 skipped/614 deselected退出码0（+2零回归）。本地自验，非独立复验。
+- 2230片：D1遗留项"inventory skipped/retried 落盘 captureDiagnostics"成对修复（先红后绿）。首次失败点实测：1500片在inventory自建skipped/retried两计数器（per-reason、递增正常），但出口三层全断——inventory.diagnostics()不暴露retried；source.diagnostics()（F52 status出口）不含任何inventory字段；session.recording()落盘captureDiagnostics为固定6键投影；models `_strict`允许集与schema `additionalProperties:false`均只认6键。即计数在、管道断，真实录制里的菜单空读与补拍在最终文档不可见（与C06同型、方向相反：C06字段在无人递增，本片计数在无出口）。最小修复（5触点，跟随C06/C08扁平int先例）：inventory.diagnostics()补暴露retried；source.diagnostics()新增inventorySkipped/inventoryRetried（per-reason dict明细，status排障层）；session.recording()落盘投影加两字段（求和总数int，无inventory读0）；models默认块+允许集加两键（可选，旧文档读0）；schema captureDiagnostics加两键（integer/minimum 0，契约同步）。文件hash：inventory 7b883f6a03b9→adb52a0c0c40、source b1a68be2f214→991ef46bee22、session 322ef87d8d94→fd98f2e47200、models 38a9658bc0ba→1a7517b6f1a4、schema 5d8ad94b7369；test_windows_capture.py:243全字典精确断言按C08先例补两键。新探针test_c05_inventory_diagnostics_persistence_probe.py 2用例（探针A真实链四件套：SHOW walk空读→补拍成功→落盘inventorySkipped/inventoryRetried==1+status per-reason明细；探针B inventory=None落盘读0+v2 schema jsonschema.validate锁定模型/schema同步），探针A先红后绿、探针B前后均绿（锁零默认契约）。3变异精准红：M1撤session投影→A红/M2撤source明细→A红/M3撤models允许集→A+B红（unknown_field），撤回bit-exact。1500补拍语义、C05三探针、C07/C08分流全部保持；compiler消费点零改动。回归录制1839/1 skipped退出码0（+2零回归）；全库3409/1 skipped/614 deselected退出码0（+2零回归）。报告result-report/recording-basic-actions/20261106-2230/。本地自验，非独立复验。D1账本无其他待接项。
+- 2310片：C11语言结果闭环新语言例测试锁定（先红后绿核查，业务代码零改动）。事实基线实测：编译侧机制端到端已通——弱身份MenuItem点击+同因果id text_equals断言（currentLanguage强ID）→ready golden（structural menu-layout/v1 selector+verifier折入步骤，match=断言控件自身身份）；v3链receipt ok后按动作后权威观测真实求值control_text_equals，非全pass即锁存（execution_ledger.py:2548–2636）。首次失败点=语言菜单+语言结果断言的具体正负组合无测试锁定（0315只验注入参数面）。最小修复：仅新增test_c11_language_result_closure_probe.py 3用例——正例（语言实况French→pass推进、恰1输入、dispatch=Idioma当前语言项）、反例（receipt ok但currentLanguage仍English→control_text_equals failed expected=French actual=English→fail锁存+durable rebuild同判）、期望学习负例（同一golden期望恒为录制期French，不随实测输出改变）。3变异精准红：M1 ledger any_fail失效→反例2红/M2 compiler折叠撤除→3红/M3 evaluator恒pass（receipt ok代替业务结果）→反例2红，撤回bit-exact（ledger fa6d3b49b7db、compiler 725f14755d1f、expectations e721e464261f均与改动前一致）。定向120过（含localized_menu/v3 adapter/s4_gate既有语义保持）。回归录制1846/1 skipped退出码0（+3零回归）；全库3416/1 skipped/614 deselected退出码0（+3零回归）。报告result-report/recording-basic-actions/20261106-2310/。本地自验，非独立复验。C11剩余：scroll/drag语言语境例属增量补充；Windows实机属D5待授权。
+- 0513片（2026-11-07）：D2-0335 三缺陷最小修复成对交付（先红后绿+3变异精准红）。F1 采集侧 evidence.window.root 同源对齐（windows.py `_with_window`：root 改取同 handle 快照，无快照省略，OT 控件链 root 不再进 stamp）；F1b 编译侧 selector 窗口联合身份（selectors.py `window_for_event`：root 存在时并入与 handle 同源的 titleRegex，回放 binding 联合匹配区分同 root 父子窗口）；F3 coverage 门扣除 unattributedDestroys 噪音明细（compiler.py：droppedEvents−明细>0 才拒绝）。端到端（REC-ccd6612 raw 重编译）：7 步歧义→0，12/12 步 ready。2 新探针 6 用例；M2 一致性路径实测死代码已删。既有期望更新 4 处（phase0/time_range×2 联合身份形态、C11 fixture title 同源统一、cross_window_s3 golden 重生成 incomplete→ready）。回归录制 1855/1 skipped 退出码 0（+6 零回归）；全库 3425/1 skipped/614 deselected 退出码 0（+6 零回归）。报告 result-report/recording-basic-actions/20261107-0513/。**远端 11.26=11-03 HEAD（2292fef），6轮WIP+本轮修复均未部署**；重录闭环待用户确认部署（repair 同步+server 重启）。
+- 0335片（2026-11-07）：11.26 实机激活录制+重访尝试（用户在线授权，仅录制/取件/编译/回放尝试，零点击零部署）。首次失败点实测：**evidence.window 三字段跨窗口拼接**——窗口切换瞬间 handle(指针解析窗口)/rootAutomationId(hit-test 控件链 root)/title(foreground title) 来自不同窗口：seq5={h:LogCenter, root:EdrMainWindow, title:LogCenter}，seq8={h:主窗口, root:TrustListWindow, title:logo1}且点击时刻 Trusted List 尚未 created（早16ms，UIA 命中预创建窗口控件链）→ selector.window 身份漂移到 hit-test root，与动作实际所在窗口分离 → same-selector drift 组内 handle 天然互异 → 7/12 步 compile_window_identity_ambiguous，golden incomplete，replay fail-closed（golden_trace_incorrect 门正确拒绝）。C04 顺序重开证明救不了常驻入口窗口（RI-0001 closed=False 无 destroyed fact → _sequential_provable 恒 False）；C04 探针复跑 4 passed 非回归。报告 result-report/recording-basic-actions/20261107-0335/。待办：采集侧 evidence.window 三字段同源对齐+预创建窗口 hit-test 与 created 事实对齐；编译侧 root/handle 实例矛盾 fail-closed。本地自验，非独立复验。
+- 2344片：C09 drag起点证据成对修复（先红后绿）+本地冻结。首次失败点实测：raw drag_commit事件**已有**起点身份（press时刻hit-test存_pending_press["observed"]，随事件携带为observed_target，windows.py），0046锁定原件实测真标题栏拖拽起点=Text/titleWidget.title；缺口纯在分类侧——_is_layout_drag只读endTarget，"数据对象拖到标题栏"被误豁免（§7违例）。0911探针注释"事件结构无startTarget"与实测不符，已更正。最小修复（compiler.py 725f14755d1f→a22a16f17d0c，+15/-3）：豁免=终点titleWidget特征**且**起点身份同为标题栏特征；起点缺失/非标题栏→fail-closed保留强制verifier。新探针test_c09_start_evidence_probe.py 5用例（双端标题栏豁免保持/数据双向强制/数据起点+标题栏终点先红后绿/缺起点证据fail-closed）；旧C09探针case C按其文档约定随分型更新。3变异精准红（M1撤起点印证→C+E红/M2缺起点仍豁免→C+E红/M3撤终点特征→D红），撤回bit-exact。兼容面实测：既有fixture两端均非标题栏不受影响；0046/0315材料未动。回归录制1851/1 skipped退出码0（+5零回归）；全库3421/1 skipped/614 deselected退出码0（+5零回归）。报告result-report/recording-basic-actions/20261106-2344/。本地自验，非独立复验。**本地冻结声明生效**：D3剩余（几何/归属印证、C10校准）依赖实机观测，C04共存owner handle证据属实机采集改动；后续轮次只读核查停等。
+- 2140片（时间戳目录名，实际22:40+上海时间）：C04顺序重开身份面成对修复（先红后绿）。首次失败点实测：fixture反例（4次同title菜单点击、独立RI/handle、raw v2时间线证明顺序重开区间互不重叠）→4步全部`compile_window_identity_ambiguous`；只读复算0046锁定原件live-REC-647312（seq14/21/28/36，RI-0003/0006/0008/0010）同塌缩`{"processName":"EDRClient.exe","titleRegex":"^EDRClient$"}`，drift检查（compiler.py主循环）只比`_different_recorded_handles`不读时间线区间——顺序重开与共存无法区分一律拒绝，§6.2"已有生命周期证据可执行的菜单链"误报。最小修复（1文件，compiler f1712a8dc47b→725f14755d1f，+34/-0）：`_lifecycle_bounds()`（timeline→每实例first_fact/destroyed）+`_sequential_provable(earlier_ri,later_ri)`（双侧有界且later_first>=earlier_destroyed→顺序重开可证；缺instanceId/无时间线→False）接drift检查第三条件。语义边界：不删ambiguous门、不归主窗口；v1无timeline、区间重叠（共存）、事件缺instanceId三面全部保持拒绝。新探针test_c04_same_title_menu_chain_probe.py 4用例（正例顺序重开先红后绿；共存负例/v1负例/缺id负例前后均绿=锁既有拒绝），3变异精准红（M1恒True→共存负例红/M2撤destroyed→正例红/M3缺id放宽→缺id负例红；M3初版无专属负例即补第4用例重测），撤回bit-exact（725f14755d1f）。phase0既有4个ambiguous负例（无timeline→拒绝不解除）、C05/C06/C07/C08/C09探针、词汇全量、golden v3全部保持（定向203过）。回归录制1843/1 skipped退出码0（+4零回归）；全库3413/1 skipped/614 deselected退出码0（+4零回归）。报告result-report/recording-basic-actions/20261106-2140/。本地自验，非独立复验。C04剩余差额：共存同title菜单同时被点击链需采集侧owner handle证据（native hook现无GW_OWNER），属Windows实机改动，待授权。
+
+## 唯一执行与定时任务
+
+- owner：原Claude.app/ai-projects EDR-WD，URL `app://localhost/epitaxy/local_bae4c2e8-cc77-45d1-b033-bac55faa3277`。
+- 另一既有EDR-WD-ds不得并行编辑同树；迁移owner需用户明确。
+- 任务状态：**已创建并核实**（2026-11-06 03:40 上海时间，原CC在owner会话内执行）。
+- 实际任务ID：`edr-wd-basic-actions-completion`；标题 `EDR-WD 基础操作完整录制回放收尾`；路径 `/Users/edr-test/.claude/scheduled-tasks/edr-wd-basic-actions-completion/SKILL.md`。
+- 频率：cron `7,27,47 * * * *`（每20分钟，:07/:27/:47，避开整点并与其他任务错开）；jitter 257s；`enabled: true`；实际nextRun `2026-11-05T19:51:17.000Z`（= 上海 2026-11-06 03:51）。
+- 持久性：持久（写入 `.claude/scheduled-tasks/`，app 重启后仍生效）；仅当 app 开启时运行（关闭期间的到期任务在下次启动补跑一次）；无固定有效期（recurring 任务按应用机制运行，可随时手动删除/停用）。通知：关闭（notifyOnCompletion=false，符合§12.2"无实质变化不通知"）。
+- 权限模式说明：任务保存为 Bypass permissions 模式（随本会话继承）；prompt 内已明确禁止 Windows/部署/提交/推送等操作作为运行时边界。用户可在 app 的 Scheduled 区修改任务或模式。
+- 创建前已列既有 5 个任务（edrwd-recording-code-review / edr-cloud-recorder-quality-2 / entry-recovery-r0-loop / edr-cloud-recorder-divergent-testing / edr-s5-continuation-selfreview），全部 disabled，无匹配项 → 新建唯一任务，未重复建监督。
+- 仓库：`/Users/edr-test/ai-projects/edr-wd`。
+
+## 阶段
+
+| 片 | 状态 | 下一可验证交付 |
+| --- | --- | --- |
+| D0 基线与调度 | **快照已固定**（见下），任务已建 | 覆盖账本逐格核查（C04–C08 待补项优先） |
+| D1 采集完整/流畅 | C06接线自验（0911）；C05双向自验（1000退役未复用向+1500空population向）；C07账实/有界/耗时自验（1745）；C08控制/遮挡分开自验（1900）；C05误挂向自验（2030：退役帧不挂新实例structural+volatility双路）；C05→落盘自验（2230：skipped/retried计数到达captureDiagnostics+status per-reason明细，D1账本清空） | D1无待接项；按§9账本D1整行待独立复验汇总 |
+| D2 语言/弹窗身份 | B1菜单定位自验；C04顺序重开身份面自验（2140）；C11语言结果闭环自验（2310）；0335实机新缺陷定位（evidence.window跨窗口拼接）；0513三缺陷最小修复自验（F1同源root+F1b联合身份+F3门明细扣除，7歧义→0，12/12步ready，先红后绿+3变异） | **部署到11.26+重录重放闭环**（待用户确认 repair 动作）；共存同title菜单点击链需采集侧owner handle证据（实机待授权）；绑定/当前点击参数（0315已自验）/整流 |
+| D3 布局drag | C09起点证据自验（2344：_is_layout_drag双端标题栏印证、缺起点fail-closed，"数据拖到标题栏"不再凭endTarget字符串豁免；旧探针注释"无startTarget"实测更正——observed_target即起点身份）；本地冻结 | 几何/归属印证与C10校准依赖实机观测（冻结期不动） |
+| D4 同根因与兼容 | 待接续 | 有界状态变异、导出/报告/回归不回退 |
+| D5 Windows实机 | 待具体授权及环境确认 | 三轮新原件完整语言流与故障正确失败 |
+
+## D0 快照（2026-11-06 03:44 上海时间）
+
+- HEAD：`2292fef5aab18bffd24fa5249bf58591bb6a4ee9`；working tree 20 项 dirty（11 M + 9 未跟踪），未 stash/reset/checkout。
+- WIP 关键文件 SHA256（前12位）：agent/recording/models.py `582afe8e9d30`、agent/recording/compiler.py `5d8bd9a4e05a`、target/recording/models.py `2390ef66d3c6`、target/recording/source.py `4914fb154317`、target/recording/windows.py `2c50e94423c5`；未跟踪新增 agent/locator/menu_layout.py（B1 产物）。
+- F1/F2 原件固定：0046/live-REC-ec395765861244bdb27a3d976aa6e136/recording.json `eb204856ef8fe15a`；live-REC-647312e42cee49a1b01649e33d04d143/recording.json `6d8b183432878064`。0046 与 0315 材料目录完整在树。
+- stash 栈 3 条均为历史会话遗留（hermes/main），本片不动。
+- 设计/skill/coverage-gap-audit 已完整读取；0046 范围锁定不重做。
+- 下一步（D1 首片）：核查 WIP unattributedDestroys / 查询复用 / 布局 drag 分类的真实实现与计数语义（§5.1 不在一层说剔除而底层混算），以 C06/C05 成对探针验证。
+
+## 0911 片（2026-11-06 09:11–09:5x 上海时间）
+
+- 规则ID：C06（接线修复）+ C09（行为固定）；报告 `result-report/recording-basic-actions/20261106-0911/report.md`。
+- 事实：本任务链此前16次运行全部 API 400 秒失败，本轮为首次真实执行。
+- C06 首次失败点：真实链 coverage `unattributedDestroys=0`（driver/source 双计数正确，correlator 计数器无递增点）。最小修复：windows.py `note_unattributed_destroys_total`（吸收读）+ session.py recording() 同点搬运；修正两处矛盾注释。修复后 hash：windows `1b5b5a05d525`、session `957cc3afb625`。
+- C09 探针固定：title→title 豁免、data→data 强制 verifier、**data→title 豁免**（§7 误分类面；raw 事件无 startTarget，修复需采集侧补起点证据，属 D3 整片）。
+- 回归（修复后代码）：录制1818 passed/1 skipped/1 deselected 退出码0；全库3388 passed/1 skipped/614 deselected 退出码0；定向99过。完整日志在报告目录。
+- 状态：本地自验，待独立复验；不据此改判 Windows/公共 v3。
+
+## 每片追加记录模板
+
+规则ID；规格/事实/假设来源；前置状态已满足的证据；完整输入序列；唯一变异；首次失败点；应变化/应保持项；最小修改文件及前后hash；固定期望；本地/实机版本；完整命令/输出；原件路径；已过/未过/权限差额；下一片。
+
+不要以测试数增加替代规则完成，不覆盖历史记录，不把提交方自验改称独立验收。所有执行/通知/权限/WIP边界见设计§12。

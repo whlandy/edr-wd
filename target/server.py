@@ -279,9 +279,32 @@ def connect(
     bundle_id: str = None,
     timeout: float = 10.0,
     auto_activate: bool = False,
+    handle: int | None = None,
 ) -> str:
     if _backend is None:
         return json.dumps({"ok": False, "error": "Automation backend not initialized"})
+    if handle is not None:
+        # Exact live selection for a recording agent when same-title menus
+        # coexist. Never pick the first title match or launch another app.
+        if (type(handle) is not int or handle <= 0 or type(pid) is not int or pid <= 0
+                or not process_name or auto_activate or app_name or bundle_id):
+            return json.dumps({'ok': False, 'code': 'exact_connect_context_required'})
+        if (blocked := _legacy_gui_conflict('connect')) is not None:
+            return blocked
+        with _gui_operation_mutex:
+            inventory = _backend.list_windows()
+            candidates = [w for w in inventory.get('windows', [])
+                          if w.get('handle') == handle and w.get('process_id') == pid
+                          and w.get('visible') is True]
+            actual = _backend.process_name_for_pid(pid)
+            if (inventory.get('ok') is not True or len(candidates) != 1
+                    or not actual or actual.casefold() != process_name.casefold()
+                    or (title_re and not re.search(title_re, candidates[0].get('title') or ''))):
+                return json.dumps({'ok': False, 'code': 'exact_connect_identity_mismatch'})
+            exact = getattr(_backend, 'connect_window_identity', None)
+            if not callable(exact):
+                return json.dumps({'ok': False, 'code': 'exact_connect_unsupported'})
+            return json.dumps(exact(handle, pid), ensure_ascii=False)
 
     def do_connect():
         return _backend.connect(
@@ -1427,7 +1450,7 @@ def replay_capture() -> str:
 @mcp.tool(name="observe_window_bundle", description="Capture one locked-window tree and optional source-redacted image/OCR with identity recheck.")
 @_serialized_product_gui
 def observe_window_bundle(run_token: str | None = None, capture_image: bool = False,
-                          include_ocr: bool = False) -> str:
+                          include_ocr: bool = False, read_only: bool = False) -> str:
     global _product_observation
     if _backend is None:
         return _backend_unavailable("observe_window_bundle")
@@ -1437,6 +1460,8 @@ def observe_window_bundle(run_token: str | None = None, capture_image: bool = Fa
         from windowing.observation import observe_window_bundle as _observe
     try:
         context = _product_policy.require_product_run(run_token)
+        if read_only and context is None:
+            raise ValueError('product_run_required')
         before_registry = _window_session.verify_locked() if context and _window_session else None
         if context and before_registry is None:
             raise ValueError("window_identity_stale")
@@ -1450,6 +1475,7 @@ def observe_window_bundle(run_token: str | None = None, capture_image: bool = Fa
             capture_image=capture_image, include_ocr=include_ocr,
             capture_redacted_frame=_capture_redacted_frame,
             ocr_extract=_ocr_extract if include_ocr else None,
+            identity_provider=(_window_session.verify_locked if read_only else None),
         )
         if before_registry is not None:
             after_registry = _window_session.verify_locked()
@@ -2728,14 +2754,16 @@ def server_observation_controls() -> dict:
 
 @mcp.tool(name="bind_entry_window", description="Bind a golden window declaration to the running window instance under the product lease.")
 @_serialized_product_gui
-def bind_entry_window(window_id: str, identity: dict, run_token: str) -> str:
+def bind_entry_window(window_id: str, identity: dict, run_token: str,
+                      control_selector: dict | None = None) -> str:
     try:
         facade = _binding_facade_for_run(run_token)
     except _WindowBindingRefusal as exc:
         return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
                           ensure_ascii=False)
     try:
-        result = facade.bind(window_id, identity, run_token=run_token)
+        result = facade.bind(window_id, identity, run_token=run_token,
+                             control_selector=control_selector)
     except _WindowBindingRefusal as exc:
         return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
                           ensure_ascii=False)
@@ -2789,12 +2817,28 @@ def focus_bound_window(window_id: str, binding_token: str, run_token: str,
                        action_args: dict | None = None,
                        request_id: str | None = None,
                        target_ref: dict | None = None,
-                       observe: bool = False) -> str:
+                       observe: bool = False, read_only: bool = False) -> str:
     try:
         facade = _binding_facade_for_run(run_token)
     except _WindowBindingRefusal as exc:
         return json.dumps({"ok": False, "code": exc.code, "error": str(exc),
                            "executed": False}, ensure_ascii=False)
+    if read_only:
+        # Post-action evidence must not focus/reconnect/activate the parent:
+        # doing so dismisses Qt menus and destroys the effect being measured.
+        if action_id is not None or not observe:
+            return json.dumps({'ok': False, 'code': 'readonly_action_forbidden',
+                               'executed': False})
+        try:
+            with facade._lock, _product_policy.authorized_dispatch(run_token):
+                facade.reverify(window_id, binding_token, run_token=run_token)
+                observed = json.loads(observe_window_bundle(run_token, read_only=True))
+                return json.dumps({**observed, 'executed': False,
+                                   'controls': server_observation_controls()
+                                   if observed.get('ok') else {}}, ensure_ascii=False)
+        except _WindowBindingRefusal as exc:
+            return json.dumps({'ok': False, 'code': exc.code,
+                               'error': str(exc), 'executed': False})
     # Execution is tri-state: "never called" (executed=false) / "entered
     # dispatch, result unknown" (executed=unknown — the callback may have
     # had side effects before failing) / "deterministic receipt"
@@ -3113,10 +3157,38 @@ _restore_python_tool_callables()
 
 
 # ---------------------------------------------------------------------------
+# DPI awareness (design 11 D2 replay verification, live 47e0aac2): without a
+# process-wide declaration the server's GUI process runs DPI-virtualized —
+# every UIA rectangle reads scaled coordinates and pywinauto's click_input
+# lands OFF the target control (a physical click at the recorded settingBtn
+# coordinates opened nothing while SendInput at the same screen point
+# worked). The recorder panel already declares this for its own window; the
+# automation backend needs it process-wide before any control geometry is
+# read or clicked.
+# ---------------------------------------------------------------------------
+
+def _declare_dpi_awareness() -> None:
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        # Per-monitor-v2 (Windows 10 1703+); falls back gracefully.
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(-4):
+            return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
+    _declare_dpi_awareness()
     global _server_host, _server_port
     parser = argparse.ArgumentParser(description="EDR-WD MCP Server")
     parser.add_argument("--http", action="store_true", help="Run in HTTP mode")

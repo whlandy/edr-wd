@@ -1,5 +1,7 @@
 # 跨窗口录制回放 —— 切片推进清单(09 号设计 R1)
 
+> 2026-11-06 最新接续：0046 独立验收已关闭本地 fixture/兼容回归范围，下面早期阶段表保留为历史，不能据其“未开始”重做已过项。用户现明确授权原 CC 建定时任务，历史“不建 Claude 内部定时任务”限制已被新授权替代。新增语言切换、布局拖拽、弹出菜单、录制完整/流畅问题统一按 [11号设计](../architecture/11-recording-basic-actions-usability-and-integrity-design.md) 与 [新进度](recording-basic-actions-progress.md) 继续；Windows权限及公共v3门仍按新设计边界，不自动扩大。
+
 权威设计: docs/architecture/09-cross-window-sequence-and-instance-binding-design.md(R1)
 监督: Codex 每 10 分钟独立监督;不建 Claude 内部定时任务。
 纪律: 每片先失败回归再实现;每片交付文件+完整测试输出+证据;停等独立复验。

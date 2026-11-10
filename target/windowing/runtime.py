@@ -61,6 +61,10 @@ class WindowSession:
                     "root_control_id": item.get("root_control_id") or "",
                     "class_name": item.get("class_name") or "",
                     "parent_native_id": item.get("parent_native_id"),
+                    # Design 11 D2: native owner edge (GA_ROOTOWNER hwnd) for
+                    # coexisting same-titled windows. Evidence only — binding
+                    # narrows through it, identities are never merged.
+                    "owner_handle": item.get("owner_handle"),
                 })
             self.registry.reconcile(normalized)
             return self.registry.list()
@@ -109,7 +113,15 @@ class WindowSession:
 
     def observe_product_windows(self, capability, application: dict,
                                 process_exe=None) -> tuple[WindowIdentity, ...]:
-        """Enumerate path-owned registered windows without changing the lock."""
+        """Enumerate path-owned registered windows without changing the lock.
+
+        Design 11 D2: coexisting same-titled windows (settings dialog + its
+        language submenu, both "EDRClient") are legitimate inventory facts —
+        the observation list feeds existence assertions that match by
+        expected title/process themselves, so multiple windows per role are
+        RETURNED, not refused. The unique-role requirement stays where it
+        belongs: window BINDING (one identity locks one live instance).
+        """
         with self._mutex:
             owned_windows = self._owned_product_windows(capability, application, process_exe)
             by_role: dict[str, list[WindowIdentity]] = {}
@@ -138,14 +150,38 @@ class WindowSession:
                             # top-level window without a native parent edge.
                             continue
                     matches.append(window)
-                if len(matches) > 1:
-                    raise WindowIdentityError("window_role_ambiguous")
+                # Multiple matches per role are inventory facts here (the
+                # observation list is read-only; uniqueness is a binding-
+                # time requirement, enforced in bind's _resolve_unique).
                 by_role[rule.role] = matches
                 assigned.update(window.native_id for window in matches)
             if any(window.native_id not in assigned for window in owned_windows):
                 # An omitted or dynamically retitled product window must not
                 # disappear from a negative window assertion as if it closed.
-                raise WindowIdentityError("product_window_unclassified")
+                # Design 11 D2: coexisting same-titled rounds are legitimate
+                # inventory — an unclassified window whose title matches a
+                # declared role pattern (the dialog + submenu case) rides
+                # that role so existence facts survive; a window matching
+                # NO pattern (an unregistered popup) stays a hard failure.
+                unclassified = [w for w in owned_windows
+                                if w.native_id not in assigned]
+                resolved_fallback: dict[str, list[WindowIdentity]] = {}
+                still_unclassified: list[WindowIdentity] = []
+                for w in unclassified:
+                    target_role = next(
+                        (rule.role for rule in capability.window_roles
+                         if rule.title_pattern
+                         and re.search(rule.title_pattern, w.title)),
+                        None)
+                    if target_role is None:
+                        still_unclassified.append(w)
+                    else:
+                        resolved_fallback.setdefault(target_role, []).append(w)
+                if still_unclassified:
+                    raise WindowIdentityError("product_window_unclassified")
+                for role, extra in resolved_fallback.items():
+                    by_role.setdefault(role, []).extend(extra)
+                    assigned.update(w.native_id for w in extra)
             return tuple(replace(window, role=role)
                          for role, matches in by_role.items() for window in matches)
 

@@ -77,12 +77,17 @@ def observe_window_bundle(backend: Any, *, session_id: str, backend_kind: str,
                           run_token: str | None, capture_image: bool,
                           include_ocr: bool, capture_redacted_frame: Callable,
                           ocr_extract: Callable | None = None,
+                          identity_provider: Callable | None = None,
                           max_duration: float = 60.0) -> dict:
     """Reject the whole observation if identity or geometry changes mid-capture."""
     started = time.monotonic()
     with authorized_dispatch(run_token):
-        before = _identity_from_lock(backend, session_id, backend_kind)
-        tree = backend.dump_tree(max_depth=15)
+        before = (identity_provider() if identity_provider else
+                  _identity_from_lock(backend, session_id, backend_kind))
+        scoped_tree = getattr(backend, 'dump_tree_for_window', None)
+        tree = (scoped_tree(int(before.native_id), max_depth=15)
+                if identity_provider and callable(scoped_tree)
+                else backend.dump_tree(max_depth=15))
         if not isinstance(tree, Mapping) or not tree.get("ok") or not isinstance(tree.get("controls"), list):
             raise ValueError("observation_tree_unavailable")
         png = None
@@ -104,7 +109,8 @@ def observe_window_bundle(backend: Any, *, session_id: str, backend_kind: str,
                         if str(exc) != "ocr_unsupported":
                             raise
                         ocr_status = "unsupported"
-        after = _identity_from_lock(backend, session_id, backend_kind)
+        after = (identity_provider() if identity_provider else
+                 _identity_from_lock(backend, session_id, backend_kind))
         if before.binding != after.binding or before.rect != after.rect:
             raise WindowIdentityError("observation_window_changed")
         duration = time.monotonic() - started

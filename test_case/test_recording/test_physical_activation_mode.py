@@ -9,8 +9,8 @@
 - 配置缺失/为空 → 默认行为零变化（语义激活照旧）；
 - 配置格式非法 → PhysicalActivationConfigError，WindowsGUI.__init__ 启动即
   明确失败，不静默忽略；
-- 命中控件跳过 UIA Invoke → 落既有控件定位 + pointer_guard + click_input
-  物理路径；click_input 失败如实失败（method=click_input_failed, ok=False），
+- 命中控件跳过 UIA Invoke → 落既有控件定位 + pointer_guard + checked SendInput
+  物理路径；原生输入提交失败如实失败（SendInput, ok=False），
   绝不以坐标 fallback 冒充通过。
 
 测试策略（107 轮审查修正：真实 WindowsGUI 方法、零 xfail、mac 可执行）：
@@ -146,6 +146,14 @@ def _install_fake_pywinauto(monkeypatch):
     monkeypatch.delitem(sys.modules, "target.pywinauto_client", raising=False)  # 强制重导
     module = importlib.import_module("target.pywinauto_client")
     monkeypatch.setattr(module, "mouse", fake_mouse, raising=False)
+    # The client now uses checked native submission, not click_input. Exercise
+    # that real helper with a fake OS API (no Windows DLL on this host).
+    from test_case.test_recording.test_native_pointer_submission import API
+    from target.automation.native_pointer import send_left_click
+    api = API(point=(100, 32))
+    fake_mouse.native_api = api
+    monkeypatch.setattr(module, "send_left_click", lambda x, y: send_left_click(
+        x, y, api=api, sleep=lambda _: None, last_error=lambda: 5))
     return module, fake_mouse
 
 
@@ -246,9 +254,11 @@ def test_matched_control_clicks_physically_zero_invoke(real_gui):
     ctrl = _FakeCtrl("FixtureSave")
     gui._find_control = lambda **kwargs: ctrl
     result = gui.click(automation_id="FixtureSave", control_type="Button")
-    assert result["ok"] is True and result["method"] == "click_input", result
+    assert result["ok"] is True and result["method"] == "SendInput", result
     assert ctrl.invoked is False, "物理声明控件不得走 UIA Invoke"
-    assert ctrl.click_input_calls == 1
+    assert ctrl.click_input_calls == 0
+    assert fake_mouse.native_api.flags == [2, 4]
+    assert result['effect_verified'] is False
     assert fake_mouse.clicks == [], "物理点击不得有坐标动作"
     assert guard_calls, "pointer_guard 必须在物理路径上被调用"
 
@@ -269,20 +279,23 @@ def test_guard_rejection_performs_zero_input(real_gui):
     assert ctrl.invoked is False, "guard 拒绝后不得有任何 Invoke"
     assert ctrl.click_input_calls == 0, "guard 拒绝后不得有任何点击"
     assert fake_mouse.clicks == [], "guard 拒绝后不得有任何坐标动作"
+    assert fake_mouse.native_api.flags == []
 
 
 @pytest.mark.parametrize("real_gui", [QA_RULE], indirect=True)
 def test_click_input_failure_is_not_masked_by_coordinates(real_gui):
     gui, fake_mouse, guard_calls = real_gui
     ctrl = _FakeCtrl("FixtureSave", click_fails=True)
+    fake_mouse.native_api.counts = iter((1, 0))
     gui._find_control = lambda **kwargs: ctrl
     result = gui.click(automation_id="FixtureSave", control_type="Button")
     assert result["ok"] is False, result
-    assert result["method"] == "click_input_failed"
-    assert "click_input_error" in result
+    assert result["method"] == "SendInput"
+    assert result['event_dispatched'] is True and result['outcome'] == 'unknown'
     assert fake_mouse.clicks == [], "click_input 失败不得以坐标 fallback 冒充通过"
-    assert ctrl.click_input_calls == 1
-    assert guard_calls, "失败发生在 guard 坐标计算与 click_input 之后"
+    assert ctrl.click_input_calls == 0
+    assert fake_mouse.native_api.flags == [2, 4]
+    assert guard_calls, "失败发生在 guard 坐标计算与原生提交之后"
 
 
 @pytest.mark.parametrize("real_gui", [None], indirect=True)

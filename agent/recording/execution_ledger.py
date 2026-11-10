@@ -1016,7 +1016,14 @@ def _golden_window_identities(golden) -> dict:
         if not window_id or not isinstance(identity, Mapping):
             raise ValueError(f"golden window {window_id!r} has no "
                              "declared identity")
-        identities[window_id] = dict(identity)
+        entry = dict(identity)
+        # Design 11 D2: the recorded owner relation rides the declaration so
+        # the binding can narrow coexisting same-titled windows through the
+        # live owner chain. Declared evidence only — never a merge key.
+        owner_wid = window.get("ownerWindowId")
+        if isinstance(owner_wid, str) and owner_wid:
+            entry["ownerWindowId"] = owner_wid
+        identities[window_id] = entry
     if not identities:
         raise ValueError("golden windowSequence declares no windows")
     return identities
@@ -1603,8 +1610,20 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                 # B-2 延迟绑定:将来 W 现在应已由其 appeared 效果/
                 # 前序动作带入可见清单 — 本次只读校验后绑定(仍走
                 # 同一真实 bind_entry_window 门:无观测证据即拒绝)。
+                # Design 11 D2 续:同名候选并存时携带本步骤声明的控件
+                # 选择器,由绑定侧逐候选树内唯一解析(结构收窄);
+                # 选择器来自 golden 声明,不来自时间/causalId 推断。
+                step_selector = None
+                step_selector_obj = getattr(declared, "selector", None) \
+                    if declared is not None else None
+                step_control = getattr(step_selector_obj, "control", None) \
+                    if step_selector_obj is not None else None
+                if isinstance(step_control, Mapping) \
+                        and step_control.get("structural") is not None:
+                    step_selector = dict(step_control)
                 bind_result = json.loads(server.bind_entry_window(
-                    window_id, window_identities[window_id], run_token))
+                    window_id, window_identities[window_id], run_token,
+                    control_selector=step_selector))
                 if bind_result.get("binding_token"):
                     bound_windows[window_id] =                         bind_result["binding_token"]
                     binding_token = bound_windows[window_id]
@@ -1717,6 +1736,9 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                     before_binding_revision, before_observation_ref = \
                         authority_before
             except Exception as exc:  # noqa: BLE001
+                import sys as _sys
+                _sys.stderr.write(f"[v3-driver-audit] before_state_invalid: "
+                                  f"{type(exc).__name__}: {exc}\n")
                 hook.complete_after_step(
                     step_result=SimpleNamespace(
                         step_id=step_id, status=StepStatusValue.BLOCKED),
@@ -1795,6 +1817,23 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
 
             candidates = [control for control in projected_controls.values()
                           if _matches(control)]
+            menu_click_args = None
+            if control_selector.get("structural") is not None:
+                # Same locator as ordinary golden replay. This projection is
+                # already scoped by the live binding/lease to this window;
+                # do not fall back to the recorded label or screen point.
+                from agent.locator import HybridLocator, LocatorRequest, LocatorError
+                from agent.locator.menu_layout import current_click_args
+                try:
+                    candidates = [c.source for c in HybridLocator().collect_candidates(
+                        LocatorRequest("gui.click", {}, control_selector),
+                        {"observation_id": observation_id,
+                         "controls": list(projected_controls.values())})]
+                    if len(candidates) == 1:
+                        menu_click_args = current_click_args(
+                            candidates[0], list(projected_controls.values()))
+                except (LocatorError, ValueError):
+                    candidates = []
             if not candidates:
                 hook.complete_after_step(
                     step_result=SimpleNamespace(
@@ -1914,6 +1953,11 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                 continue
             action_id = declared_action_id
             action_args = dict(getattr(declared, "args", None) or {})
+            if menu_click_args is not None:
+                for key in ("automation_id", "text", "control_id", "class_name",
+                            "parent_text", "auto_id_contains", "auto_id_suffix", "parent_of"):
+                    action_args.pop(key, None)
+                action_args.update(menu_click_args)
             action_args.setdefault("expected_process_name",
                                    window_identities[window_id].get(
                                        "processName"))
@@ -1924,6 +1968,20 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
             if wanted_automation_id:
                 action_args.setdefault("automation_id",
                                        wanted_automation_id)
+            elif not control_selector.get("structural"):
+                # Weak identity (no automationId): the backend click needs
+                # the resolved control's own identity. Materialize
+                # control_type/text from the RESOLVED projection (the same
+                # observation the target_ref fingerprint pins) — never from
+                # the recorded label alone; the recorded selector already
+                # matched this projection uniquely.
+                resolved_text = target_control.get("text")
+                if resolved_text:
+                    # Text only: the backend's title/text filter resolves the
+                    # deep menu item; pairing control_type here makes the
+                    # strict child_window path miss it (replay round r3:
+                    # text+MenuItem → Control not found, text alone → found).
+                    action_args.setdefault("text", resolved_text)
             # B-4(09§7.2/10 R1):drag 双端语义解析 — selector 与
             # endSelector 在**本次观测**下经既有解析器唯一解析
             # (HybridLocator/resolve_replay_selector;不用录制
@@ -2296,7 +2354,7 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                 # 不重试、不复活 binding。
                 post_raw = json.loads(server.focus_bound_window(
                     window_id, binding_token, run_token,
-                    action_id=None, observe=True))
+                    action_id=None, observe=True, read_only=True))
                 if not (post_raw or {}).get("ok", False):
                     if (post_raw or {}).get("code") == "window_binding_lost":
                         post_binding_lost = True
@@ -2530,6 +2588,43 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                 product_windows=inventory_read["windows"],
                 inventory_read=inventory_read) if declared_verifiers \
                 else []
+            # Design 11 D2: window_open 断言的 timeoutSeconds 是存在性
+            # 等待上限——对话框在动作后异步出现（click_input 到前台化
+            # 到 Qt 创建窗口 >0.1s），post 观测是一次快照，直接求值会把
+            # "还没出现"误判为 failed。按声明的 timeout 轮询清单，命中
+            # 即重求值；超时保持最后一次结果（诚实 failed）。
+            _pending_window_open = any(
+                (v.get("type") == "window_open" and (v.get("expected") or {}).get("exists"))
+                for v in declared_verifiers)
+            if _pending_window_open and any(
+                    getattr(_r, "diagnostic", None)
+                    and "no matching window" in str(getattr(_r, "diagnostic"))
+                    for _r in verifer_results):
+                _timeout = max(
+                    (float(v.get("timeoutSeconds") or 0)
+                     for v in declared_verifiers
+                     if v.get("type") == "window_open"),
+                    default=0.0)
+                _deadline = time.monotonic() + min(max(_timeout, 0.0), 10.0)
+                while time.monotonic() < _deadline:
+                    time.sleep(0.4)
+                    inventory_read = _read_product_inventory(
+                        server, run_token=run_token)
+                    if not inventory_read.get("ok"):
+                        continue
+                    verifer_results = _evaluate_declared_verifiers(
+                        declared, post_observation,
+                        SimpleNamespace(
+                            to_dict=lambda r=dict(receipt): dict(r)),
+                        step_id=step_id, window_id=window_id,
+                        product_windows=inventory_read["windows"],
+                        inventory_read=inventory_read)
+                    if not any(
+                            getattr(_r, "diagnostic", None)
+                            and "no matching window" in str(
+                                getattr(_r, "diagnostic", ""))
+                            for _r in verifer_results):
+                        break
             assertion_refs = [
                 {"assertionId":
                     f"{step_id}:{getattr(r, 'expectation_type', 'assertion')}:{i}",
@@ -3032,7 +3127,7 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                         post_observation = json.loads(
                             server.focus_bound_window(
                                 cleanup_wid, cleanup_token, run_token,
-                                action_id=None, observe=True))
+                                action_id=None, observe=True, read_only=True))
                         if not (post_observation or {}).get("ok", False):
                             # 动作关闭了 cleanup 自身绑定窗口 → 绑定
                             # LOST 是**声明的 absent 效果的预期后果**,

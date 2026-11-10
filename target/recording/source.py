@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, Protocol
 
@@ -54,11 +55,19 @@ class CompositeHookDriver:
         the final coverage block, not die at the hook).
         """
         total = 0
+        unattributed = 0
         for driver in self._drivers:
             counter = getattr(driver, "dropped_window_events", None)
             if isinstance(counter, int) and not isinstance(counter, bool):
                 total += counter
+            ua = getattr(driver, "unattributed_destroy_events", None)
+            if isinstance(ua, int) and not isinstance(ua, bool):
+                unattributed += ua
+        self._unattributed_total = unattributed
         return total
+
+    def unattributed_destroy_events_total(self) -> int:
+        return int(getattr(self, "_unattributed_total", 0))
 
     def start(self, emit: Callable[[HookPacket], None]) -> None:
         started: list[HookDriver] = []
@@ -152,6 +161,10 @@ class QueuedCaptureSource:
         self._packets_by_kind: dict[str, int] = {}
         self._dequeued = 0
         self._paused_dropped = 0
+        # C07 (design 11 §5.3): stop-drain timing, read after stop() returns.
+        # A bounded-but-long drain is a real cost the user waits through;
+        # keeping the measured value is what makes the budget discussable.
+        self.stop_drain_ms: int | None = None
         self._sink_false = 0
         self._start_error: str | None = None
 
@@ -174,8 +187,21 @@ class QueuedCaptureSource:
             "eventsEmitted": self._events_emitted,
             "queueDepth": self._queue.qsize(),
             "correlationErrorCount": len(self.correlation_errors),
+            # C07 (§5.3): stop-drain 耗时实测值；未 stop 过为 None。
+            "stopDrainMs": self.stop_drain_ms,
             "foreignAppEvents": getattr(self._correlator, 'foreign_app_events', None),
+            # 无归属 DESTROY(环境噪音)单独计数:不混入目标流失语义。
+            "unattributedDestroyEvents": getattr(
+                self, "unattributed_destroy_events_total", 0),
             "scopeRootProbe": getattr(self._correlator, 'scope_root_probe', None),
+            # Control-inventory skip/retry accounting, by skip reason. The
+            # persisted document carries the totals (inventorySkipped /
+            # inventoryRetried); status keeps the per-reason split because
+            # it is what explains WHERE a flow's walks went (design 11 §5.1).
+            "inventorySkipped": dict(getattr(
+                self._inventory, "skipped", {}) or {}) if self._inventory is not None else {},
+            "inventoryRetried": dict(getattr(
+                self._inventory, "retried", {}) or {}) if self._inventory is not None else {},
             # F53：有界错误摘要（最近3条、每条截断200字）——读实际异常定根因。
             "correlationErrors": [
                 e[:200] for e in list(self.correlation_errors)[-3:]
@@ -272,6 +298,15 @@ class QueuedCaptureSource:
         """
         getter = getattr(self._driver, "window_hook_loss", None)
         total = getter() if callable(getter) else 0
+        # 无归属 DESTROY(环境噪音)随同一次吸收读刷新到 source 诊断:
+        # 单独计数,不混入 droppedEvents 的目标流失语义(0002 口径)。
+        ua_getter = getattr(self._driver, "unattributed_destroy_events_total", None)
+        if callable(ua_getter):
+            self.unattributed_destroy_events_total = ua_getter()
+        else:
+            direct = getattr(self._driver, "unattributed_destroy_events", None)
+            if isinstance(direct, int) and not isinstance(direct, bool):
+                self.unattributed_destroy_events_total = direct
         new_loss = total - self._hook_loss_consumed
         self._hook_loss_consumed += max(0, new_loss)
         return max(0, new_loss)
@@ -284,6 +319,21 @@ class QueuedCaptureSource:
         if kind:
             self._packets_by_kind[kind] = self._packets_by_kind.get(kind, 0) + 1
         if self._paused.is_set():
+            # C07 (§5.1): a packet refused while paused never reaches the
+            # worker, so the worker-side counter cannot see it. Counting here
+            # is the only place the discard gets its ledger entry.
+            # C08: a Pause/Resume button's own click arrives here after the
+            # callback already flipped the paused state — it is control
+            # input with its own ledger entry, not user input the pause
+            # swallowed. The mark window is the correlator's shared fact.
+            mark = getattr(self._correlator, "in_recorder_control_window", None)
+            if callable(mark) and mark():
+                control = getattr(self._correlator, "recorder_control_events",
+                                  None)
+                if isinstance(control, int) and not isinstance(control, bool):
+                    self._correlator.recorder_control_events = control + 1
+            else:
+                self._paused_dropped += 1
             return
         try:
             self._queue.put_nowait(packet)
@@ -294,7 +344,13 @@ class QueuedCaptureSource:
         try:
             while True:
                 packet = self._queue.get()
-                self._dequeued += 1
+                # C07 (§5.3): the ledger must reconcile — dequeued counts
+                # capture packets only, never the stop sentinel. Counting the
+                # sentinel made dequeued exceed packetsEnqueued by a timing
+                # coin-flip (whether stop() fit its sentinel into a draining
+                # queue), so no consumer could ever balance the books.
+                if packet is not self._STOP:
+                    self._dequeued += 1
                 try:
                     if packet is not self._STOP and self._paused.is_set():
                         self._paused_dropped += 1
@@ -388,6 +444,7 @@ class QueuedCaptureSource:
     def stop(self) -> None:
         if not self._started:
             return
+        drain_started = time.monotonic()
         self._driver.stop()
         self._stop_requested.set()
         try:
@@ -414,6 +471,11 @@ class QueuedCaptureSource:
                         f"{self._stop_timeout:g}s; recording truncated"
                     )
                 self._started = False
+        # C07 (§5.3): the measured drain cost, observable in diagnostics.
+        # Recorded on every path — a timeout that reports only its bound and
+        # never its actual duration is exactly the unexplainable timing this
+        # field exists to explain.
+        self.stop_drain_ms = int((time.monotonic() - drain_started) * 1000)
         if self._inventory is not None:
             # Last, and never before the correlator has drained: the final
             # walk it queues is the page the user ended on, which is the one a

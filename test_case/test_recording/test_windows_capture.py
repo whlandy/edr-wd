@@ -245,7 +245,10 @@ def test_queue_overflow_is_persisted_in_raw_capture_diagnostics():
         "correlationErrorCount": 0,
         "outOfScopeEvents": 0,
         "recorderUiEvents": 0,
+        "recorderControlEvents": 0,
         "unidentifiedTargetEvents": 0,
+        "inventorySkipped": 0,
+        "inventoryRetried": 0,
     }
 
 

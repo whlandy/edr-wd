@@ -296,6 +296,23 @@ class WindowBindingProtocol:
         if not candidates:
             return None
         if len(candidates) > 1:
+            # Design 11 D2: 声明 ownerWindowId 时按 live owner 链收窄 ——
+            # owner 必须已 BOUND 且其 live native_id 仍在 inventory 中；
+            # 收窄后仍非唯一/owner 不可用 → 照旧 ambiguous（不猜）。
+            owner_wid = identity.get("ownerWindowId")
+            if isinstance(owner_wid, str) and owner_wid:
+                owner_binding = self._bindings.get(owner_wid)
+                if owner_binding is not None and owner_binding.state == "BOUND":
+                    owner_live = [item for item in live
+                                  if item.get("native_id")
+                                  == owner_binding.native_id]
+                    owner_handle = (owner_live[0].get("handle")
+                                    if owner_live else None)
+                    if owner_handle is not None:
+                        owned = [item for item in candidates
+                                 if item.get("owner_handle") == owner_handle]
+                        if len(owned) == 1:
+                            return (owned[0]["native_id"], owned[0])
             raise WindowBindingError(
                 "window_binding_ambiguous",
                 f"{len(candidates)} live windows match the declared identity")

@@ -772,12 +772,27 @@ class GoldenStepMaterializer:
         control = selector.control if selector is not None else {}
         expected_process = selector.window.get("processName") if selector is not None else None
         if visual_args is None and step.action_id in {"gui.click", "gui.click_target"}:
-            semantic_args = {
-                "automation_id": control.get("automationId"),
-                "text": None if control.get("automationId") or control.get("identifier") else control.get("name"),
-                "control_type": control.get("controlType"),
-                "expected_process_name": expected_process,
-            }
+            if control.get("structural") is not None:
+                from agent.locator.menu_layout import current_click_args
+                peers = [x if isinstance(x, Mapping) else vars(x)
+                         for x in _targets(observation)]
+                try:
+                    semantic_args = current_click_args(
+                        candidate if isinstance(candidate, Mapping) else vars(candidate), peers)
+                except (ValueError, TypeError) as exc:
+                    raise StepMaterializationError(
+                        "replay_target_ambiguous", str(exc)) from exc
+                semantic_args["expected_process_name"] = expected_process
+                for key in ("automation_id", "text", "control_id", "class_name",
+                            "parent_text", "auto_id_contains", "auto_id_suffix", "parent_of"):
+                    args.pop(key, None)
+            else:
+                semantic_args = {
+                    "automation_id": control.get("automationId"),
+                    "text": None if control.get("automationId") or control.get("identifier") else control.get("name"),
+                    "control_type": control.get("controlType"),
+                    "expected_process_name": expected_process,
+                }
             args.update({key: value for key, value in semantic_args.items() if value not in (None, "")})
         elif step.action_id == "gui.type_text":
             # Same control identity source as gui.click: the observed

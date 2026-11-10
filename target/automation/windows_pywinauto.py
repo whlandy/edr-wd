@@ -24,6 +24,7 @@ from typing import Optional, Any
 import pyautogui
 
 from .base import lock_criteria_mismatch, release_window_lock_if_window_changed
+from .native_inventory import native_top_windows
 
 # Win32 生命周期事件常量(实例跟踪订阅范围;§7.4)。
 from .instance_events import (  # noqa: E402,F401 — re-export for tests
@@ -942,34 +943,14 @@ class WindowsPywinautoBackend:
 
         out = []
         try:
-            desktop = Desktop(backend="uia")
+            windows = native_top_windows(Desktop)
         except Exception as exc:  # pragma: no cover - live-only
             if strict:
                 raise ValueError("window_inventory_unavailable") from exc
             return out
-        try:
-            windows = desktop.windows()
-        except Exception as exc:
-            if strict:
-                raise ValueError("window_inventory_unavailable") from exc
-            return out
         for win in windows:
-            # is_top_level() is absent on some pywinauto UIAWrapper builds
-            # (0.6.x) — treat that as "top-level unknown, keep the window"
-            # (same documented fallback as list_windows), not an enumeration
-            # failure. A real exception on either probe is still fatal in
-            # strict mode and skips the window otherwise.
-            top_level = True
-            try:
-                top_level = win.is_top_level()
-            except AttributeError:
-                pass
-            except Exception:
-                if strict:
-                    raise ValueError("window_inventory_unavailable")
-                continue
-            if not top_level:
-                continue
+            # Membership already came from native top-level enumeration.
+            # UIA parentage does not prove a Win32 child window.
             try:
                 visible = win.is_visible()
             except Exception:
@@ -1011,6 +992,25 @@ class WindowsPywinautoBackend:
                     "right": int(r.right), "bottom": int(r.bottom),
                     "width": int(r.width()), "height": int(r.height()),
                 }
+                # A zero-area surface (cloaked shell panes enumerate
+                # visible with an empty rect) cannot host UI and was never
+                # a bindable product window. Keeping it would poison the
+                # whole instance index — WindowIdentity.from_native refuses
+                # a degenerate rect and every refresh raises. Skip it the
+                # same way an invisible window is skipped.
+                if rect["right"] <= rect["left"] or rect["bottom"] <= rect["top"]:
+                    continue
+                # §7.2: focus verification reads the inventory's
+                # foreground fact — enumeration never carried it, so the
+                # live refresh answered foreground=False for every window
+                # and refused all binds (live run 47e0aac2).
+                foreground = False
+                try:
+                    import ctypes
+                    user32 = ctypes.windll.user32
+                    foreground = int(user32.GetForegroundWindow()) == handle
+                except Exception:
+                    foreground = False
                 out.append(
                     {
                         "handle": handle,
@@ -1020,6 +1020,7 @@ class WindowsPywinautoBackend:
                         "rect": rect,
                         "root_control_id": root_control_id,
                         "parent_native_id": owner_handle,
+                        "foreground": foreground,
                     }
                 )
             except Exception:

@@ -105,8 +105,13 @@ def test_windows_inventory_retains_root_uia_id_for_same_title_windows(monkeypatc
                                    width=lambda: 800, height=lambda: 600)
 
     windows = [FakeWindow(101, "MainRoot"), FakeWindow(202, "LogRoot")]
+    monkeypatch.setattr("target.automation.native_inventory._uia_from_native",
+        lambda handle: next(w for w in windows if w.handle == handle))
     monkeypatch.setitem(sys.modules, "pywinauto", SimpleNamespace(
-        Desktop=lambda backend: SimpleNamespace(windows=lambda: windows),
+        Desktop=lambda backend: SimpleNamespace(
+            windows=lambda: windows,
+            window=lambda handle: SimpleNamespace(wrapper_object=lambda: next(
+                w for w in windows if w.handle == handle))),
     ))
 
     result = WindowsPywinautoBackend._enumerate_top_windows_windows(strict=True)
@@ -142,8 +147,13 @@ def test_windows_inventory_keeps_window_when_is_top_level_missing(monkeypatch):
                                     width=lambda: 800, height=lambda: 600)
 
     windows = [NoTopLevelWindow(303, "EdrMainWindow")]
+    monkeypatch.setattr("target.automation.native_inventory._uia_from_native",
+        lambda handle: next(w for w in windows if w.handle == handle))
     monkeypatch.setitem(sys.modules, "pywinauto", SimpleNamespace(
-        Desktop=lambda backend: SimpleNamespace(windows=lambda: windows),
+        Desktop=lambda backend: SimpleNamespace(
+            windows=lambda: windows,
+            window=lambda handle: SimpleNamespace(wrapper_object=lambda: next(
+                w for w in windows if w.handle == handle))),
     ))
 
     strict = WindowsPywinautoBackend._enumerate_top_windows_windows(strict=True)
@@ -346,17 +356,23 @@ def test_product_window_inventory_is_path_owned_and_sees_unlocked_child(log_titl
     assert session.registry.locked is None
 
 
-def test_product_window_inventory_rejects_ambiguous_registered_role():
+def test_product_window_inventory_returns_coexisting_same_title_windows():
+    """Design 11 D2: coexisting same-titled windows (settings dialog + its
+    language submenu) are legitimate inventory facts. The observation list
+    returns BOTH with the declared role; uniqueness stays a binding-time
+    requirement (registry.resolve_unique keeps refusing duplicates)."""
     cap = get_capability("windows_hisec", "windows_pywinauto")
     backend = FakeBackend()
     backend.windows.append({**backend.windows[0], "handle": 2})
     session = WindowSession("s", "windows_pywinauto", backend)
 
-    with pytest.raises(WindowIdentityError, match="window_role_ambiguous"):
-        session.observe_product_windows(
-            cap, {"path": r"C:\Program Files\HiSec-Endpoint\core\EDRClient.exe"},
-            process_exe=lambda pid: r"C:\Program Files\HiSec-Endpoint\core\EDRClient.exe",
-        )
+    windows = session.observe_product_windows(
+        cap, {"path": r"C:\Program Files\HiSec-Endpoint\core\EDRClient.exe"},
+        process_exe=lambda pid: r"C:\Program Files\HiSec-Endpoint\core\EDRClient.exe",
+    )
+    assert len(windows) == 2
+    assert all(w.role == "main" for w in windows)
+    assert {w.native_id for w in windows} == {"1", "2"}
 
 
 def test_product_window_inventory_fails_closed_when_ownership_or_enumeration_is_unknown():

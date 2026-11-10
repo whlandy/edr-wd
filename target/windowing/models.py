@@ -29,6 +29,10 @@ class WindowIdentity:
     visible: bool = True
     foreground: bool = False
     generation: int = 1
+    # Design 11 D2: native owner edge (GA_ROOTOWNER hwnd) as recorded
+    # evidence. Never a merge key — binding narrows ambiguous candidates
+    # through the declared owner chain.
+    owner_handle: int | None = None
 
     @classmethod
     def from_native(cls, snapshot: Mapping, *, session_id: str,
@@ -69,6 +73,8 @@ class WindowIdentity:
             opened_by_action_id=snapshot.get("opened_by_action_id"),
             visible=bool(snapshot.get("visible", True)),
             foreground=bool(snapshot.get("foreground", False)),
+            owner_handle=(int(snapshot["owner_handle"])
+                          if snapshot.get("owner_handle") is not None else None),
             generation=generation,
         )
 

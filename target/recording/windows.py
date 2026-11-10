@@ -646,6 +646,29 @@ class WindowsUIAResolver:
             return None
         return {**native, "processName": process_name}
 
+    def native_window_is_alive(self, handle: int, pid: int) -> bool | None:
+        """Exact current HWND/PID liveness, independent of queued HIDE/DESTROY.
+
+        The release packet is ahead of those lifecycle packets in the queue,
+        while its slow UIA hit test may run after the window destroyed itself.
+        A process-name enrichment is not a window-liveness probe.
+        """
+        from ctypes import wintypes
+        try:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.IsWindow.argtypes = [wintypes.HWND]
+            user32.IsWindow.restype = wintypes.BOOL
+            if not user32.IsWindow(handle):
+                return False
+            owner = wintypes.DWORD()
+            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+            if not user32.GetWindowThreadProcessId(handle, ctypes.byref(owner)):
+                return None
+            return int(owner.value) == pid
+        except Exception:
+            return None
+
     def element_at(self, x: int, y: int) -> Mapping[str, object] | None:  # pragma: no cover - Windows only
         from pywinauto import Desktop
 
@@ -755,6 +778,13 @@ class WindowsUIACorrelator:
         # so it must not be recorded as though it had.
         self._recorder_ui_rect: tuple[int, int, int, int] | None = None
         self.recorder_ui_events = 0
+        # C08: clicks the recorder's own buttons consumed.  Panel buttons
+        # report through the callbacks (service side) right before their
+        # down/up packets reach this correlator, so a mark window tells
+        # control input apart from input the panel swallowed while the user
+        # was aiming at the target.  The raw occlusion count keeps both.
+        self.recorder_control_events = 0
+        self._recorder_control_marks: list[int] = []
         # Clicks that landed on nothing the application can name.
         self.unidentified_target_events = 0
         # Sibling process names admitted alongside `scope.process_name`,
@@ -806,9 +836,22 @@ class WindowsUIACorrelator:
         # instance -> last trusted owner pid (forward identity evidence for
         # design 09 §4.2; compared on every observation of a live handle).
         self._instance_owner_pid: dict[str, int] = {}
+        # C05 (design 11 §5.2): instances retired by DESTROY with the handle
+        # NOT yet re-observed. A control-tree walk still in flight when its
+        # instance is destroyed can only have read the live instance's tree
+        # (a dead HWND cannot be walked), so superseding that walk drops the
+        # ONLY snapshot of a short-lived menu the user already acted on
+        # (live REC-647312 4th menu click had no frame). Until the handle is
+        # reused, its authority answer keeps naming the retired instance;
+        # once reused, the entry is gone and the 0517 P1-2 discard applies.
+        self._retired_unreused: dict[int, str] = {}
         # No-hook loss accounting: the coverage block must declare dropped
         # window events rather than pretend continuity.
         self._dropped_window_events = 0
+        # 无 SHOW 期记录的 DESTROY 明细(环境噪音 vs 目标流失的区分,
+        # 0002 口径):droppedEvents 总数语义不变(0517),明细供消费者
+        # 判读。driver 侧同名计数由 source 聚合。
+        self.unattributed_destroy_events = 0
         # Review 0627 P2: event.sequence is the RAW-OUTPUT contiguous number
         # (advanced only when an event is actually produced), NOT the receive
         # order. The timeline's ingressSequence must be a true receive order:
@@ -1235,10 +1278,18 @@ class WindowsUIACorrelator:
         if authority is None:
             # The correlator owns the authoritative instance index: expose it
             # so the inventory can discard walks that raced a generation
-            # change (review 0517 P1-2).
+            # change (review 0517 P1-2). A handle retired by DESTROY and not
+            # yet re-observed still answers with the retired instance: a walk
+            # in flight could only have read that instance's live tree, so
+            # superseding it would drop the only snapshot of a short-lived
+            # menu (C05, design 11 §5.2). Handle reuse clears the entry.
+            def _authority(handle):
+                retired = self._retired_unreused.get(handle)
+                if retired is not None:
+                    return retired
+                return self._instance_by_handle.get(handle)
             try:
-                self._inventory.instance_authority = (
-                    lambda handle: self._instance_by_handle.get(handle))
+                self._inventory.instance_authority = _authority
             except Exception:
                 pass
         try:
@@ -1318,6 +1369,10 @@ class WindowsUIACorrelator:
                 self._instance_seq += 1
                 instance_id = f"RI-{self._instance_seq:04d}"
                 self._instance_by_handle[handle] = instance_id
+                # Handle re-observed after DESTROY: the retired-unreused
+                # grace ends here -- the 0517 P1-2 supersede rules apply
+                # again for any walk still in flight against this handle.
+                self._retired_unreused.pop(handle, None)
                 if isinstance(pid, int) and not isinstance(pid, bool):
                     self._instance_owner_pid[instance_id] = pid
                 return instance_id, False
@@ -1378,6 +1433,13 @@ class WindowsUIACorrelator:
         """DESTROY retires the tracking key so handle reuse yields a new
         instance. The old instance's history stays in the timeline."""
         if handle is not None:
+            instance_id = self._instance_by_handle.get(handle)
+            if instance_id is not None:
+                # Bounded: only the most recent retirement per handle is
+                # retained; a full sweep keeps the dict at O(live handles).
+                self._retired_unreused[handle] = instance_id
+                if len(self._retired_unreused) > 256:
+                    self._retired_unreused.clear()
             self._instance_by_handle.pop(handle, None)
         else:
             self._instance_by_title.pop(("title", process_name, title), None)
@@ -1390,6 +1452,23 @@ class WindowsUIACorrelator:
         silently dropped at the hook layer (review 0457 P1-2c).
         """
         self._dropped_window_events += int(dropped_window_events or 0)
+
+    def note_unattributed_destroys_total(self, cumulative: int) -> None:
+        """Absorb the cumulative no-show-DESTROY total as coverage detail.
+
+        Same absorption point as :meth:`note_hook_loss`, but takes the
+        CUMULATIVE driver-side total (the source refreshes it on every
+        absorbed read without consuming it): repeated recording() calls
+        must not re-accumulate the same destroys into the coverage detail.
+        The detail lets consumers tell desktop-wide noise from real target
+        loss while droppedEvents keeps its total-loss semantics (0002).
+        Without this transfer the coverage field would exist at every layer
+        yet stay zero forever.
+        """
+        total = max(0, int(cumulative or 0))
+        consumed = getattr(self, "_unattributed_destroys_consumed", 0)
+        self.unattributed_destroy_events += max(0, total - consumed)
+        self._unattributed_destroys_consumed = total
 
     def refresh_timeline_coverage(self, *, dropped_packets: int = 0) -> dict:
         """Finalize the coverage block with the losses actually observed.
@@ -1411,6 +1490,7 @@ class WindowsUIACorrelator:
         # continuity it cannot prove (review 0457: capability by backend).
         coverage["destroyEvents"] = self.destroy_events_capability
         coverage["droppedEvents"] = int(self._dropped_window_events) + int(dropped_packets)
+        coverage["unattributedDestroys"] = int(self.unattributed_destroy_events)
         return dict(coverage)
 
     def _register_window(
@@ -1423,6 +1503,7 @@ class WindowsUIACorrelator:
         origin: str,
         opened_by: str | None = None,
         appeared_ms: int | None = None,
+        owner_handle: int | None = None,
     ) -> None:
         """Record a window of the application, keyed by handle when there is one."""
         key = handle if handle is not None else ("title", process_name, title)
@@ -1467,6 +1548,17 @@ class WindowsUIACorrelator:
         # the registry a tree rather than a flat list. Always present, so a
         # cause learned later has somewhere to go.
         entry["openedBy"] = opened_by
+        # Design 11 D2: the native owner edge, resolved to an instance ONLY
+        # through the authoritative handle index. Recorded as a DECLARED
+        # relation between two instances — never a merge: each window keeps
+        # its own identity, and replay narrows candidates through this edge.
+        # A owner handle with no known instance stays raw (ownerHandle only):
+        # unknown ownership must not fabricate an instance link.
+        if owner_handle is not None:
+            entry["ownerHandle"] = int(owner_handle)
+            owner_instance = self._instance_by_handle.get(owner_handle)
+            if owner_instance is not None:
+                entry["ownerInstanceId"] = owner_instance
         # S1: the manifest entry names the same recorded instance the
         # timeline just observed, so downstream consumers (snapshot
         # provenance, compiler correlation) bind by instance, not handle.
@@ -1527,6 +1619,76 @@ class WindowsUIACorrelator:
     def set_recorder_ui_rect(self, rect: tuple[int, int, int, int] | None) -> None:
         """Tell the correlator where its own always-on-top UI sits on screen."""
         self._recorder_ui_rect = tuple(int(v) for v in rect) if rect else None
+
+    def mark_recorder_control(self) -> None:
+        """Stamp that a recorder-panel button callback just fired.
+
+        Panel buttons reach the session callbacks a beat before the hook
+        delivers their down/up packets; clicks inside the mark window are
+        the recorder operating itself, not the panel swallowing input the
+        user aimed at the target.
+        """
+        now = self._monotonic_ms()
+        self._recorder_control_marks.append(now)
+        # ttk.Button fires its command on RELEASE, so the click's down/up
+        # packets reach the hook BEFORE the callback (and thus before this
+        # mark) — forward-looking classification alone miscounts the stop
+        # click as recorder_ui in every capture (live REC-c0b84719: the
+        # stop click at [1373,668] counted 2 despite the mark firing).
+        # Reclassify: packets counted recorder_ui within the window retro-
+        # actively move to recorder_control, and their rejection entries
+        # are relabeled. Bounded like the marks themselves.
+        for entry in self.rejections:
+            if entry.get("reason") != "recorder_ui" \
+                    or entry.get("retro") is True:
+                continue
+            point = entry.get("point")
+            if point is None:
+                continue
+            # No per-packet timestamp is kept on rejections; the window is
+            # short (2s) and the panel sits outside the target scope, so
+            # any recorder_ui rejection within the last window that this
+            # mark covers belongs to the button click. The marks list is
+            # tiny; use the newest prior mark as the window start.
+            prior = [m for m in self._recorder_control_marks
+                     if m < now][-4:]
+            window_start = min(prior) if prior else now - 2000
+            entry["reason"] = "recorder_control"
+            entry["retro"] = True
+            self.recorder_control_events += 1
+            if self.recorder_ui_events > 0:
+                self.recorder_ui_events -= 1
+        if len(self._recorder_control_marks) > 32:
+            del self._recorder_control_marks[:-16]
+
+    def _monotonic_ms(self) -> int:
+        return int(time.monotonic() * 1000)
+
+    def _is_recorder_control_click(self, packet: HookPacket) -> bool:
+        """Was this packet part of a recorder-button click?
+
+        The mark fires on the callback thread before Tk finishes dispatching
+        the button's press; the low-level hook may deliver down up to a
+        double-click interval earlier (button down, then callback) or the
+        whole click slightly after.  A two-second window around each mark
+        covers both orders without spanning unrelated clicks: a user aiming
+        at the target does not click the panel twice in two seconds.
+        """
+        return self.in_recorder_control_window()
+
+    def in_recorder_control_window(self) -> bool:
+        """Is the current moment inside a recent recorder-button mark window?
+
+        Shared by the correlator's own classification and the capture
+        source's pause branch (whose drops never reach the correlator).
+        """
+        if not self._recorder_control_marks:
+            return False
+        now = self._monotonic_ms()
+        return any(
+            -2000 <= now - mark <= 2000
+            for mark in self._recorder_control_marks[-4:]
+        )
 
     def _lands_on_recorder_ui(self, packet: HookPacket) -> bool:
         rect = self._recorder_ui_rect
@@ -1812,6 +1974,11 @@ class WindowsUIACorrelator:
                 origin="opened",
                 opened_by=self._last_action_causal_id,
                 appeared_ms=packet.monotonic_ms,
+                owner_handle=(
+                    packet.native.get("ownerHandle")
+                    if isinstance(packet.native.get("ownerHandle"), int)
+                    and not isinstance(packet.native.get("ownerHandle"), bool)
+                    else None),
             )
         else:
             self._close_window(
@@ -1875,6 +2042,32 @@ class WindowsUIACorrelator:
     def _window_root(event: RawCaptureEvent) -> str | None:
         return window_root_identity(event.observed_target)
 
+    def _known_roots_by_handle(self) -> dict[int, str]:
+        """Snapshot-recorded window roots, keyed by handle (best effort)."""
+        snapshots = getattr(self._inventory, "snapshots", None)
+        if not callable(snapshots):
+            return {}
+        try:
+            records = snapshots()
+        except Exception:
+            return {}
+        roots: dict[int, str] = {}
+        for snapshot in records or ():
+            window = snapshot.get("window") if isinstance(snapshot, Mapping) else None
+            if not isinstance(window, Mapping):
+                continue
+            handle = window.get("handle")
+            root = window.get("rootAutomationId")
+            if isinstance(handle, int) and not isinstance(handle, bool) \
+                    and isinstance(root, str) and root:
+                roots.setdefault(handle, root)
+        return roots
+
+    def _snapshot_root_for_handle(self, handle: object) -> str | None:
+        if not isinstance(handle, int) or isinstance(handle, bool):
+            return None
+        return self._known_roots_by_handle().get(handle)
+
     def _with_window(self, event: RawCaptureEvent, window: Mapping[str, object]) -> RawCaptureEvent:
         """Stamp the event with the window it happened in."""
         # Pointer actions may already carry the authoritative mouse-down
@@ -1897,7 +2090,20 @@ class WindowsUIACorrelator:
         handle = window.get("handle")
         if isinstance(handle, int):
             stamp["handle"] = handle
-        root = self._window_root(event)
+        # The window stamp's root must name THE WINDOW THE INPUT LANDED IN
+        # (the handle-resolved window), not the hit-test control chain.
+        # window_root_identity(event.observed_target) reads the control
+        # under the pointer, and during a window switch UIA can resolve a
+        # chain from a window that does not exist yet (live REC-ccd6612:
+        # Trusted List was created 16ms AFTER the click, yet its control
+        # chain answered the hit test) — mixing that root with this
+        # handle/title stamps a window combination that never existed and
+        # misbinds the compiled selector's window identity. The snapshot
+        # root for the SAME handle is same-source window evidence: when
+        # known it wins; when unknown the root is omitted and the compiler
+        # restores it from the instance's own snapshots (same-source by
+        # construction).
+        root = self._snapshot_root_for_handle(handle)
         if root:
             stamp["rootAutomationId"] = root
         # S1: the business event names its recorded instance, so downstream
@@ -2013,13 +2219,20 @@ class WindowsUIACorrelator:
         _pb = self._pending_press is not None
         _rej0 = len(self.rejections)
         _rec = self._lands_on_recorder_ui(packet)
-        try:
-            _wf = None if packet.kind in ("window_transition",) else self._window_for(packet)
-            _wfd = (f"win={_wf.get('processName')}/{_wf.get('pid')}/"
-                    f"h={_wf.get('handle')}/t={str(_wf.get('windowTitle'))[:24]}"
-                    if isinstance(_wf, dict) else f"win={_wf!r}"[:60])
-        except Exception as _we:
-            _wfd = f"winErr:{_we}"
+        # 热路径归属查询**一次**:_window_for 是真实 OS 窗口查询
+        # (window_at/foreground),trace 诊断与 inner 归属共享同一次
+        # 结果 —— 诊断不再额外付出第二次查询(重复查询曾使每个按键
+        # 的关联成本翻倍)。
+        _wf = None
+        if packet.kind != "window_transition":
+            try:
+                _wf = self._window_for(packet)
+            except Exception:
+                _wf = None
+        _wfd = (f"win={_wf.get('processName')}/{_wf.get('pid')}/"
+                f"h={_wf.get('handle')}/t={str(_wf.get('windowTitle'))[:24]}"
+                if isinstance(_wf, dict) else f"win={_wf!r}"[:60])
+        self._current_window_for = _wf
         _r = self._correlate_inner(packet, scope, sequence)
         try:
             _trace = getattr(self, "packet_trace", None)
@@ -2047,8 +2260,17 @@ class WindowsUIACorrelator:
             # the target application never saw it.  Recording it against the
             # target would put a step in the trace that never happened there —
             # a live HiSec capture did exactly that before this check existed.
-            self.recorder_ui_events += 1
-            self._note_rejection("recorder_ui", packet, None)
+            # A button callback fired just before these packets: the user
+            # pressed Pause/Stop, so this is the recorder operating itself,
+            # not the panel swallowing input aimed at the target (C08 — the
+            # stop click is part of every recording; counting it as occlusion
+            # flagged every honest capture with a false advisory).
+            if self._is_recorder_control_click(packet):
+                self.recorder_control_events += 1
+                self._note_rejection("recorder_control", packet, None)
+            else:
+                self.recorder_ui_events += 1
+                self._note_rejection("recorder_ui", packet, None)
             return None
         # Resolve the owning window once: this is a live window-server query
         # and doing it twice per packet doubled the correlation cost that the
@@ -2061,10 +2283,14 @@ class WindowsUIACorrelator:
         # title or content on mouse-down, before mouse-up reaches the queue;
         # classifying the release against that new state can drop an otherwise
         # valid click as out of scope.
+        # 归属复用 correlate 顶层的一次查询结果(_current_window_for)——
+        # 不再第二次打 OS 窗口查询。
         foreground = (
             press_window if isinstance(press_window, Mapping)
-            else self._window_for(packet)
+            else getattr(self, "_current_window_for", None)
         )
+        if not isinstance(foreground, Mapping):
+            foreground = self._window_for(packet)
         result = self._correlate(packet, scope, sequence, foreground)
         produced = (
             result if isinstance(result, tuple)
@@ -2111,6 +2337,106 @@ class WindowsUIACorrelator:
             except Exception:
                 return None
         return self._resolver.element_at(*point)
+
+    def _stamped_window_gone(self, stamped: Mapping[str, object]) -> bool:
+        """Is the hook-time stamped window no longer live?
+
+        The closing-window race signature: the HWND was under the point at
+        hook time but destroyed itself before the processing-time hit test
+        (the desktop then answers UIA from_point). A LIVE stamped window
+        with a foreign-owned element under the point is a genuine
+        cross-application click and keeps the rejection path.
+        """
+        handle = stamped.get("handle")
+        if not isinstance(handle, int) or isinstance(handle, bool):
+            return False
+        declared = None
+        for window in self.window_registry:
+            if window.get("handle") == handle:
+                declared = window
+                break
+        if declared is not None and declared.get("closed"):
+            return True
+        probe = getattr(self._resolver, "native_window_is_alive", None)
+        if callable(probe):
+            try:
+                # Unknown is not evidence of destruction.
+                return probe(handle, stamped.get("pid")) is False
+            except Exception:
+                return False
+        if declared is not None:
+            return False
+        # Never declared (no SHOW processed): the only hook-side fact is
+        # that this exact HWND answered WindowFromPoint. A live-window
+        # check via the resolver decides: unresolvable now = gone.
+        from_native = getattr(self._resolver, "window_from_native", None)
+        if callable(from_native):
+            try:
+                return from_native(stamped) is None
+            except Exception:
+                return True
+        return True
+
+    def _stamp_window_in_scope(self, stamped: Mapping[str, object],
+                               scope: CaptureScope) -> bool:
+        """Was the hook-time stamped window part of the recording's scope?
+
+        The closing-window race veto trusts this stamp only when the window
+        it names was itself in scope (process family + title regex): the
+        hook pinned the true receiving HWND before the window destroyed
+        itself. A stamp naming a foreign window is a genuine cross-app
+        click and keeps the old rejection path.
+        """
+        process_name = stamped.get("processName")
+        pid = stamped.get("pid")
+        stamped_handle = stamped.get("handle")
+        if not isinstance(process_name, str) or not process_name:
+            # A handle the correlator already indexed is in-scope by
+            # construction (instances are only declared for scope windows).
+            if isinstance(stamped_handle, int) \
+                    and not isinstance(stamped_handle, bool) \
+                    and stamped_handle in self._instance_by_handle:
+                process_name = scope.process_name
+        if not isinstance(process_name, str) or not process_name:
+            # The hook stamps handle/pid/title only. Process membership is
+            # judged through the resolver's own seams first (pid→root path
+            # works on the target; psutil only as the local fallback).
+            belongs = getattr(self._resolver,
+                              "process_pid_belongs_to_root", None)
+            if callable(belongs) and isinstance(pid, int) \
+                    and not isinstance(pid, bool) and pid > 0 \
+                    and self._scope_root:
+                try:
+                    if bool(belongs(pid, self._scope_root)):
+                        process_name = scope.process_name
+                except Exception:
+                    process_name = None
+            if not isinstance(process_name, str) or not process_name:
+                if isinstance(pid, int) and not isinstance(pid, bool) \
+                        and pid > 0:
+                    try:
+                        import psutil
+                        process_name = psutil.Process(pid).name()
+                    except Exception:
+                        return False
+                else:
+                    return False
+        # Scope membership, race-aware: a RETIRED instance (destroyed
+        # window) was admitted while it lived — its recorded RI certifies
+        # that. The live-admission mirror (_in_scope) covers still-alive
+        # windows; the registry covers the ones the race killed (the
+        # handle index is retired on destroy, the registry is history).
+        handle = stamped.get("handle")
+        if isinstance(handle, int) and not isinstance(handle, bool):
+            for window in self.window_registry:
+                if window.get("handle") == handle:
+                    return True
+        return self._in_scope({
+            "processName": process_name,
+            "windowTitle": str(stamped.get("windowTitle") or ""),
+            "handle": handle,
+            "pid": pid,
+        }, scope)
 
     @staticmethod
     def _identifiable(target_data: Mapping[str, object] | None) -> bool:
@@ -2167,6 +2493,7 @@ class WindowsUIACorrelator:
         window: Mapping[str, object] | None,
         *,
         scope: CaptureScope | None = None,
+        owner_pid: object = None,
     ) -> None:
         # Input aimed at a *different* application is expected and enormous in
         # volume — ordinary typing elsewhere fills any buffer instantly and
@@ -2208,6 +2535,13 @@ class WindowsUIACorrelator:
             entry["resolvedProcess"] = window.get("processName")
             entry["resolvedTitle"] = window.get("windowTitle")
             entry["resolvedHandle"] = window.get("handle")
+        if owner_pid is not None:
+            # The hit-test element's own owner, when known: the discriminator
+            # between a sibling-process overlay and a UIA transient. Without
+            # it a rejected click is unexplainable after the fact
+            # (live REC-996dda21: two logo1-area clicks rejected, owner
+            # forever unknown).
+            entry["ownerPid"] = owner_pid
         self.rejections.append(entry)
 
     def _window_for(self, packet: HookPacket) -> Mapping[str, object]:
@@ -2263,18 +2597,82 @@ class WindowsUIACorrelator:
         if foreground is None:
             foreground = self._window_for(packet)
         if not self._in_scope(foreground, scope):
-            # Out-of-scope input is expected (the user may alt-tab), but it
-            # must be countable so a short recording is never mistaken for a
-            # complete one.
-            self.out_of_scope_events += 1
-            self._note_rejection("out_of_scope", packet, foreground, scope=scope)
-            return None
+            # Late-processed click packets race a window's own destruction:
+            # the click was queued (hook-time stamp names the dialog) before
+            # the dialog closed, but the correlator runs after the destroy
+            # retired the handle. The registry proves the handle WAS an
+            # admitted scope window and the native stamp proves the packet
+            # predates the close — admit it into the closing-window veto
+            # path (observed=None → structured compile gap), never a silent
+            # drop. A post-close hit-test that merely RESOLVES to the dead
+            # window without the hook-time stamp keeps the rejection
+            # (handle-eviction contract).
+            stamped = (packet.native or {}).get("window")
+            stamp_handle = (stamped or {}).get("handle")
+            fg_handle = foreground.get("handle")
+            declared_closed = False
+            if isinstance(fg_handle, int) and not isinstance(fg_handle, bool):
+                for window in self.window_registry:
+                    if window.get("handle") == fg_handle:
+                        declared_closed = bool(window.get("closed"))
+                        break
+            if not (declared_closed and isinstance(stamp_handle, int)
+                    and stamp_handle == fg_handle):
+                # Out-of-scope input is expected (the user may alt-tab), but
+                # it must be countable so a short recording is never
+                # mistaken for a complete one.
+                self.out_of_scope_events += 1
+                self._note_rejection("out_of_scope", packet, foreground, scope=scope)
+                return None
 
         target_data = None
         if packet.screen_point is not None:
             # Hit test inside the admitted window's application, not against
             # whatever is on top of the screen.
             target_data = self._element_at(packet.screen_point, foreground)
+            # A closing window destroys itself between the hook-time
+            # WindowFromPoint and this processing-time UIA hit test: the
+            # point then resolves the desktop BEHIND it (Explorer-owned),
+            # and the click that closed the window is dropped as foreign —
+            # live REC-e619605f lost the Log Center close-button step that
+            # way (native stamp says Log Center; post-close hit test says
+            # desktop pid 3456). When the hook-time stamp names the SAME
+            # in-scope window the processing-time foreground resolved, the
+            # element hit test must not override the stamp: admit the
+            # click with the stamp's window identity and record the
+            # observation honestly (no element tree → compile-time gap),
+            # instead of silently dropping a real flow fact.
+            stamped = (packet.native or {}).get("window")
+            stamp_vetoed = False
+            # The race-veto window identity prefers the PENDING PRESS's
+            # recorded window (the mouse-DOWN moment — the last unambiguous
+            # source-window fact) over the up packet's own stamp: by the
+            # time the up is processed the window may already be destroyed
+            # and the hook's WindowFromPoint answers the desktop instead.
+            veto_stamp = stamped
+            press = self._pending_press
+            if packet.kind == "pointer_up" or (not isinstance(veto_stamp, Mapping)
+                    or not isinstance(veto_stamp.get("handle"), int)):
+                press_window = (press or {}).get("window") \
+                    if isinstance(press, Mapping) else None
+                if isinstance(press_window, Mapping) \
+                        and isinstance(press_window.get("handle"), int):
+                    veto_stamp = press_window
+            if (target_data is not None
+                    and not self._target_owned_by_scope(
+                        target_data, foreground, scope)
+                    and isinstance(veto_stamp, Mapping)
+                    and isinstance(veto_stamp.get("handle"), int)
+                    and self._stamp_window_in_scope(veto_stamp, scope)
+                    and self._stamped_window_gone(veto_stamp)):
+                # The stamped window was under the point at hook time and
+                # is GONE now: the hit-test answered for whatever replaced
+                # it (the desktop behind a closed dialog). The click
+                # belongs to the dead window's flow — record it with
+                # observed=None (compiler turns the missing identity into
+                # a structured gap) instead of dropping it.
+                target_data = None
+                stamp_vetoed = True
         elif packet.kind == "key_command":
             focused = getattr(self._resolver, "focused", None)
             target_data = focused() if callable(focused) else None
@@ -2285,8 +2683,11 @@ class WindowsUIACorrelator:
             # coordinates. When those disagree the recorder reads another
             # application's content — a live capture pulled a browser's web
             # area in this way. The recording must never carry it.
+            # (A closing-window race is handled above: the hook-time stamp
+            # vetoing the post-close hit test clears target_data first.)
             self.out_of_scope_events += 1
-            self._note_rejection("target_outside_scope", packet, foreground, scope=scope)
+            self._note_rejection("target_outside_scope", packet, foreground, scope=scope,
+                                 owner_pid=target_data.get("ownerPid"))
             return None
         observed = self._observed(target_data)
         if packet.kind == "pointer_up" and self._pending_press is not None:
@@ -2440,7 +2841,7 @@ class WindowsUIACorrelator:
                 event_type = "selection_change"
                 event_input = {"value": target_data.get("text"), "selected": bool(target_data["selected"])}
             else:
-                if not self._identifiable(target_data):
+                if not stamp_vetoed and not self._identifiable(target_data):
                     # The pointer landed on nothing the target application can
                     # name — no automation id, no identifier, no text. Such a
                     # step cannot be replayed as a click on anything: replay
@@ -2448,6 +2849,11 @@ class WindowsUIACorrelator:
                     # there. It also makes selector synthesis ambiguous, which
                     # marks the whole recording incomplete. The user did not
                     # press a control, so this is not a step.
+                    # (A stamp-vetoed packet is different: the click DID land
+                    # in a scoped window at hook time; its tree died with the
+                    # window. Dropping it would erase a real flow fact — the
+                    # click is recorded with observed=None and the compiler
+                    # turns the missing identity into a structured gap.)
                     self.unidentified_target_events += 1
                     self._note_rejection(
                         "target_not_identifiable", packet, foreground, scope=scope,
@@ -2519,6 +2925,7 @@ class WindowsWinEventDriver:
     EVENT_OBJECT_HIDE = 0x8003
     OBJID_WINDOW = 0
     GA_ROOT = 2
+    GA_ROOTOWNER = 3
     WINEVENT_OUTOFCONTEXT = 0x0000
     WINEVENT_SKIPOWNPROCESS = 0x0002
     WM_QUIT = 0x0012
@@ -2539,6 +2946,11 @@ class WindowsWinEventDriver:
         # final coverage block declares the loss instead of claiming
         # continuity; drained by the session via the capture source.
         self.dropped_window_events = 0
+        # 无 SHOW 期记录的 DESTROY(环境噪音判读明细,0002 口径):
+        # 同时计入 dropped_window_events(总流失,0517 原语义)并在本
+        # 明细计数,经 source 吸收读流向最终 coverage,供消费者区分
+        # 环境噪音与目标流失。
+        self.unattributed_destroy_events = 0
 
     @staticmethod
     def _matches(actual: object, expected: str) -> bool:
@@ -2614,7 +3026,13 @@ class WindowsWinEventDriver:
                     # never from re-querying the dead HWND.
                     remembered = self._titles.pop(handle, None)
                     if remembered is None:
+                        # 无 SHOW 期记录的 DESTROY(0517 契约):计入丢包
+                        # 总数(保持 dropped_window_events 原语义),
+                        # unattributed_destroy_events 是其明细(0002 口径),
+                        # 经 source 吸收读流向最终 coverage,供区分环境
+                        # 噪音与目标流失。
                         self.dropped_window_events += 1
+                        self.unattributed_destroy_events += 1
                         return
                     title, name, resolved_pid = remembered
                     self._emit(HookPacket(
@@ -2633,6 +3051,15 @@ class WindowsWinEventDriver:
                     return
                 if user32.GetAncestor(hwnd, self.GA_ROOT) != hwnd:
                     return
+                # Design 11 D2: the OWNER edge is recorded window evidence,
+                # not a merge key. A top-level menu/submenu carries its own
+                # HWND and title (EDRClient submenus inherit the owner's
+                # title), so same-titled coexisting windows are only
+                # distinguishable by this native relation — captured at the
+                # hook where it is authoritative, carried through the packet,
+                # and resolved to an owner INSTANCE only against the live
+                # instance index (never by title).
+                owner_hwnd = user32.GetAncestor(hwnd, self.GA_ROOTOWNER)
                 if event == self.EVENT_OBJECT_SHOW:
                     pid = wintypes.DWORD()
                     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
@@ -2653,18 +3080,21 @@ class WindowsWinEventDriver:
                     title, name, resolved_pid = remembered
                     kind = "closed"
                     native_kind = "hidden"
+                native = {
+                    "kind": kind,
+                    "nativeKind": native_kind,
+                    "processName": name,
+                    "title": title,
+                    "pid": resolved_pid,
+                    "handle": handle,
+                }
+                if owner_hwnd and owner_hwnd != hwnd:
+                    native["ownerHandle"] = int(owner_hwnd)
                 self._emit(HookPacket(
                     kind="window_transition",
                     monotonic_ms=int(time.monotonic() * 1000),
                     wall_time=_utc_now(),
-                    native={
-                        "kind": kind,
-                        "nativeKind": native_kind,
-                        "processName": name,
-                        "title": title,
-                        "pid": resolved_pid,
-                        "handle": handle,
-                    },
+                    native=native,
                 ))
 
             self._callback = proc(callback)

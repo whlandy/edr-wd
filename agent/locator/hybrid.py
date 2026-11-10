@@ -67,6 +67,27 @@ def _confidence(item: Mapping) -> float:
 
 class HybridLocator:
     def collect_candidates(self, request: LocatorRequest, bundle: Mapping) -> tuple[LocatorCandidate, ...]:
+        if "structural" in request.control:
+            from .menu_layout import matches_ancestry, resolve_index, valid_contract
+            contract = request.control["structural"]
+            if (request.control.get("controlType") != "MenuItem" or
+                    request.control.get("automationId") or
+                    request.control.get("identifier") or
+                    not request.control.get("ancestry") or
+                    not valid_contract(contract)):
+                raise LocatorError("locator_evidence_invalid")
+            if request.action_id not in {"gui.click", "gui.click_target"}:
+                return ()
+            # Resolve real controls in the CURRENT bound-window observation.
+            # No old target ID, absolute coordinate, or name-only fallback.
+            semantic = {k: v for k, v in request.control.items()
+                        if k not in {"structural", "name", "fingerprint"}}
+            peers = tuple(c for c in self.collect_candidates(
+                LocatorRequest(request.action_id, request.window, semantic), bundle)
+                if matches_ancestry(c.source.get("ancestry"),
+                                    request.control["ancestry"]))
+            index = resolve_index(contract, [c.rect for c in peers])
+            return () if index is None else (peers[index],)
         # A visual-only selector must not turn the sole unrelated control in
         # the tree into a semantic hit when its template is absent or weak.
         ancestry = request.control.get("ancestry")
@@ -205,8 +226,11 @@ class HybridLocator:
                 for kind, evidence in aligned[chosen.target_id]
             ):
                 raise LocatorError("locator_evidence_conflict", 1)
-            return LocatorResolution(chosen, "semantic", None, observation_id,
-                                     ("semantic",) + (("visual",) if valid_visual else ()))
+            structural = "structural" in request.control
+            return LocatorResolution(chosen, "menu_structural" if structural else "semantic",
+                                     None, observation_id,
+                                     (("structure", "geometry") if structural else ("semantic",))
+                                     + (("visual",) if valid_visual else ()))
         if len(candidates) > 1:
             scored = []
             for item in candidates:

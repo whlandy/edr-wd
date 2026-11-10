@@ -84,10 +84,11 @@ class RecordingModelError(ValueError):
         self.path = path
 
 
-def _strict(data: Mapping[str, Any], allowed: set[str], path: str) -> dict[str, Any]:
+def _strict(data: Mapping[str, Any], allowed: set[str], path: str,
+            optional: set[str] | None = None) -> dict[str, Any]:
     if not isinstance(data, Mapping):
         raise RecordingModelError("type_error", f"{path} must be an object", path=path)
-    unknown = sorted(set(data) - allowed)
+    unknown = sorted(set(data) - allowed - (optional or set()))
     if unknown:
         raise RecordingModelError(
             "unknown_field", f"{path} has unknown fields: {unknown}", path=path
@@ -142,6 +143,11 @@ def _validate_evidence(value: Mapping[str, Any]) -> None:
         {
             "foregroundPid", "doubleClickIntervalMs", "beforeCapture",
             "capture", "captureError", "window", "handle",
+            # Structural no-after-frame marker: the step closed its own
+            # locked window, so an after-frame cannot exist. The close is
+            # separately proven by window_transition facts (design 12 T3
+            # close-race round; never fabricated, never a captureError).
+            "afterFrame",
             # S1 (design 09 §4): the recorded-window instance and the timeline
             # event that observed this transition. Recording-session-scoped
             # references, like evidence.window.handle — diagnostic joins, not
@@ -150,6 +156,21 @@ def _validate_evidence(value: Mapping[str, Any]) -> None:
         },
         "event.evidence",
     )
+    after_frame = data.get("afterFrame")
+    if after_frame is not None:
+        af = _strict(after_frame, {"state", "reason"}, "event.evidence.afterFrame")
+        if af.get("state") != "window_destroyed_by_action":
+            raise RecordingModelError(
+                "type_error",
+                "evidence.afterFrame.state must be window_destroyed_by_action",
+                path="event.evidence.afterFrame.state",
+            )
+        reason = af.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            raise RecordingModelError(
+                "type_error", "evidence.afterFrame.reason must be a string",
+                path="event.evidence.afterFrame.reason",
+            )
     for ref_key in ("windowInstanceId", "windowTimelineEventId"):
         ref = data.get(ref_key)
         if ref is not None and (not isinstance(ref, str) or not ref):
@@ -706,7 +727,8 @@ def _validate_window_timeline(timeline: Mapping[str, Any],
     # model and the JSON schema must agree on fields, enums and types, so a
     # document one accepts and the other rejects cannot exist.
     cov = _strict(coverage, {"destroyEvents", "droppedEvents"},
-                  "recording.windowTimeline.coverage")
+                  "recording.windowTimeline.coverage",
+                  optional={"unattributedDestroys"})
     destroy = cov.get("destroyEvents")
     if destroy not in {"supported", "unsupported", "unknown"}:
         raise RecordingModelError(
@@ -722,6 +744,16 @@ def _validate_window_timeline(timeline: Mapping[str, Any],
             "coverage.droppedEvents must be a non-negative integer",
             path="recording.windowTimeline.coverage.droppedEvents",
         )
+    # 0002 口径:无归属 DESTROY 明细(环境噪音 vs 目标流失的判读依据)。
+    # 可选字段 —— 旧文档没有它仍然合法;出现时必须为非负整数。
+    if "unattributedDestroys" in cov:
+        ua = cov["unattributedDestroys"]
+        if not isinstance(ua, int) or isinstance(ua, bool) or ua < 0:
+            raise RecordingModelError(
+                "type_error",
+                "coverage.unattributedDestroys must be a non-negative integer",
+                path="recording.windowTimeline.coverage.unattributedDestroys",
+            )
 
 
 @dataclass(frozen=True)
@@ -734,7 +766,10 @@ class RawRecording:
         "correlationErrorCount": 0,
         "outOfScopeEvents": 0,
         "recorderUiEvents": 0,
+        "recorderControlEvents": 0,
         "unidentifiedTargetEvents": 0,
+        "inventorySkipped": 0,
+        "inventoryRetried": 0,
     })
     # The application's windows as this capture saw them, in first-appearance
     # order, each carrying the action that opened it. `openedBy` is the causal
@@ -779,13 +814,23 @@ class RawRecording:
             self.capture_diagnostics,
             {
                 "droppedPackets", "correlationErrorCount", "outOfScopeEvents",
-                "recorderUiEvents", "unidentifiedTargetEvents",
+                "recorderUiEvents", "recorderControlEvents",
+                "unidentifiedTargetEvents", "inventorySkipped",
+                "inventoryRetried",
             },
             "recording.captureDiagnostics",
         )
         # outOfScopeEvents and recorderUiEvents post-date the first
         # recordings; a document written without them is still valid and
-        # reads as zero.
+        # reads as zero.  recorderControlEvents refines recorderUiEvents
+        # (C08): the same field keeps meaning "input that landed on the
+        # recorder panel", and documents that predate the control/occlusion
+        # split read as zero control events — the compiler then treats the
+        # whole count as occlusion, preserving the old semantics.
+        # inventorySkipped/inventoryRetried likewise post-date the first
+        # recordings and read as zero when absent; when present they count
+        # the control-inventory's structured skips and bounded re-reads
+        # (design 11 §5.1, C05→落盘).
         missing_diagnostics = {
             "droppedPackets", "correlationErrorCount",
         } - set(diagnostics)
@@ -809,11 +854,23 @@ class RawRecording:
             }
             if self.schema == RAW_RECORDING_SCHEMA_V2:
                 allowed_window_fields.add("instanceId")
+                # Design 11 D2: the native owner edge resolved to its
+                # recorded instance (ownerHandle alone stays unvalidated —
+                # it is raw diagnostic evidence, not an instance relation).
+                allowed_window_fields.add("ownerInstanceId")
             fields = _strict(
                 window,
                 allowed_window_fields,
                 path,
             )
+            if (self.schema == RAW_RECORDING_SCHEMA_V2
+                    and isinstance(fields.get("ownerInstanceId"), str)
+                    and fields["ownerInstanceId"] == fields.get("instanceId")):
+                raise RecordingModelError(
+                    "window_manifest_invalid",
+                    f"{path}.ownerInstanceId must not reference itself",
+                    path=f"{path}.ownerInstanceId",
+                )
             for key in ("title", "processName", "origin"):
                 if key in fields and not isinstance(fields[key], str):
                     raise RecordingModelError(
