@@ -1,4 +1,4 @@
-"""Cross-platform command line entry point for EDR-WD agent operations."""
+"""Cross-platform command line entry point for edr-gui-automation (edr-ga)."""
 
 from __future__ import annotations
 
@@ -654,8 +654,8 @@ def _cmd_page_next(args: argparse.Namespace, agent, parser, target: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="edr-wd",
-        description="Configure, operate, and test EDR-WD targets.",
+        prog="edr-ga",
+        description="Configure, operate, and test edr-gui-automation (edr-ga) targets.",
     )
     parser.add_argument("--config", help="Target config path (defaults to EDR_WD_CONFIG or config/targets.local.json)")
     parser.add_argument("--target", help="Target name (defaults to default_target)")

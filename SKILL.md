@@ -1,11 +1,23 @@
 ---
-name: edr-wd
-description: Configure, operate, develop, and test EDR-WD, a cross-platform MCP GUI automation system for Windows/macOS HiSecEndpoint and EDR targets. Use for target config editing and validation, SSH/deployment/lifecycle work, MCP and GUI actions, semantic window/control automation, atomic test execution, screenshots, traces, reports, recovery, planner workflows, evaluation, and live E2E debugging.
+name: edr-ga
+description: Configure, operate, develop, and test edr-gui-automation (edr-ga, formerly EDR-WD), a cross-platform MCP GUI automation system for Windows/macOS HiSecEndpoint and EDR targets. Use for target config editing and validation, SSH/deployment/lifecycle work, MCP and GUI actions, semantic window/control automation, atomic test execution, screenshots, traces, reports, recovery, planner workflows, evaluation, and live E2E debugging.
 ---
 
-# EDR-WD
+# edr-gui-automation (edr-ga)
 
-EDR-WD separates orchestration from target-local GUI automation:
+**简称：`edr-ga`。** 使用 `$edr-ga` 调用本 Skill；完整产品名为
+`edr-gui-automation`，原名为 EDR-WD。命令行首选 `edr-ga`，也支持
+`edr-gui-automation`；下文的旧 `edr-wd` 命令是兼容入口，参数与行为相同。
+Git 仓库及目录仍叫 `edr-wd`；`EDR_WD_*` 环境变量、配置路径和轨迹 schema
+保持兼容，不因产品改名而替换。
+
+```bash
+edr-ga --help
+edr-ga config --guide
+edr-ga --target TARGET status
+```
+
+edr-gui-automation separates orchestration from target-local GUI automation:
 
 - `agent/`: config, lifecycle, MCP sessions, execution, recovery, traces,
   reports, planner, and evaluation.

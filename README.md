@@ -1,9 +1,20 @@
-# EDR-WD
+# edr-gui-automation (edr-ga)
+
+**简称：`edr-ga`；原名：EDR-WD。** Skill 使用 `$edr-ga`，命令行使用
+`edr-ga` 或 `edr-gui-automation`。Git 仓库仍为
+[`edr-wd`](https://github.com/whlandy/edr-wd)，本地目录无需改名。
+旧 `edr-wd` 命令继续兼容；现有 `EDR_WD_*` 环境变量、配置路径及轨迹 schema 不变。
+
+```bash
+edr-ga --help
+edr-ga config --guide
+edr-ga --target <TARGET> status
+```
 
 Cross-platform EDR GUI automation, desktop recording, and golden-trace replay
 for HiSecEndpoint / EDRClient targets on Windows and macOS.
 
-EDR-WD separates the **agent machine** (orchestration, MCP sessions, execution,
+edr-gui-automation separates the **agent machine** (orchestration, MCP sessions, execution,
 traces, reports) from the **target machine** (target-local MCP server doing real
 GUI automation inside its own desktop session). Desktop recording captures
 real user actions and assertions, compiles them into a golden trace, and

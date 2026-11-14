@@ -1,5 +1,5 @@
 [project]
-name = "edr-wd"
+name = "edr-gui-automation"
 version = "0.1.0"
 description = "Cross-platform EDR GUI automation, test execution, traces, and reports"
 requires-python = ">=3.9"
@@ -39,6 +39,8 @@ markers = [
 ]
 
 [project.scripts]
+edr-ga = "agent.cli:main"
+edr-gui-automation = "agent.cli:main"
 edr-wd = "agent.cli:main"
 edr-wd-config = "agent.target_config:main"
 edr-wd-target = "target.server:main"
