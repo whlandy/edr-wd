@@ -20,13 +20,13 @@ required fields and enums while the file is edited.
 Useful commands:
 
 ```bash
-edr-wd config --init
-edr-wd config --guide
-edr-wd config --validate
-edr-wd config --list
-edr-wd config --suggest-names
-edr-wd config --rename-target <OLD_TARGET_NAME> --dry-run
-edr-wd config --rename-target <OLD_TARGET_NAME>
+edr-ga config --init
+edr-ga config --guide
+edr-ga config --validate
+edr-ga config --list
+edr-ga config --suggest-names
+edr-ga config --rename-target <OLD_TARGET_NAME> --dry-run
+edr-ga config --rename-target <OLD_TARGET_NAME>
 ```
 
 ## Minimal Target Shape
@@ -47,9 +47,9 @@ To migrate an existing local config after adding `identity`, preview and apply
 the key rename without printing credentials:
 
 ```bash
-edr-wd config --suggest-names
-edr-wd config --rename-target <OLD_TARGET_NAME> --dry-run
-edr-wd config --rename-target <OLD_TARGET_NAME>
+edr-ga config --suggest-names
+edr-ga config --rename-target <OLD_TARGET_NAME> --dry-run
+edr-ga config --rename-target <OLD_TARGET_NAME>
 ```
 
 `probe_target()` reads the live hostname and OS major version through SSH and
@@ -192,8 +192,8 @@ explicitly always overrides the default; `macos_generic` remains available
 as a non-product platform capability profile.
 
 Set `app_profile` to any installed descriptor for that platform, for example
-`windows_notepad` or `macos_calculator`; run `edr-wd products` to list choices
-and `edr-wd config --validate` to check the selection. `edr-wd --target TARGET
+`windows_notepad` or `macos_calculator`; run `edr-ga products` to list choices
+and `edr-ga config --validate` to check the selection. `edr-ga --target TARGET
 open-app` uses the selected product, while `--profile ID` overrides it for one
 call. For a new product, add an entry to the single reviewed catalog
 `target/product_specs/apps.json` and deploy that tracked file to the target before

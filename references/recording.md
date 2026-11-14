@@ -19,7 +19,7 @@ The recorder never clicks for you — it observes.
 
 ## Prerequisites
 
-- The target MCP server must be up (`edr-wd status`, `edr-wd up`).
+- The target MCP server must be up (`edr-ga status`, `edr-ga up`).
 - Recording requires a unique process/window match; two same-title windows
   fail the lock instead of guessing.
 - Recording and replay cannot run concurrently on the same target
@@ -28,15 +28,15 @@ The recorder never clicks for you — it observes.
 ## Record
 
 ```bash
-edr-wd --target TARGET record start \
+edr-ga --target TARGET record start \
   --name policy-flow \
   --process-name EDRClient.exe \
   --window-title '^EDRClient$'
-edr-wd --target TARGET record status        # also renews the lease
-edr-wd --target TARGET record pause
-edr-wd --target TARGET record resume
-edr-wd --target TARGET record assert        # opens the target-local assertion editor
-edr-wd --target TARGET record stop --output-root recordings
+edr-ga --target TARGET record status        # also renews the lease
+edr-ga --target TARGET record pause
+edr-ga --target TARGET record resume
+edr-ga --target TARGET record assert        # opens the target-local assertion editor
+edr-ga --target TARGET record stop --output-root recordings
 ```
 
 - `--lease-seconds` (default 300) is the target-local activity lease. If the
@@ -52,7 +52,7 @@ edr-wd --target TARGET record stop --output-root recordings
 ### Recorder panel (no agent in the loop)
 
 ```bash
-edr-wd --target TARGET record ui         # agent-side bridge; polls until stop + collection
+edr-ga --target TARGET record ui         # agent-side bridge; polls until stop + collection
 python3 scripts/open_recorder.py         # double-click entry on the target desktop
 ```
 
@@ -189,7 +189,7 @@ recordings/policy-flow/golden-trace.json
 Recompile offline without touching the target:
 
 ```bash
-edr-wd record compile recordings/policy-flow/recording.json \
+edr-ga record compile recordings/policy-flow/recording.json \
   --output-root recordings --profile windows_hisec
 ```
 
@@ -199,7 +199,7 @@ issue code — the advisory list is the triage starting point.
 ## Replay
 
 ```bash
-edr-wd --target TARGET replay recordings/policy-flow/golden-trace.json \
+edr-ga --target TARGET replay recordings/policy-flow/golden-trace.json \
   [--profile windows_hisec] [--replay-mode semantic_only|semantic_first|visual_only]
   [--confirm-action ACTION_ID]... [--persist-screenshots]
   [--trace-root result-report/replay-traces]
@@ -283,7 +283,7 @@ captures:
    validated statically, then through the real replay and independent
    assertions. Only a real replay pass counts as recovered.
 2. **Step plan**: if no repair verifies, every raw business operation point
-   — not only the compiled ones — maps to an executable edr-wd step with
+   — not only the compiled ones — maps to an executable edr-ga step with
    explicit gaps for unresolvable targets.
 3. **Agent re-record**: the plan executes through the controlled action
    chain with the real recorder started before the first business action;

@@ -95,7 +95,7 @@ locked, ownership-verified window. Captures returned by
 `get_recording_capture` are window-only, source-redacted PNGs addressed by an
 opaque capture ID and protected by SHA-256 verification on the agent.
 `replay_capture` returns one such frame directly for golden replay: it reuses the
-same source-redaction boundary, so `edr-wd replay --persist-screenshots` may
+same source-redaction boundary, so `edr-ga replay --persist-screenshots` may
 write it into the replay trace. The agent refuses any frame that is not marked
 `redacted` and window-scoped rather than persisting it.
 

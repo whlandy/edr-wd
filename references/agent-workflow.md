@@ -307,9 +307,9 @@ For normal interactive use, prefer the packaged CLI instead of temporary
 Python scripts:
 
 ```bash
-edr-wd --target TARGET tools
-edr-wd --target TARGET call TOOL --args '{"key":"value"}'
-edr-wd --target TARGET open-edr
+edr-ga --target TARGET tools
+edr-ga --target TARGET call TOOL --args '{"key":"value"}'
+edr-ga --target TARGET open-edr
 ```
 
 `open-edr` verifies `EDRClient.exe` together with the exact HiSec main-window
