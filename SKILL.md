@@ -9,7 +9,7 @@ description: Configure, operate, develop, and test edr-gui-automation (edr-ga, f
 `$edr-gui-automation`（Claude Code：`/edr-gui-automation`），快捷入口为
 `$edr-ga`（Claude Code：`/edr-ga`）。两者读取本文件的同一份操作规则。
 原名为 EDR-WD。命令行首选 `edr-ga`，也支持
-`edr-gui-automation`；下文的旧 `edr-wd` 命令是兼容入口，参数与行为相同。
+`edr-gui-automation`；旧的 `edr-wd` 命令仍为兼容入口，参数与行为相同。
 Git 仓库及目录仍叫 `edr-wd`；`EDR_WD_*` 环境变量、配置路径和轨迹 schema
 保持兼容，不因产品改名而替换。
 
@@ -31,7 +31,7 @@ edr-gui-automation separates orchestration from target-local GUI automation:
 
 `edr-rag` is a separate project/repository. It owns CHM manual ingestion,
 manual/procedure/action search, action-catalog knowledge, and feedback capture.
-Do not re-add `edr_rag/` to this repository. `edr-wd` consumes `edr-rag`
+Do not re-add `edr_rag/` to this repository. `edr-ga` consumes `edr-rag`
 through MCP or a narrow client boundary when an agent needs manual knowledge
 before executing GUI/PowerShell actions.
 
@@ -43,23 +43,23 @@ before executing GUI/PowerShell actions.
 
 | Task | Start with | Read |
 |---|---|---|
-| Create/edit target config | `edr-wd config --guide` | `references/target-config.md` |
-| Start, stop, repair, inspect target | `edr-wd status` | `references/agent-workflow.md` |
+| Create/edit target config | `edr-ga config --guide` | `references/target-config.md` |
+| Start, stop, repair, inspect target | `edr-ga status` | `references/agent-workflow.md` |
 | Add/debug MCP action | `target/action_catalog/`, `target/action_dispatcher/` | `references/mcp-tools.md` |
 | Automate a control | `connect -> lock -> dump_tree -> semantic action` | `references/element-click.md` |
 | Debug HiSec windows | `activate_edr(wait=True)` | `references/activate-edr.md` |
 | Execute atomic tests / inspect evidence | `agent/execution/`, `agent/trace/` | `references/testing.md` |
 | Add fixed product verification | `sops/INDEX.md` | `sops/TEMPLATE.md` |
 | Plan/evaluate action sequences | `agent/planner/`, `agent/eval/` | `references/mcp-tools.md`, `references/testing.md` |
-| Record, assert, generate golden trace, replay | `edr-wd record start` | `references/recording.md`, `references/testing.md` |
+| Record, assert, generate golden trace, replay | `edr-ga record start` | `references/recording.md`, `references/testing.md` |
 | Debug multi-window / same-titled flows (dialogs, language menus, reopen) | `compile-report.json` issue codes | `references/recording.md`, `docs/architecture/09…12` |
 | Recover a failed recording/replay (repair → step plan → agent re-record) | `agent/recording/trace_repair.py` | `docs/architecture/12-trace-self-correction-and-agent-rerecord-design.md` |
-| Compare end/client and cloud state | Browser Use cloud observation + EDR-WD client observation | `references/end-cloud-consistency.md` |
+| Compare end/client and cloud state | Browser Use cloud observation + edr-ga client observation | `references/end-cloud-consistency.md` |
 | Use CHM manuals / RAG / action knowledge | separate `edr-rag` repo | `docs/requirements/EDR-RAG-INTEGRATION.md` |
 
 ## edr-rag Boundary
 
-Keep `edr-rag` and `edr-wd` independent:
+Keep `edr-rag` and `edr-ga` independent:
 
 ```text
 edr-rag:
@@ -68,7 +68,7 @@ edr-rag:
   action catalog knowledge
   feedback capture
 
-edr-wd:
+edr-ga:
   target lifecycle
   GUI automation
   PowerShell execution
@@ -79,7 +79,7 @@ Expected agent flow:
 
 1. Query `edr-rag` to decide what procedure/action should be used.
 2. Check risk, preconditions, and confirmation policy from `edr-rag`.
-3. Execute approved GUI/PowerShell steps through `edr-wd`.
+3. Execute approved GUI/PowerShell steps through `edr-ga`.
 4. Send execution failures or corrections back to `edr-rag` feedback.
 
 Runtime integration should use separate MCP servers:
@@ -91,7 +91,7 @@ edr-rag MCP:
   get_action
   submit_feedback
 
-edr-wd MCP:
+edr-ga MCP:
   connect
   dump_tree
   click_target
@@ -115,18 +115,18 @@ Runtime config discovery order:
 ignored local file. The JSON schema is `config/targets.schema.json`.
 
 ```bash
-edr-wd config --init
-edr-wd config --guide
-edr-wd config --validate
-edr-wd config --list
-edr-wd config --suggest-names
-edr-wd config --rename-target OLD_NAME --dry-run
-edr-wd config --rename-target OLD_NAME
+edr-ga config --init
+edr-ga config --guide
+edr-ga config --validate
+edr-ga config --list
+edr-ga config --suggest-names
+edr-ga config --rename-target OLD_NAME --dry-run
+edr-ga config --rename-target OLD_NAME
 ```
 
 Target keys use `<IP3>.<IP4>-<hostname>-<os-major>`, for example
 `2.26-edr-win26-win11`. Supported platforms are `windows` and `macos`.
-Run `edr-wd products` for installed profiles; `app_profile` selects one.
+Run `edr-ga products` for installed profiles; `app_profile` selects one.
 If omitted, the default app is EDRClient (`windows_hisec` or `macos_hisec`).
 All reviewed applications, installation paths, and declared windows are in
 `target/product_specs/apps.json`; changes require target deployment.
@@ -138,18 +138,18 @@ rules in `agent/target_config.py`.
 ## Operate A Target
 
 ```bash
-edr-wd --target TARGET status
-edr-wd --target TARGET up
-edr-wd --target TARGET down
-edr-wd --target TARGET restart
-edr-wd --target TARGET repair
-edr-wd --target TARGET test
-edr-wd --target TARGET tools
-edr-wd products
-edr-wd --target TARGET open-app --profile windows_notepad
-edr-wd --target TARGET call list_windows
-edr-wd --target TARGET call is_window_open --args '{"process_name":"EDRClient.exe"}'
-edr-wd --target TARGET open-edr
+edr-ga --target TARGET status
+edr-ga --target TARGET up
+edr-ga --target TARGET down
+edr-ga --target TARGET restart
+edr-ga --target TARGET repair
+edr-ga --target TARGET test
+edr-ga --target TARGET tools
+edr-ga products
+edr-ga --target TARGET open-app --profile windows_notepad
+edr-ga --target TARGET call list_windows
+edr-ga --target TARGET call is_window_open --args '{"process_name":"EDRClient.exe"}'
+edr-ga --target TARGET open-edr
 ```
 
 Normal lifecycle calls are no-upload operations. Only explicit deploy/install/
@@ -300,7 +300,7 @@ python -m pytest -q -m "unit or regression"
 python -m pytest -q -m "integration or e2e"
 
 # Profile-aware live workflow.
-edr-wd --target TARGET test
+edr-ga --target TARGET test
 ```
 
 Do not describe the default `pytest -q` as the complete suite. Live-target
@@ -329,9 +329,9 @@ skipped.
 - `references/testing.md`: test tiers, traces, reports, failure triage.
 - `references/recording.md`: recording, assertion editor, compile honesty
   gates, replay modes, and live acceptance for desktop record/replay.
-- `references/end-cloud-consistency.md`: Browser Use / EDR-WD snapshot contract,
+- `references/end-cloud-consistency.md`: Browser Use / edr-ga snapshot contract,
   device-policy-time correlation, synchronization polling, and diff evidence.
-- `docs/requirements/EDR-RAG-INTEGRATION.md`: boundary between `edr-wd` and
+- `docs/requirements/EDR-RAG-INTEGRATION.md`: boundary between `edr-ga` and
   the standalone `edr-rag` project.
 - `sops/INDEX.md`: fixed verification catalog.
 - `docs/README.md`: maintainer architecture and archive map.

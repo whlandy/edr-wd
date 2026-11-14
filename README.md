@@ -78,10 +78,10 @@ agent/edr-wd.sh
 ## Configure
 
 ```bash
-edr-wd config --init
+edr-ga config --init
 # edit config/targets.local.json (never commit this file)
-edr-wd config --validate
-edr-wd config --list
+edr-ga config --validate
+edr-ga config --list
 ```
 
 Start from `config/targets.example.json`. Target names follow
@@ -92,9 +92,9 @@ for trusted intranet use.
 ## Verify
 
 ```bash
-edr-wd status                       # probe the configured target
-edr-wd up                           # ensure the target MCP server runs
-edr-wd tools                        # list exposed MCP tools
+edr-ga status                       # probe the configured target
+edr-ga up                           # ensure the target MCP server runs
+edr-ga tools                        # list exposed MCP tools
 python3 -m pytest -q                # offline test gate
 python test_case/run_tests.py --target <TARGET>   # profile-dispatched live suite
 ```
@@ -103,18 +103,18 @@ python test_case/run_tests.py --target <TARGET>   # profile-dispatched live suit
 
 ```bash
 # 1. Record a flow on the target (locks the matching window first)
-edr-wd --target <TARGET> record start \
+edr-ga --target <TARGET> record start \
   --name policy-flow --process-name EDRClient.exe --window-title '^EDRClient$'
 
 # 2. Interact with the target application; add assertions as needed
-edr-wd --target <TARGET> record assert
+edr-ga --target <TARGET> record assert
 
 # 3. Stop and compile — writes recording.json, case.json, golden-trace.json,
 #    generated pytest, and compile-report.json under recordings/<name>/
-edr-wd --target <TARGET> record stop --output-root recordings
+edr-ga --target <TARGET> record stop --output-root recordings
 
 # 4. Check readiness (scroll/drag steps need a bound result verifier)
-edr-wd --target <TARGET> replay recordings/policy-flow/golden-trace.json
+edr-ga --target <TARGET> replay recordings/policy-flow/golden-trace.json
 ```
 
 A golden trace replays only when `status == "ready"` and every step is `ready`.
@@ -126,7 +126,7 @@ For an interactive recorder panel on the target's own desktop (no LLM in the
 loop):
 
 ```bash
-edr-wd --target <TARGET> record ui      # agent-driven panel bridge
+edr-ga --target <TARGET> record ui      # agent-driven panel bridge
 python3 scripts/open_recorder.py        # target-local double-click entry
 ```
 
