@@ -1167,8 +1167,8 @@ def _authoritative_step_state(server_tools, *, run_token: str,
     identity = observation_record.get("window_identity") or {}
     if identity.get("session_id") != server_run_id:
         raise ValueError(
-            f"{window_id} {phase}: observation {observation_record.get(
-                'observation_id')!r} does not belong to this run "
+            f"{window_id} {phase}: observation "
+            f"{observation_record.get('observation_id')!r} does not belong to this run "
             f"({server_run_id!r}); refusing foreign/old-run observation")
     observation_id = observation_record.get("observation_id")
     return _strict_state_values(
