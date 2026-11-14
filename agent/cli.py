@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -757,6 +758,26 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--no-heartbeat", action="store_true", help="Read status without renewing the recording lease")
     record.add_argument("--ui-interval", type=float, default=2.0, help="Recorder UI bridge poll interval seconds (ui only)")
 
+    recover = sub.add_parser(
+        "recover",
+        help="Explicit recovery entry for a failed compile/replay: local analysis first, "
+             "then (only with --allow-gui-rerecord) repair validation and the existing "
+             "record-before-act rerecord through the controlled chain. Never automatic.",
+    )
+    recover.add_argument("recording", help="recording.json the failed compile consumed")
+    recover.add_argument("--output-root", help="Recording artifact root holding the origin trajectory folder")
+    recover.add_argument("--profile", help="Bind repair validation / rerecord compile to this app profile")
+    recover.add_argument("--job-id", help="Re-enter an existing recovery job (JOB-<hex32>); default allocates a new one")
+    recover.add_argument("--trace-root", default="result-report/recovery-traces",
+                         help="Validation-replay attempt ledger root")
+    recover.add_argument("--timeout", type=float, default=60.0, help="Per-call MCP timeout")
+    recover.add_argument(
+        "--allow-gui-rerecord", action="store_true",
+        help="Authorize the GUI layers: real repair validation replay on the target and, "
+             "when repair fails, the existing record-before-act rerecord. Without this flag "
+             "recover only performs local analysis (no target contact beyond recording_status).",
+    )
+
     replay = sub.add_parser("replay", help="Replay a ready golden trace through the atomic executor")
     replay.add_argument("golden_trace")
     replay.add_argument("--profile", help="Product profile; defaults to the target config")
@@ -930,9 +951,621 @@ def _cmd_record(
         "issues": compiled_issues,
         "captureIssues": capture_issues,
     }
+    if artifacts.trajectory_root is not None:
+        # 评审 P1-3: v3 主轨迹在单夹布局,不在 directory — 报告两者,
+        # 让消费方按 golden_trace(v1/v2) 或 traceV3(v3) 找主轨迹。
+        payload["trajectoryRoot"] = str(artifacts.trajectory_root)
+        payload["traceV3"] = str(artifacts.trace_v3_path)
     if advisories:
         payload = {"warnings": advisories, **payload}
     return _print_result(payload)
+
+
+def _load_replay_golden(golden_trace: str):
+    """Load the replay golden from either entry — flat file or §5 folder.
+
+    Flat v1/v2 paths (an explicit ``golden-trace.json`` file) load exactly
+    as before.  A directory is the §5 single-folder entry: the manifest is
+    the only discovery point — read ``manifest.json`` → ``currentRevision``
+    → ``revisions/REV-<id>/trace.v3.json`` via the layout module's read
+    helper (no filename guessing, no flat fallback).  Discovery failures
+    raise honestly and surface as ``golden_trace_invalid``.
+
+    Returns ``(golden, asset_root)`` where ``asset_root`` anchors the visual
+    resolver.  The two entries differ by design:
+
+    - **Flat entry**: ``asset_root`` is the golden file's parent directory —
+      the round-16 convention (templates sit beside the flat trace), unchanged.
+    - **Folder entry**: ``asset_root`` is the ``TRJ-<id>`` root itself, not
+      the resolved revision folder.  The landing trace rewrites declared
+      template names to be TRJ-root-relative (``assets/sha256/<hex>.png``,
+      design §5 "shared redacted resources"), so the resolver must search
+      from the TRJ root, not ``revisions/REV-<id>/``.
+    """
+    candidate = Path(golden_trace).expanduser()
+    if candidate.is_dir():
+        from agent.recording.trajectory_layout import from_manifest
+        resolved = from_manifest(candidate)
+        return load_golden_trace(resolved), candidate
+    return load_golden_trace(candidate), candidate.parent
+
+
+def _persist_run_summary_report(ledger_root, result, *,
+                                ledger_root_str: str | None = None) -> None:
+    """Land ``summary.json`` + ``report.json`` in the run's ledger dir
+    (design §5: ``runs/RUN-<id>/`` holds 每次执行账本、summary 与报告).
+
+    ``summary.json`` is a subset of the controlled-chain top-level result
+    fields — the same facts the CLI already projects to stdout, so a
+    folder reader and the operator see one truth.  ``report.json`` is the
+    chain's ``build_run_report`` product verbatim (failedStep / per-step
+    entries).  Both are write-once atomic audit artifacts (§7: 报告审计件
+    不覆盖) — a pre-existing file keeps its bytes.  Blocked / begin-refused
+    zero-side-effect runs land too (honest report of a failed run, not
+    only passes); a run whose ledger was never constructed (e.g. role
+    derivation failed before the dir existed) has no landing point and
+    lands nothing.
+    """
+    import json as _json
+    report = result.get("report") or {}
+    summary = {
+        "ok": result.get("latched") is False
+              and bool(report.get("outcome") == "pass"),
+        "runId": result.get("runId"),
+        "serverRunId": result.get("serverRunId"),
+        "outcome": report.get("outcome"),
+        "latched": result.get("latched"),
+        "blockedAt": result.get("blockedAt"),
+        "dispatchInputs": result.get("dispatchInputs"),
+        "observations": result.get("observations"),
+        "stepCount": len(result.get("steps") or []),
+        "ledgerRoot": ledger_root_str
+                      if ledger_root_str is not None else str(ledger_root),
+    }
+    for name, payload in (("summary.json", summary),
+                          ("report.json", report)):
+        target = Path(ledger_root) / name
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=f".{name}.",
+                                         dir=str(target.parent))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(_json.dumps(
+                    payload, indent=2, ensure_ascii=False,
+                    default=str).encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+
+
+def _cmd_replay_v3(args, agent, golden, replay_profile,
+                   asset_root: Path | None = None) -> int:
+    """Route a golden with windowSequence into the controlled v3 chain.
+
+    Design §6 step 2: the public CLI consumes the same controlled
+    execution capability the internal tests drive
+    (`execute_v3_window_stage_real`), through the shared transport
+    (`MCPServerTools`), with the W→role authorization map derived from
+    the golden's declared identities and the installed product's roles
+    (`derive_role_map`) — no third carrier, no hand-written map.  The
+    library-level gate (`_refuse_v3_execution`) keeps its semantics for
+    direct API callers; only the CLI layer routes instead of refusing.
+    """
+    from target.windowing.attempt_ledger import AttemptLedger
+    from agent.recording.execution_ledger import (
+        execute_v3_window_stage_real,
+        new_run_id,
+    )
+    from agent.recording.v3_transport import (
+        MCPServerTools,
+        RoleDerivationError,
+        derive_role_map,
+    )
+
+    trace_root = Path(args.trace_root).expanduser().resolve()
+    ledger_root = trace_root / "v3-attempts"
+    # visual asset_root 由 _load_replay_golden 按入口给出:单夹入口 =
+    # TRJ 根(落盘模板名已改写为 TRJ 根相对 assets/sha256/<hex>.png),
+    # 平铺入口 = golden 文件父目录(轮次 16 约定不变)。未传时防御性
+    # 回退既有平铺约定(args.golden_trace 父目录)。
+    if asset_root is None:
+        asset_root = Path(args.golden_trace).expanduser().resolve().parent
+    else:
+        asset_root = asset_root.expanduser().resolve()
+    # §5 runs/ 面(轮次 30):单夹入口(asset_root == TRJ 根,_load_replay_golden
+    # 单夹返回值第二元)的受控执行账本入 TRJ 根/runs/<run实例id> —— 实例 id
+    # 由 CLI 先生成(execution_ledger 公开别名)。账本事件内 runId 由受控链
+    # 取 server 真实 run_id(1129 一致性,受控链零改动、不注入),与目录名
+    # 是两个如实报告的面(stdout runId/serverRunId + ledgerRoot)。平铺
+    # 入口保持 trace_root/v3-attempts(两入口并存纪律)。
+    if asset_root.is_dir() and asset_root.name.startswith("TRJ-") \
+            and (asset_root / "manifest.json").is_file():
+        ledger_root = asset_root / "runs" / new_run_id()
+
+    def _mcp_tool_call(name: str, arguments: dict) -> str:
+        result = agent.call_tool(name, arguments, timeout=args.timeout)
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    try:
+        window_role_map = derive_role_map(
+            golden.to_dict(), _v3_capability(replay_profile))
+    except (RoleDerivationError, ValueError) as exc:
+        return _print_result({
+            "ok": False,
+            "code": "v3_role_derivation_failed",
+            "error": str(exc),
+        })
+    tools = MCPServerTools(_mcp_tool_call)
+    ledger = AttemptLedger(ledger_root)
+    # 视觉面接线(设计 §8 B 出口"视觉不回退"):声明含 visual selector
+    # 的 golden 才构造 resolver(与 ledger 消费的声明表 steps+cleanup
+    # 同源;无 visual 步的 golden 不建,保持零行为变化)。asset_root 照
+    # v1 路径同款约定 = golden 文件父目录;模板缺失/digest 不符在使用时
+    # fail-closed(SafeVisualResolver integrity 门 → 受控链锁存)。
+    visual_declared_steps = list(
+        getattr(golden, "steps", None) or []) + list(
+        getattr(golden, "cleanup", None) or [])
+    visual_declared = any(
+        getattr(getattr(step, "selector", None), "visual", None)
+        for step in visual_declared_steps)
+    result = execute_v3_window_stage_real(
+        golden=golden,
+        ledger=ledger,
+        server_tools=tools,
+        window_role_map=window_role_map,
+        profile_id=replay_profile,
+        lease_seconds=max(args.timeout, 300.0),
+        replay_mode=args.replay_mode,
+        visual_resolver=(build_visual_resolver(asset_root)
+            if visual_declared and args.replay_mode != "semantic_only"
+            else None),
+    )
+    report = result.get("report") or {}
+    # §5 runs/ 面第二片(轮次 31):summary/report 与 stdout 同一事实的
+    # 两个面——单夹入口的 RUN 目录里落盘(write-once,含 blocked 等零副
+    # 作用路径;账本未构造的失败面无落点、不落)。§5 runs/ 是单夹宣告,
+    # 以"ledger_root 在 TRJ 夹 runs/ 下"为条件:平铺入口的
+    # trace_root/v3-attempts 零新增文件(两入口并存纪律)。
+    if ledger_root.parent.name == "runs" \
+            and ledger_root.parent.parent.name.startswith("TRJ-"):
+        _persist_run_summary_report(
+            ledger.root, result, ledger_root_str=str(ledger.root))
+    return _print_result({
+        "ok": result.get("latched") is False and bool(report.get("outcome") == "pass"),
+        "runId": result.get("runId"),
+        "serverRunId": result.get("serverRunId"),
+        "dispatchInputs": result.get("dispatchInputs"),
+        "observations": result.get("observations"),
+        "steps": result.get("steps"),
+        "latched": result.get("latched"),
+        "blockedAt": result.get("blockedAt"),
+        "cleanup": result.get("cleanup"),
+        "begin": result.get("begin"),
+        "end": result.get("end"),
+        "failedStep": report.get("failedStep"),
+        "ledgerRoot": str(ledger_root),
+    })
+
+
+def _v3_capability(profile_id: str):
+    from target.product_profiles import get_capability
+    return get_capability(profile_id, "windows_pywinauto")
+
+
+# -- §5 recovery/JOB-<id>/ 生产接线(显式 recover 入口;收尾轮 P3) ---------
+# 复用既有 recovery_job/rerecord_loop/trace_repair 模块与唯一受控执行链
+# (execute_v3_window_stage_real);不新增恢复执行器。默认(无
+# --allow-gui-rerecord)只做本地分析,零 GUI;unknown/中断作业不自动重试
+# (execute_recovery 既有语义)。MCP 载体经下列工厂构造,测试用无凭据
+# 本地适配替换工厂(链路本体零 mock)。
+
+def _recover_validation_replay(candidate_golden, *, agent, profile,
+                               trace_root, timeout) -> bool:
+    """Validate one repair candidate through the REAL controlled v3 chain.
+
+    The only legitimate validation: execute_v3_window_stage_real via the
+    MCP carrier (same as ``replay``), a fresh attempt ledger, the
+    product-derived W→role map. ready-by-compile alone is never success.
+    """
+    from target.windowing.attempt_ledger import AttemptLedger
+    from agent.recording.execution_ledger import execute_v3_window_stage_real
+    from agent.recording.v3_transport import (
+        MCPServerTools, RoleDerivationError, derive_role_map)
+
+    def _mcp_tool_call(name: str, arguments: dict) -> str:
+        result = agent.call_tool(name, arguments, timeout=timeout)
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    try:
+        window_role_map = derive_role_map(
+            candidate_golden.to_dict(), _v3_capability(profile or "windows_hisec"))
+    except (RoleDerivationError, ValueError):
+        return False
+    result = execute_v3_window_stage_real(
+        golden=candidate_golden,
+        ledger=AttemptLedger(Path(trace_root).expanduser().resolve()),
+        server_tools=MCPServerTools(_mcp_tool_call),
+        window_role_map=window_role_map,
+        profile_id=profile or "windows_hisec",
+        lease_seconds=max(timeout or 60.0, 300.0),
+    )
+    report = result.get("report") or {}
+    return (result.get("latched") is False
+            and report.get("outcome") == "pass")
+
+
+def _recover_recording_service(agent):
+    """MCP transport for the rerecord layer's recording service: the same
+    start_recording/recording_status/stop_recording tools the ``record``
+    command drives — transport only, not a new executor."""
+    class _MCPRecordingService:
+        def start(self, *, name, process_name, window_title,
+                  lease_seconds=300.0):
+            return agent.call_tool("start_recording", {
+                "name": name, "process_name": process_name,
+                "window_title": window_title,
+                "lease_seconds": lease_seconds,
+            })
+
+        def status(self):
+            return agent.call_tool("recording_status",
+                                   {"heartbeat": False})
+
+        def stop(self):
+            return agent.call_tool("stop_recording", {})
+
+    return _MCPRecordingService()
+
+
+def _recover_dispatcher(agent):
+    """MCP transport for the rerecord layer's constrained dispatcher: the
+    unified execute_action tool (same carrier the intent/v1 replay paths
+    use), receipts normalized to the Mapping shape the loop consumes."""
+    from target.action_dispatcher import normalize
+
+    def _dispatch(action_id, args=None, request_id=None):
+        result = agent.call_tool("execute_action", {
+            "action_id": action_id, "args": dict(args or {}),
+            "request_id": request_id,
+        })
+        if isinstance(result, Mapping) and "code" in result:
+            return result
+        return normalize(result, action_id=action_id, action_code=None,
+                         request_id=request_id).to_dict()
+
+    return _dispatch
+
+
+def _recover_origin_artifact(output_root: Path, recording) -> dict:
+    """Discover the origin TRJ/REV for this recording deterministically.
+
+    Anchor: ``manifest.taskKey == recording.name`` AND the revision trace's
+    ``sourceRecording.sha256 == sha256(canonical_json(recording))`` — the
+    same digest the compiler recorded at compile time. No name guessing:
+    a folder whose trace does not hash-match this exact raw is not the
+    origin. No match → an honest sha256-only ref (first-time analysis).
+    """
+    from agent.recording.models import canonical_json
+    import hashlib
+
+    digest = "sha256:" + hashlib.sha256(
+        canonical_json(recording.to_dict()).encode()).hexdigest()
+    base = output_root / "trajectories"
+    if base.is_dir():
+        for candidate in sorted(base.iterdir()):
+            manifest_path = candidate / "manifest.json"
+            if not manifest_path.is_file():
+                continue
+            try:
+                manifest = json.loads(
+                    manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if manifest.get("taskKey") != recording.name:
+                continue
+            pointer = manifest.get("currentRevision")
+            if not isinstance(pointer, str):
+                continue
+            trace_path = candidate / pointer / "trace.v3.json"
+            if not trace_path.is_file():
+                continue
+            try:
+                trace = json.loads(
+                    trace_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (trace.get("sourceRecording") or {}).get("sha256") == digest:
+                return {"trajectoryId": candidate.name,
+                        "revision": pointer,
+                        "root": str(candidate),
+                        "sha256": digest}
+    return {"sha256": digest}
+
+
+def _cmd_recover(args: argparse.Namespace, agent, parser) -> int:
+    """Explicit recovery entry (design 12 §1 order, unified-v3 §5 layout).
+
+    Local analysis always runs (real compiler, real propose_repairs, real
+    full-point plan). The GUI layers — candidate validation replay and the
+    record-before-act rerecord — run ONLY with --allow-gui-rerecord and
+    only when the target is not busy (mutual exclusion via
+    recording_status). Without authorization the job terminates
+    awaiting_authorization with the analysis evidence recorded. Unknown /
+    interrupted jobs are never re-fired (execute_recovery's built-in
+    semantics). State lands in the origin TRJ folder's recovery/JOB-<id>/
+    when the origin is discoverable, else <output-root>/recovery/.
+    """
+    import uuid as _uuid
+
+    from agent.recording.recovery_job import (
+        RecoveryJob, RecoveryJobError, execute_recovery, recovery_report,
+    )
+    from agent.recording.rerecord_loop import run_rerecord_loop
+    from agent.recording.step_plan import extract_step_plan
+    from agent.recording.trace_repair import propose_repairs
+
+    source = Path(args.recording).expanduser().resolve()
+    if not source.is_file():
+        parser.error(f"recover requires an existing recording.json: {source}")
+    output_root = (Path(args.output_root).expanduser().resolve()
+                   if args.output_root else source.parent)
+    recording = RawRecording.from_dict(
+        json.loads(source.read_text(encoding="utf-8")))
+
+    origin = _recover_origin_artifact(output_root, recording)
+    origin_root = Path(origin["root"]) if "root" in origin else None
+    if origin_root is not None:
+        job_dir = origin_root / "recovery" / (
+            args.job_id or ("JOB-" + _uuid.uuid4().hex))
+    else:
+        job_dir = output_root / "recovery" / (
+            args.job_id or ("JOB-" + _uuid.uuid4().hex))
+    job_id = job_dir.name
+    if not job_id.startswith("JOB-") or len(job_id) != len("JOB-") + 32:
+        parser.error("--job-id must match JOB-<32 hex chars>")
+    job = RecoveryJob(
+        job_dir / "state.json", recovery_job_id=job_id,
+        origin={k: v for k, v in origin.items() if k != "root"},
+        failure_category="trace_defect",
+        failure_reason="explicit recover entry")
+
+    # Re-entry of an already-terminal job records nothing (append-only
+    # document stays untouched — restart rebuild reads the same truth).
+    if job.outcome() is not None:
+        report = recovery_report(json.loads(
+            Path(job.state_path).read_text(encoding="utf-8")))
+        report_path = job_dir / "report.json"
+        if not report_path.exists():
+            report_path.write_text(
+                json.dumps(report, ensure_ascii=False, indent=1) + "\n",
+                encoding="utf-8")
+        return _print_result({
+            "ok": report["outcome"] in {
+                "recovered_by_repair", "recovered_by_rerecord"},
+            "recoveryJobId": job_id,
+            "outcome": report["outcome"],
+            "outcomeReason": report["outcomeReason"],
+            "stagesRun": report["stagesRun"],
+            "stagesNotRun": report["stagesNotRun"],
+            "budgetUsed": report["budgetUsed"],
+            "originTrajectory": origin.get("trajectoryId"),
+            "originRevision": origin.get("revision"),
+            "statePath": str(job_dir / "state.json"),
+            "reportPath": str(report_path),
+            "alreadyTerminal": True,
+            "authorizationBlocked": report["outcome"] in {
+                "awaiting_authorization", "blocked"},
+            "rerecordStarted": job.has_event("rerecord_started"),
+            "validationReplays": [],
+        })
+
+    # Compile result for both layers — the real compiler on the raw.
+    result = compile_recording(recording, profile=args.profile)
+
+    # ---- local analysis (zero GUI): static repair derivation + plan.
+    proposal = propose_repairs(
+        recording, result.golden, result.diagnostics)
+    job.record_event("analysis", "analysis_repair_proposal", {
+        "candidates": [
+            {"ruleId": c.rule_id, "parentSha256": c.parent_sha256,
+             "semanticsChanged": c.semantics_changed,
+             "candidateStatus": c.golden.status}
+            for c in proposal.candidates],
+        "refusals": [r.reason for r in proposal.refusals],
+        "goldenStatus": result.golden.status,
+    })
+    plan = None
+    try:
+        plan = extract_step_plan(recording, result)
+        job.record_event("analysis", "analysis_step_plan", {
+            "parentSha256": plan.parent_sha256,
+            "steps": len(plan.steps), "gaps": len(plan.gaps),
+            "uncompiledPoints": plan.uncompiled_points,
+        })
+    except Exception as exc:  # noqa: BLE001 — analysis evidence, not a gate
+        job.record_event("analysis", "analysis_step_plan_failed", {
+            "error": f"{type(exc).__name__}: {exc}"})
+
+    # ---- authorization + mutual exclusion gates for the GUI layers.
+    blocked_reason = None
+    validation_statuses: list[str] = []
+    if not args.allow_gui_rerecord:
+        blocked_reason = (
+            "GUI re-record authorization missing: pass --allow-gui-rerecord "
+            "to enable candidate validation replay and the rerecord layer")
+    else:
+        active = agent.call_tool("recording_status",
+                                 {"heartbeat": False},
+                                 timeout=args.timeout)
+        if active.get("ok") and active.get("state") in {
+                "starting", "recording", "paused", "stopping"}:
+            blocked_reason = (
+                "desktop busy: another recording session is active "
+                f"(state={active.get('state')!r})")
+
+    if blocked_reason is not None:
+        _, detail = execute_recovery(
+            job, recording=recording, compile_result=result,
+            owner="cli-recover", round_id=job_id,
+            propose_repairs_fn=propose_repairs,
+            build_plan_fn=extract_step_plan,
+            blocked_reason=blocked_reason)
+    else:
+        trace_root = Path(args.trace_root).expanduser().resolve()
+
+        def _validate_candidate(candidate) -> bool:
+            allowed = _recover_validation_replay(
+                candidate.golden, agent=agent, profile=args.profile,
+                trace_root=trace_root, timeout=args.timeout)
+            validation_statuses.append(candidate.golden.status)
+            return allowed
+
+        _, detail = execute_recovery(
+            job, recording=recording, compile_result=result,
+            owner="cli-recover", round_id=job_id,
+            propose_repairs_fn=propose_repairs,
+            validate_candidate=_validate_candidate,
+            build_plan_fn=extract_step_plan,
+            rerecord_fn=run_rerecord_loop,
+            rerecord_kwargs=dict(
+                service=_recover_recording_service(agent),
+                dispatcher=_recover_dispatcher(agent),
+                output_root=output_root, profile=args.profile,
+                result_store=_recover_result_store(),
+                ledger_factory=_recover_attempt_ledger,
+                server_tools=_recover_server_tools(agent),
+                window_role_map=_recover_role_resolver(args.profile),
+                scope_name=f"recover-{job_id[:16]}",
+                process_name=_recover_scope_process(recording),
+                window_title=_recover_scope_title(recording),
+                artifact_agent=agent,
+            ))
+
+    report = recovery_report(json.loads(
+        Path(job.state_path).read_text(encoding="utf-8")))
+    report_path = job_dir / "report.json"
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=1) + "\n",
+        encoding="utf-8")
+    outcome = report["outcome"]
+    ok = outcome in {"recovered_by_repair", "recovered_by_rerecord"}
+    return _print_result({
+        "ok": ok,
+        "recoveryJobId": job_id,
+        "outcome": outcome,
+        "outcomeReason": report["outcomeReason"],
+        "stagesRun": report["stagesRun"],
+        "stagesNotRun": report["stagesNotRun"],
+        "budgetUsed": report["budgetUsed"],
+        "originTrajectory": origin.get("trajectoryId"),
+        "originRevision": origin.get("revision"),
+        "statePath": str(job_dir / "state.json"),
+        "reportPath": str(report_path),
+        "alreadyTerminal": bool(detail.get("alreadyTerminal")),
+        "authorizationBlocked": blocked_reason is not None,
+        "rerecordStarted": job.has_event("rerecord_started"),
+        "validationReplays": validation_statuses,
+    })
+
+
+def _recover_result_store():
+    """The target-side durable result store root the CLI collects from."""
+    import os as _os
+    from target.recording.result_store import RecordingResultStore
+    return RecordingResultStore(Path(_os.environ.get(
+        "EDR_WD_RECORDING_RESULTS",
+        str(Path.home() / ".edr-wd" / "recording-results"))))
+
+
+def _recover_attempt_ledger(root):
+    from target.windowing.attempt_ledger import AttemptLedger
+    return AttemptLedger(Path(root) / "replay-events")
+
+
+def _recover_server_tools(agent):
+    from agent.recording.v3_transport import MCPServerTools
+
+    def _mcp_tool_call(name: str, arguments: dict) -> str:
+        result = agent.call_tool(name, arguments, timeout=None)
+        return json.dumps(result, ensure_ascii=False, default=str)
+
+    return MCPServerTools(_mcp_tool_call)
+
+
+def _recover_role_resolver(profile):
+    """W→role from the installed product's roles for the rerecord's fresh
+    golden — a resolver over declared identities, never a guessed map.
+    Same title/process matching semantics as the rerecord tests' resolver:
+    a declared identity whose title core matches any installed role's
+    pattern maps to that role; nothing matches → honest refusal."""
+    from target.product_profiles import get_capability
+    import re as _re
+    capability = get_capability(profile or "windows_hisec",
+                                "windows_pywinauto")
+    roles = list(capability.window_roles)
+
+    def _resolve(window_id, identity):
+        identity = dict(identity or {})
+        process_name = str(identity.get("processName") or "")
+        title_core = str(identity.get("titleRegex") or "")
+        # The identity carries a titleRegex (compiler-anchored); match its
+        # literal core the way v3_transport._literal_core / execution_ledger
+        # _role_compatible_identity read it.
+        core = _re.sub(r"\\(.)", r"\1", title_core)
+        if core.startswith("^") and core.endswith("$") and len(core) >= 2:
+            core = core[1:-1]
+        specific: list[str] = []
+        dialog_roles: list[str] = []
+        for role in roles:
+            if role.process_names and process_name not in role.process_names:
+                continue
+            if role.title_pattern and _re.fullmatch(role.title_pattern, core):
+                specific.append(role.role)
+            elif not role.title_pattern:
+                dialog_roles.append(role.role)
+        if len(specific) == 1:
+            return specific[0]
+        if not specific and len(dialog_roles) == 1:
+            # A window inside the product's process with no specific role
+            # match falls to the parent-gated fallback role (dialog) — the
+            # same honest resolver semantics the rerecord chain validates
+            # downstream (_validate_window_role_map / _role_compatible_identity).
+            return dialog_roles[0]
+        raise ValueError(
+            f"{window_id}: no installed product role matches identity "
+            f"{json.dumps(identity, ensure_ascii=False)}")
+
+    return _resolve
+
+
+def _recover_scope_process(recording) -> str:
+    for window in recording.windows:
+        process = (window.get("processName") if isinstance(window, dict)
+                   else getattr(window, "process_name", None))
+        if process:
+            return process
+    return ""
+
+
+def _recover_scope_title(recording) -> str:
+    titles = []
+    for window in recording.windows:
+        title = (window.get("title") if isinstance(window, dict)
+                 else getattr(window, "title", None))
+        if title:
+            titles.append(title)
+    if not titles:
+        return ""
+    import re as _re
+    return "^" + "|^".join(_re.escape(t) for t in sorted(set(titles))) + "$"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -966,12 +1599,16 @@ def main(argv: list[str] | None = None) -> int:
         result = compile_recording(recording, profile=args.profile)
         output_root = Path(args.output_root).expanduser() if args.output_root else source.parent
         artifacts = write_compilation_artifacts(output_root, recording, result)
-        return _print_result({
+        payload = {
             "ok": result.golden.status == "ready",
             "status": result.golden.status,
             "directory": str(artifacts.directory),
             "issues": [issue.to_dict() for issue in result.issues],
-        })
+        }
+        if artifacts.trajectory_root is not None:
+            payload["trajectoryRoot"] = str(artifacts.trajectory_root)
+            payload["traceV3"] = str(artifacts.trace_v3_path)
+        return _print_result(payload)
 
     target = _target(args)
     if not target:
@@ -1218,7 +1855,7 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_record(args, agent, parser, profile=profile)
     if args.command == "replay":
         try:
-            golden = load_golden_trace(args.golden_trace)
+            golden, asset_root = _load_replay_golden(args.golden_trace)
         except (OSError, ValueError) as exc:
             return _print_result({
                 "ok": False,
@@ -1263,6 +1900,9 @@ def main(argv: list[str] | None = None) -> int:
                 "code": "recording_session_active",
                 "error": "capture and replay cannot run concurrently on the same target",
             })
+        if golden.window_sequence is not None:
+            return _cmd_replay_v3(args, agent, golden, replay_profile,
+                                  asset_root=asset_root)
         try:
             runtime = build_replay_runtime(
                 agent,
@@ -1290,6 +1930,15 @@ def main(argv: list[str] | None = None) -> int:
             "trace_directory": str(run.trace_root) if run.trace_root else None,
             "evaluation_path": str(run.evaluation_path) if run.evaluation_path else None,
         })
+    if args.command == "recover":
+        target = _target(args)
+        if not target:
+            parser.error("no --target supplied and default_target is not configured")
+        agent = _target_agent(target, args.config)
+        ready = agent.ensure_ready()
+        if not ready.get("ok"):
+            return _print_result(ready)
+        return _cmd_recover(args, agent, parser)
     if args.command == "scroll":
         return _cmd_scroll(args, agent, parser, target)
     if args.command == "page-next":

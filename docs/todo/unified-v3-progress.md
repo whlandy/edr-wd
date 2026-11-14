@@ -1,36 +1,32 @@
 # 统一 v3 轨迹实施进度
 
-权威：[统一v3轨迹设计](../../doc/unified-v3-trajectory-design.md)。实施分支：`mcp_auto_v3.0`。定时任务：`unified-v3-trajectory-impl`（每20分钟，:13/:33/:53）。
+权威：[统一v3轨迹设计](../../doc/unified-v3-trajectory-design.md)。实施分支：`mcp_auto_v3.0`。定时任务：`unified-v3-trajectory-impl`（:13/:33/:53）。
+
+## 评审修复（2026-11-10，待回归确认后提交推送）
+
+外审共 4 项，全部在头处理——评审指出的缺陷已修复：
+
+1. **[P1] 回放模块 3.10 无法导入**：`execution_ledger.py` 跨行 f-string（PEP701 只在 3.12+ 合法）已改为先取局部变量 `observed_id` 再拼接 → `.venv/bin/python(3.10) compileall` 通过、`test_v3_transport/c11/localized/d2_owner` 45 passed。**全库 3.10 回归运行中**。
+2. **[P1] V3 回放忽略 replay-mode**：`execute_v3_window_stage_real` 新增 `replay_mode` 参数（非法值 GUI 前拒绝）、`semantic_only` 下纯视觉点击报 `replay_selector_semantic_missing`（legacy 同语义）；CLI 仅在 `semantic_first/visual_only` 时构造 visual_resolver。新增 `test_v3_replay_mode.py` 4 用例（semantic_only 拒绝/非法拒绝/默认语义 pass）。原 5 个 visual 测试（编码旧 bug）改显式 `--replay-mode semantic_first` + adapter 直调加参数。
+3. **[P1] 录制返回目录不含主轨迹**：`RecordingArtifacts` 加 `trajectory_root/trace_v3_path` 字段（v1/v2 为 None）；v3 经 `from_manifest` 指向真实主轨迹；CLI stop/compile payload 加 `trajectoryRoot/traceV3`。新增 `test_v3_replay_mode.py::test_v3_artifacts_report_real_trajectory_path`。
+4. **[报告待核] 迁移身份一致**：`execute_migration` 修改 —— 源 id 在目标空闲→沿用(manifest 逐字节保真)；冲突→分配新 id 且仅改写 `manifest.trajectoryId`(字段集不变)，逐字节校验排除已改写 manifest 并独立校验其字段。新增 `test_migration_identity_follows_folder_on_collision`（1 空闲 + 1 冲突反例）。
 
 ## 下一轮任务（最新在顶部）
 
-<!-- 每轮结束把下一轮要改的内容写到本节顶部。格式：文件/函数/测试 + 验收标准 -->
+**居中待回归 + 提交**：
+- 3.10 录制库全绿后,在 `mcp_auto_v3.0` 提交评审修复(暂不推,用户说推才推)。
+- 提交范围：`agent/{cli,recording/{artifacts,collection,execution_ledger,trajectory_layout,v3_transport}}.py`、`target/{server.py,windowing/instance_tracker.py,automation/instance_events.py}`、`test_case/test_recording/{test_v3_replay_mode,test_trajectory_layout,test_replay,test_v3_real_server_adapter,test_v3_transport,test_recover_cli,test_golden_v3_window_sequence,test_instance_tracker}.py`、`docs/architecture/{13,14}*.md`、`docs/todo/unified-v3-progress.md`。
+- 未跟踪文件(实机原件/复现脚本/hash 清单)保持不入库 —— 外审已提示提交前需逐项确认是否适合公开,不自动 add。下次循环起继续按设计 §8 推进（先 B 阶段唯一 v3 消费链剩余、再 C 单夹布局三用途投影）。
 
-**轮次 0（本会话）已完成**：进度账本建立 + 定时任务创建（回执见下）。首轮实施任务已写入定时 prompt：
-
-- **下一轮（轮次1）任务**：建立单夹布局写入器骨架（设计 §5）——新模块 `agent/recording/trajectory_layout.py`：`TrajectoryLayout.create(record_dir, task_key) -> TRJ-<id>/`，落 `manifest.json`（指向 revisions/REV-0001）、`revisions/REV-0001/`（空 trace.v3.json 占位由后续片填充）、`sources/`、`assets/sha256/`、`runs/`、`recovery/` 目录骨架；同名 task_key 不覆盖（新 TRJ id）、manifest 不可变指向。验收：`test_trajectory_layout.py` 覆盖 创建/防覆盖/manifest指向/幂等重生成；录制库零回归。
-
-## 阶段状态（设计 §8）
+## 阶段状态
 
 | 阶段 | 状态 | 备注 |
-| --- | --- | --- |
-| A 采集完整/竞态/基线 | 未开始 | 含子菜单枚举证据接线（step-0004 缺口） |
-| B 唯一 v3 消费链 | 部分（transport 就绪） | 片① transport+role 推导已并入 mcp_auto_v3.0（e8afe18/19669bb）；待 CLI 路由与报告投影 |
-| C 单夹布局+三用途投影 | 轮次1起 | 布局骨架先行 |
-| D MAA 转换 v3 | 未开始 | 转换器扩展在 ../edr-cloud-recorder，勿提前 |
-| E 去重/兼容/迁移 | 未开始 | |
-
-## 定时任务回执（2026-11-10 创建）
-
-- 任务 ID：`unified-v3-trajectory-impl`；标题「统一v3轨迹实施循环」
-- 计划：cron `13,33,53 * * * *`（每20分钟）+ jitter；enabled=true
-- 持久性：持久（.claude/scheduled-tasks/ 落盘）；仅 app 开启时运行；无固定有效期
-- 权限模式：Bypass permissions（随本会话保存）；prompt 内已含运行时边界（分支锁定 mcp_auto_v3.0、不推送、无 GUI/部署授权、每轮一片、失败先修回归、两轮无进展停等）
-- 用户可在 app Scheduled 区修改/停用
+|---|---|---|
+| A 采集完整/竞态/基线 | 部分 | 传输/role 派生已并；子菜单枚举接线待 |
+| B 唯一 v3 消费链 | 评审修复中 | CLI 单入口+模式约束+artifact 路径已修 |
+| C 单夹布局+三用途 | 布局已投 | 迁移身份契约已修 |
+| D MAA 转换 v3 | 未开始 | 转换器在 ../edr-cloud-recorder |
+| E 去重/兼容/迁移 | 部分 | 迁移身份已修 |
 
 ## 原则
-
-- 最小修改：每轮一个最小闭环片，反例/测试先行。
-- 自审：改完跑 git diff 自查（无伪造 receipt/ready、无放宽断言、无删测试）+ 录制库回归。
-- 下轮任务写本文件头部；两轮同一问题无进展 → 写"需用户决策"停等。
-- 已锁事实：transport 模块（片①）已就绪；MAA 转换器只认 v1（D 阶段扩展，勿提前）；step-0004 缺口=子菜单枚举证据接线（A 阶段片）。
+最小修改、反例先行、自审(git diff 无伪造/无放宽/无删测试)、3.10 回归先绿。

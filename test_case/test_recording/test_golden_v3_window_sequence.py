@@ -1688,3 +1688,1281 @@ def test_late_transition_with_old_causal_stays_structured_incomplete():
     # 结构化 incomplete(0941 转换门语义),不是异常/空 verifier。
     assert result.golden.status == "incomplete", codes
     assert "compile_transition_unbound" in codes, codes
+
+
+# ---- §5 单夹布局接线:write_compilation_artifacts 的 v3 轨迹落盘缝 ----
+
+def test_v3_compilation_lands_trajectory_folder_trace_and_source_map():
+    """§5 接线正例:v3 编译产物经 write_compilation_artifacts 落入单夹
+    layouts——trajectories/TRJ-<id>/revisions/REV-0001/trace.v3.json 与
+    source-map.json,内容与内存 golden/诊断逐键一致;平铺产物不回退
+    (golden-trace.json 不再双写);manifest 指针仍指 REV-0001(发布是
+    独立步骤,接线不冒充发布)。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from agent.recording.models import GoldenTrace
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    assert result.golden.schema == "edr.desktop-golden-trace/v3"
+    with tempfile.TemporaryDirectory() as tmp:
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            Path(tmp) / "out", recording, result)
+        traj_root = Path(tmp) / "out" / "trajectories" / "TRJ-0001"
+        rev = traj_root / "revisions" / "REV-0001"
+        trace_path = rev / "trace.v3.json"
+        map_path = rev / "source-map.json"
+        assert trace_path.is_file(), "v3 主轨迹必须落入单夹布局"
+        assert map_path.is_file(), "来源映射必须与主轨迹同修订落盘"
+        on_disk = json.loads(trace_path.read_text(encoding="utf-8"))
+        assert GoldenTrace.from_dict(on_disk).to_dict() == \
+            result.golden.to_dict(), "落盘内容与内存 golden 逐键一致"
+        source_map = json.loads(map_path.read_text(encoding="utf-8"))
+        assert source_map["schema"] == "edr.source-map/v1"
+        assert source_map["byStep"] == \
+            result.diagnostics["sourceEvents"]["byStep"]
+        manifest = json.loads(
+            (traj_root / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["currentRevision"] == "revisions/REV-0001", (
+            "接线只写修订内容,manifest 发布属独立步骤")
+        assert manifest["taskKey"], "manifest 必须携带任务标识"
+        # 平铺 golden-trace.json 不再双写:主轨迹唯一(§2/§5),写两份
+        # 就是两份可漂移的副本。
+        assert not (artifacts.directory / "golden-trace.json").exists()
+
+
+def test_v3_compilation_trajectory_lands_are_write_once_on_recompile():
+    """同目录重复编译不得覆盖既有修订(§5:同名录制不覆盖、修订不可变):
+    同 output_root 第二次 write_compilation_artifacts 分配新 TRJ id,
+    第一次的修订内容逐字节不动。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        first = artifacts_mod.write_compilation_artifacts(out, recording, result)
+        first_trace = (first.directory.parent / "trajectories" / "TRJ-0001"
+                       / "revisions" / "REV-0001" / "trace.v3.json")
+        assert first_trace.is_file()
+        before = first_trace.read_bytes()
+        second = artifacts_mod.write_compilation_artifacts(out, recording, result)
+        assert second.directory.parent / "trajectories" / "TRJ-0002"
+        assert first_trace.read_bytes() == before, (
+            "既有修订内容必须逐字节不动")
+
+
+def test_v1_compilation_keeps_flat_layout_without_trajectory_folder():
+    """兼容不回退(§6.2):v1 编译产物走既有平铺落盘,不建 TRJ 单夹、
+    不产 source-map——v3 门只对 v3 schema 生效。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    recording = _recording(
+        [_click(1, 100, "CAUSE-1", 100)])
+    result = compile_recording(recording)
+    assert result.golden.schema != "edr.desktop-golden-trace/v3"
+    with tempfile.TemporaryDirectory() as tmp:
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            Path(tmp) / "out", recording, result)
+        assert (artifacts.directory / "golden-trace.json").is_file(), (
+            "v1 平铺 golden-trace.json 保持既有行为")
+        assert not (Path(tmp) / "out" / "trajectories").exists(), (
+            "v1 产物不得落入单夹布局")
+
+
+# ---- §5 单夹布局接线:collect_recording_artifacts 真实链(录制停止共用入口) ----
+
+def _v3_collect_fixture():
+    """单点击 v3 fixture(与 §5 接线用例同款),供收集链用例复用。"""
+    return (
+        _with_timeline(
+            _recording(
+                [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+                windows=[_MAIN]), instances=("RI-0001",)),
+    )
+
+
+def _collect_agent_with_captures(png: bytes, capture_id: str, recording_dict: dict):
+    """collect_recording_artifacts 的真实 agent 形状:stop 结果回放 +
+    get_recording_capture 按 capture_id 返回 digest 一致的帧。
+    断言 get_recording_capture 的 arguments 携带 sessionId(显式会话
+    归属契约,与 test_capture_session_attribution 同语义)。"""
+    import base64
+    import hashlib
+    seen_capture_args: list[dict] = []
+
+    def _call(name, arguments=None, **kw):
+        if name == "get_recording_capture":
+            seen_capture_args.append(dict(arguments or {}))
+            return {
+                "ok": True,
+                "image_b64": base64.b64encode(png).decode("ascii"),
+                "sha256": "sha256:" + hashlib.sha256(png).hexdigest(),
+            }
+        return {"ok": True, "recording": recording_dict}
+
+    return _call, seen_capture_args
+
+
+def test_collect_recording_artifacts_lands_v3_trajectory_via_real_chain():
+    """§5 收集链接线正例:录制停止链(record stop / ui_bridge /
+    rerecord_loop 的共用入口 collect_recording_artifacts)对 v3 编译产物
+    与 record compile 落盘行为一致——TRJ-0001/REV-0001 trace.v3.json +
+    source-map.json 落盘、内容与内存 golden/诊断逐键一致、manifest 指针
+    不动、平铺 golden-trace.json 不双写。走真实 _fetch_captures 链
+    (captures 参数形状),取证帧随 artifacts 落 assets/observations/。"""
+    import base64
+    import hashlib
+    import io
+    import tempfile
+    from pathlib import Path
+    from agent.recording.collection import collect_recording_artifacts
+    from agent.recording.models import GoldenTrace
+    from types import SimpleNamespace
+
+    from PIL import Image
+    png_buf = io.BytesIO()
+    Image.new("RGB", (60, 40), (128, 128, 128)).save(png_buf, format="PNG")
+    png = png_buf.getvalue()
+    capture_id = "CAP-" + "a" * 32
+
+    recording = _with_timeline(
+        _recording(
+            [{**_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001"),
+              "evidence": {
+                  **_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")["evidence"],
+                  "beforeCapture": {
+                      "id": capture_id,
+                      "sha256": "sha256:" + hashlib.sha256(png).hexdigest(),
+                      "width": 60, "height": 40, "origin": [0, 0],
+                      "redacted": True, "redactions": []}}}],
+            windows=[_MAIN]), instances=("RI-0001",))
+    recording_dict = recording.to_dict()
+    _call, seen_capture_args = _collect_agent_with_captures(
+        png, capture_id, recording_dict)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        artifacts, issues = collect_recording_artifacts(
+            SimpleNamespace(call_tool=_call),
+            {"ok": True, "sessionId": recording_dict["sessionId"],
+             "recording": recording_dict},
+            Path(tmp) / "out", "windows_hisec", session_id="REC-S2")
+        assert issues == [], "帧 hash 一致,不得产生取证缺口"
+        assert seen_capture_args, "真实收集链必须逐帧取证"
+        assert seen_capture_args[0].get("session_id") == "REC-S2", (
+            "get_recording_capture 必须携带显式 sessionId 归属")
+        traj_root = Path(tmp) / "out" / "trajectories" / "TRJ-0001"
+        rev = traj_root / "revisions" / "REV-0001"
+        trace_path = rev / "trace.v3.json"
+        map_path = rev / "source-map.json"
+        assert trace_path.is_file(), "收集链 v3 主轨迹必须落入单夹布局"
+        assert map_path.is_file(), "收集链来源映射必须与主轨迹同修订落盘"
+        on_disk = GoldenTrace.from_dict(
+            json.loads(trace_path.read_text(encoding="utf-8")))
+        assert on_disk.to_dict() == artifacts.compilation.golden.to_dict(), (
+            "收集链落盘 golden 与内存编译 golden 逐键一致")
+        source_map = json.loads(map_path.read_text(encoding="utf-8"))
+        assert source_map["schema"] == "edr.source-map/v1"
+        assert source_map["byStep"] == \
+            artifacts.compilation.diagnostics["sourceEvents"]["byStep"]
+        manifest = json.loads(
+            (traj_root / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["currentRevision"] == "revisions/REV-0001", (
+            "收集链不冒充发布:manifest 指针不动")
+        # v3 平铺主轨迹不双写(§2/§5):收集链与 compile 面行为一致。
+        assert not (artifacts.directory / "golden-trace.json").exists()
+        # 取证帧随收集链落 assets/observations/(与 write_compilation_artifacts
+        # 的 _persist_capture_observations 契约一致)。
+        assert (artifacts.directory / "assets" / "observations"
+                / f"{capture_id}.png").is_file()
+
+
+def test_v3_collect_artifacts_golden_trace_field_points_to_skipped_flat_path():
+    """v3 下 RecordingArtifacts.golden_trace 字段如实指向被跳过的平铺
+    路径(轮次 21 核查钉子):下游生产消费方 grep 证实零读取方
+    (cli/ui_bridge/rerecord_loop 只用 directory/compilation/issues;
+    replay/golden 加载面用 CLI 位置参数与生成的 pytest 投影,不读
+    dataclass 字段),故字段保持现状不预改 API——但该行为在此钉死,
+    未来若有人接手该字段将在此处撞出语义差异。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    with tempfile.TemporaryDirectory() as tmp:
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            Path(tmp) / "out", recording, result)
+        assert artifacts.golden_trace == \
+            artifacts.directory / "golden-trace.json", (
+            "字段值保持既有构造语义(平铺名)")
+        assert not artifacts.golden_trace.exists(), (
+            "v3 下平铺文件不写:字段如实指向不存在的路径,零生产消费方"
+            "(轮次 21 grep 证据),不预改 API")
+
+
+def _visual_assets_fixture():
+    """轮次 24 写侧共用夹具:真实编译链 + protected=False 的 click +
+    digest 对齐帧 → _attach_visual_templates 晋升 visual 声明;另注入
+    cleanup 表的 visual 声明(平铺夹已有其模板文件)。返回 (recording,
+    result_with_cleanup, cleanup_template_bytes, captures)——captures
+    是晋升链的取证帧(测试原样传给 write_compilation_artifacts)。"""
+    import dataclasses
+    import hashlib
+    import io
+    from PIL import Image
+    from agent.recording.models import ReplaySelector
+
+    png_buf = io.BytesIO()
+    Image.new("RGB", (60, 40), (128, 128, 128)).save(png_buf, format="PNG")
+    png = png_buf.getvalue()
+    capture_id = "CAP-" + "a" * 32
+    base = _click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")
+    base["observedTarget"] = {**base["observedTarget"], "protected": False}
+    recording = _with_timeline(
+        _recording([{**base, "evidence": {
+            **base["evidence"],
+            "beforeCapture": {"id": capture_id,
+                              "sha256": "sha256:" + hashlib.sha256(png).hexdigest(),
+                              "width": 60, "height": 40, "origin": [0, 0],
+                              "redacted": True, "redactions": []}}}],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    step1 = result.golden.steps[0]
+    # cleanup 表也声明 visual(模板文件由夹具预置在平铺 assets/)。
+    cleanup_bytes = b"cleanup-template-bytes-0"
+    cleanup_visual = {
+        "template": "assets/cleanup-element.png",
+        "elementSha256": "sha256:" + hashlib.sha256(cleanup_bytes).hexdigest(),
+        "redacted": True, "relativePoint": [0.5, 0.5]}
+    cleanup_step = dataclasses.replace(
+        step1, step_id="cleanup-0001",
+        selector=ReplaySelector(window=step1.selector.window,
+                                control=step1.selector.control,
+                                visual=cleanup_visual))
+    ws2 = dataclasses.replace(
+        result.golden.window_sequence,
+        cleanup=({"stepId": "cleanup-0001", "windowId": "W1",
+                  "effects": ()},))
+    golden2 = dataclasses.replace(
+        result.golden, cleanup=(cleanup_step,), window_sequence=ws2)
+    return (recording, dataclasses.replace(result, golden=golden2),
+            cleanup_bytes, {capture_id: png})
+
+
+def test_v3_compilation_lands_declared_visual_templates_in_trajectory_assets():
+    """§5 assets/sha256 落盘第一片(轮次 24 写侧):编译链声明的 visual
+    模板(golden selector.visual,steps+cleanup 两表)按 digest 复制进
+    TRJ-<id>/assets/sha256/<hex>.png(§5"共享的真实脱敏资源"),落盘
+    trace 的模板名改写为单夹相对路径 assets/sha256/<hex>.png(与 §5
+    "整夹复制后仍可定位资源"一致,resolver 单根闭包无需第二套解析);
+    内存 golden 不动(改写只作用于落盘字典);平铺夹模板原样保留
+    (v1/取证消费面不回退)。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from agent.recording.generate_pytest import safe_test_name
+    from agent.recording.models import GoldenTrace
+
+    recording, result, cleanup_bytes, captures = _visual_assets_fixture()
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        (out / safe_test_name(recording.name) / "assets").mkdir(parents=True)
+        (out / safe_test_name(recording.name) / "assets" /
+         "cleanup-element.png").write_bytes(cleanup_bytes)
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result, captures=captures)
+        traj_root = out / "trajectories" / "TRJ-0001"
+        on_disk = json.loads(
+            (traj_root / "revisions" / "REV-0001" / "trace.v3.json")
+            .read_text(encoding="utf-8"))
+        for table in ("steps", "cleanup"):
+            entry = on_disk[table]["step-0001"] if table == "steps" \
+                else on_disk[table][0]
+            disk_visual = entry["selector"]["visual"]
+            digest_hex = disk_visual["elementSha256"].split(":", 1)[1]
+            landed = traj_root / "assets" / "sha256" / f"{digest_hex}.png"
+            assert landed.is_file(), \
+                f"{table} 声明的 visual 模板必须落入单夹 assets/sha256/"
+            assert disk_visual["template"] == f"assets/sha256/{digest_hex}.png"
+            context = disk_visual.get("contextTemplate")
+            if context is not None:
+                assert context == \
+                    f"assets/sha256/{disk_visual['contextSha256'].split(':', 1)[1]}.png", \
+                    "context 模板同规则落单夹(声明存在时)"
+        # 落盘 golden 仍是合法 v3(改写只动模板名,过 from_dict 严格门)。
+        reread = GoldenTrace.from_dict(on_disk)
+        assert reread.steps[0].selector.visual["template"].startswith(
+            "assets/sha256/")
+        # 内存 golden 不动:写链返回的 compilation 对象仍持平铺名
+        # (改写只作用于落盘字典,不污染内存 CompilationResult)。
+        assert artifacts.compilation.golden.steps[0].selector.visual["template"] == \
+            "assets/step-0001-element.png"
+        assert artifacts.compilation.golden.cleanup[0].selector.visual["template"] == \
+            "assets/cleanup-element.png"
+        # 平铺夹模板原样保留(v1/取证消费面不回退)。
+        flat_assets = artifacts.directory / "assets"
+        assert (flat_assets / "step-0001-element.png").is_file()
+        assert (flat_assets / "cleanup-element.png").is_file()
+
+
+def test_v3_compilation_visual_assets_skipped_when_flat_source_missing():
+    """digest 门负例:golden 声明的 visual 模板在平铺夹缺失(真实晋升链
+    总在声明同时生成模板文件,缺失=手拼 golden/证据面损坏)时不落单夹、
+    trace 模板名不改写——不把未验证的声明复制进共享资源面;缺口的
+    fail-closed 留给读侧 integrity 门。按模板逐份判:同 trace 里平铺源
+    在位的 step 模板正常落单夹,证明是逐份 digest 门而非整表跳过。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+
+    recording, result, cleanup_bytes, captures = _visual_assets_fixture()
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        # 平铺夹不预置 cleanup-element.png:cleanup 声明存在、源缺失。
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result, captures=captures)
+        traj_root = out / "trajectories" / "TRJ-0001"
+        on_disk = json.loads(
+            (traj_root / "revisions" / "REV-0001" / "trace.v3.json")
+            .read_text(encoding="utf-8"))
+        disk_cleanup = on_disk["cleanup"][0]["selector"]["visual"]
+        # 源缺失那份:模板名不改写、digest 不落单夹(不冒充已落)。
+        assert disk_cleanup["template"] == "assets/cleanup-element.png", (
+            "平铺源缺失时模板名不改写(不冒充已落单夹)")
+        cleanup_hex = disk_cleanup["elementSha256"].split(":", 1)[1]
+        assert not (traj_root / "assets" / "sha256" /
+                   f"{cleanup_hex}.png").exists(), (
+            "缺失模板不落单夹:共享资源面零伪造")
+        # 对照:step 那份平铺源在位 → 正常落单夹 + 模板名改写(逐份 digest 门)。
+        disk_step = on_disk["steps"]["step-0001"]["selector"]["visual"]
+        step_hex = disk_step["elementSha256"].split(":", 1)[1]
+        assert (traj_root / "assets" / "sha256" / f"{step_hex}.png").is_file(), (
+            "源在位的 step 模板仍落单夹:门是逐份 digest,非整表跳过")
+        assert disk_step["template"] == f"assets/sha256/{step_hex}.png"
+
+
+def test_v3_compilation_visual_assets_refused_when_flat_source_tampered():
+    """digest 门负例(篡改面):平铺源**存在**但字节与声明 elementSha256
+    不符时不落单夹、模板名不改写——被篡改字节若以声明 digest 为名进入
+    共享资源面,读侧 digest 门虽会再拦,但落盘时就不该复制未对齐的字节
+    (fail-closed 在写侧,不留给读侧补救)。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from agent.recording.generate_pytest import safe_test_name
+
+    recording, result, cleanup_bytes, captures = _visual_assets_fixture()
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        # 平铺夹预置 cleanup-element.png,但内容≠声明 digest(篡改)。
+        flat_assets = out / safe_test_name(recording.name) / "assets"
+        flat_assets.mkdir(parents=True)
+        (flat_assets / "cleanup-element.png").write_bytes(
+            b"tampered-bytes-not-matching-declared-digest")
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result, captures=captures)
+        traj_root = out / "trajectories" / "TRJ-0001"
+        on_disk = json.loads(
+            (traj_root / "revisions" / "REV-0001" / "trace.v3.json")
+            .read_text(encoding="utf-8"))
+        disk_cleanup = on_disk["cleanup"][0]["selector"]["visual"]
+        assert disk_cleanup["template"] == "assets/cleanup-element.png", (
+            "digest 不符时模板名不改写(不冒充已对齐落单夹)")
+        cleanup_hex = disk_cleanup["elementSha256"].split(":", 1)[1]
+        assert not (traj_root / "assets" / "sha256" /
+                   f"{cleanup_hex}.png").exists(), (
+            "digest 不符的模板不落单夹:不复制未对齐字节")
+        # 对照:step 源对齐 → 正常落单夹(门是逐份 digest,篡改不连累他份)。
+        disk_step = on_disk["steps"]["step-0001"]["selector"]["visual"]
+        step_hex = disk_step["elementSha256"].split(":", 1)[1]
+        assert (traj_root / "assets" / "sha256" / f"{step_hex}.png").is_file()
+        assert disk_step["template"] == f"assets/sha256/{step_hex}.png"
+
+
+# ---- §5 单夹布局接线:sources/REC-<id>/ 原始采集落盘(轮次 25) ----
+
+def test_v3_compilation_lands_raw_sources_in_trajectory_folder():
+    """§5 sources 正例:v3 编译链落盘时把原始采集证据复制进
+    TRJ-<id>/sources/REC-<sessionId>/——recording.json 原件 + 逐份
+    digest 门后的取证帧,与平铺原件逐字节一致(单一事实源的两面,
+    不漂移);平铺两面不回退(取证消费面/record 目录契约不变);
+    sources 目录按 sessionId 命名(§5 REC-<id>),不猜不伪造。"""
+    import hashlib
+    import io
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from PIL import Image
+
+    png_buf = io.BytesIO()
+    Image.new("RGB", (60, 40), (128, 128, 128)).save(png_buf, format="PNG")
+    png = png_buf.getvalue()
+    capture_id = "CAP-" + "b" * 32
+    recording = _with_timeline(
+        _recording(
+            [{**_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001"),
+              "evidence": {
+                  **_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")["evidence"],
+                  "beforeCapture": {
+                      "id": capture_id,
+                      "sha256": "sha256:" + hashlib.sha256(png).hexdigest(),
+                      "width": 60, "height": 40, "origin": [0, 0],
+                      "redacted": True, "redactions": []}}}],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    assert result.golden.schema == "edr.desktop-golden-trace/v3"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result, captures={capture_id: png})
+        traj_root = out / "trajectories" / "TRJ-0001"
+        # sources 目录按原始采集会话 id 命名(§5 REC-<id>)。
+        sources_dir = traj_root / "sources" / recording.session_id
+        flat_recording = artifacts.directory / "recording.json"
+        src_recording = sources_dir / "recording.json"
+        assert src_recording.is_file(), "原始采集 recording.json 原件必须落 sources"
+        assert src_recording.read_bytes() == flat_recording.read_bytes(), (
+            "sources 原件与平铺原件逐字节一致(不漂移的两面)")
+        # 取证帧(digest 门后)随 sources 落盘,与平铺帧逐字节一致。
+        src_capture = sources_dir / f"{capture_id}.png"
+        flat_capture = artifacts.directory / "assets" / "observations" / f"{capture_id}.png"
+        assert src_capture.is_file(), "digest 门后取证帧必须落 sources"
+        assert src_capture.read_bytes() == flat_capture.read_bytes() == png
+        # 平铺两面不回退:v1/取证消费面契约不变。
+        assert flat_recording.is_file()
+        assert flat_capture.is_file()
+
+
+def test_v3_compilation_does_not_overwrite_existing_source_originals():
+    """§5 sources 负例:既有 sources 原件不覆盖(§7:raw/审计原件不覆盖)。
+    单元级最短反例——TrajectoryLayout.create 恒分配新 TRJ 夹,公开链上
+    "同夹二写"不可达(负例若经公开链则通过是平凡的:写进了另一个夹);
+    守卫的可达面是同夹追加修订/重放落盘(设计 §5 同 TRJ 追加修订、
+    materialize 场景),故直调 _persist_raw_sources 钉守卫本体。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    with tempfile.TemporaryDirectory() as tmp:
+        traj_root = Path(tmp) / "TRJ-0001"
+        flat = Path(tmp) / "flat"
+        (flat / "assets" / "observations").mkdir(parents=True)
+        (flat / "recording.json").write_bytes(b'{"new": "content"}')
+        sources_dir = traj_root / "sources" / recording.session_id
+        sources_dir.mkdir(parents=True)
+        prior_recording = sources_dir / "recording.json"
+        prior_recording.write_bytes(b'{"prior": "original"}')
+        prior_capture = sources_dir / ("CAP-" + "b" * 32 + ".png")
+        prior_capture.write_bytes(b"prior-frame")
+        # 平铺侧同 id 帧字节不同(模拟重放落盘新帧)。
+        (flat / "assets" / "observations" /
+         ("CAP-" + "b" * 32 + ".png")).write_bytes(b"new-frame")
+        artifacts_mod._persist_raw_sources(traj_root, flat, recording)
+        assert prior_recording.read_bytes() == b'{"prior": "original"}', (
+            "既有 sources 原件不覆盖(raw 不覆盖,§7)")
+        assert prior_capture.read_bytes() == b"prior-frame", (
+            "既有 sources 帧不覆盖(逐份 write-once)")
+
+
+def test_v1_compilation_keeps_flat_sources_without_trajectory_sources():
+    """v1 平铺链零 sources 写入(不回退):§5 sources 是 v3 单夹接线面,
+    v1/v2 平铺产物与 trajectories/ 面零新增——不单边改 v1 约定。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    recording = _recording(
+        [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+        windows=[_MAIN])
+    result = compile_recording(recording, profile="windows_hisec")
+    assert result.golden.schema != "edr.desktop-golden-trace/v3"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts = artifacts_mod.write_compilation_artifacts(out, recording, result)
+        assert not (out / "trajectories").exists(), (
+            "v1 平铺链不建 trajectories 面(既有约定)")
+        assert (artifacts.directory / "recording.json").is_file()
+
+
+def test_v3_compilation_refuses_path_escape_in_session_sources_name():
+    """sources 目录名守卫(最短反例):sessionId 携带路径分隔符/逃逸形状
+    时不得以其为 sources 目录名落盘(路径逃逸不进共享证据面),编译链
+    其余落盘面照常(不因守卫崩溃)。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from target.recording.models import RawRecording
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    hostile = RawRecording.from_dict({
+        **recording.to_dict(), "sessionId": "REC-../../escape"})
+    result = compile_recording(hostile, profile="windows_hisec")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts = artifacts_mod.write_compilation_artifacts(out, hostile, result)
+        traj_root = out / "trajectories" / "TRJ-0001"
+        assert traj_root.is_dir(), "守卫只拒 sources 命名,不拒轨迹落盘"
+        assert not (traj_root / "sources" / "REC-..").exists()
+        assert not (out.parent / "escape").exists()
+        assert (artifacts.directory / "recording.json").is_file()
+
+
+# ---- §5 单夹布局接线:sources/REC-<id>/ 停止/收集回执落盘(轮次 26) ----
+
+def test_v3_collection_lands_stop_receipt_in_trajectory_sources():
+    """§5 sources 收尾正例:收集链(write_compilation_artifacts 尾,三调用方
+    cli/ui_bridge/rerecord_loop 共用链同得)把停止/收集回执落
+    TRJ-<id>/sources/REC-<sessionId>/stop-receipt.json——字段与链上事实
+    逐键一致(goldenStatus/captureIssues 取链上实况,sessionId 按 sources
+    命名守卫的同一会话),不含 target 原始 result(recording.json 原件
+    已是事实源,回执不复制原始载荷)。平铺两面与 v3 轨迹落盘照常。"""
+    import hashlib
+    import io
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from PIL import Image
+
+    png_buf = io.BytesIO()
+    Image.new("RGB", (60, 40), (128, 128, 128)).save(png_buf, format="PNG")
+    png = png_buf.getvalue()
+    capture_id = "CAP-" + "c" * 32
+    recording = _with_timeline(
+        _recording(
+            [{**_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001"),
+              "evidence": {
+                  **_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")["evidence"],
+                  "beforeCapture": {
+                      "id": capture_id,
+                      "sha256": "sha256:" + hashlib.sha256(png).hexdigest(),
+                      "width": 60, "height": 40, "origin": [0, 0],
+                      "redacted": True, "redactions": []}}}],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result, artifact_issues=[
+                {"code": "recording_capture_fetch_failed", "sequence": 1,
+                 "evidence": "beforeCapture", "captureId": capture_id}])
+        traj_root = out / "trajectories" / "TRJ-0001"
+        receipt_path = (traj_root / "sources" / recording.session_id
+                        / "stop-receipt.json")
+        assert receipt_path.is_file(), "收集链回执必须落 sources/REC-<session>/"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt["sessionId"] == recording.session_id
+        assert receipt["goldenStatus"] == result.golden.status, (
+            "回执 goldenStatus 与链上编译事实一致")
+        assert receipt["captureIssues"] == [
+            {"code": "recording_capture_fetch_failed", "sequence": 1,
+             "evidence": "beforeCapture", "captureId": capture_id}], (
+            "回执 captureIssues 与链上取证缺口一致")
+        assert receipt["directory"] == str(artifacts.directory), (
+            "回执 directory 指向平铺产物目录")
+        assert "recording" not in receipt, (
+            "回执不含 target 原始载荷(recording.json 原件已是事实源)")
+        # 正例对照:轨迹与 sources 原件落盘照常(回执接线不扰动既有面)。
+        assert (traj_root / "revisions" / "REV-0001" / "trace.v3.json").is_file()
+        assert (traj_root / "sources" / recording.session_id
+                / "recording.json").is_file()
+
+
+def test_v3_collection_does_not_overwrite_existing_stop_receipt():
+    """§5 sources 收尾负例(最短反例,直调回执落盘函数钉守卫本体——
+    TrajectoryLayout.create 恒新夹,公开链上同夹二写不可达):既有
+    stop-receipt.json 不覆盖(write-once,§7 审计回执不覆盖)。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    with tempfile.TemporaryDirectory() as tmp:
+        traj_root = Path(tmp) / "TRJ-0001"
+        sources_dir = traj_root / "sources" / recording.session_id
+        sources_dir.mkdir(parents=True)
+        receipt_path = sources_dir / "stop-receipt.json"
+        receipt_path.write_bytes(b'{"prior": "receipt"}')
+        artifacts_mod._persist_stop_receipt(
+            traj_root, Path(tmp) / "flat", recording,
+            golden_status="ready", capture_issues=[])
+        assert receipt_path.read_bytes() == b'{"prior": "receipt"}', (
+            "既有回执不覆盖(write-once)")
+
+
+def test_v3_collection_stop_receipt_refuses_path_escape_in_session_name():
+    """回执目录名沿用 sources 会话守卫(最短反例):sessionId 携带逃逸
+    形状时回执不以其为目录名落盘、不写出 TRJ 夹外;既有 sources 原件
+    落盘面照常(守卫只拒命名,不拒轨迹)。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from target.recording.models import RawRecording
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    hostile = RawRecording.from_dict({
+        **recording.to_dict(), "sessionId": "REC-../../escape"})
+    with tempfile.TemporaryDirectory() as tmp:
+        traj_root = Path(tmp) / "TRJ-0001"
+        artifacts_mod._persist_stop_receipt(
+            traj_root, Path(tmp) / "flat", hostile,
+            golden_status="ready", capture_issues=[])
+        assert not (traj_root / "sources" / "REC-..").exists()
+        assert not (Path(tmp) / "escape").exists()
+
+
+def test_v1_compilation_keeps_flat_without_stop_receipt():
+    """v1 平铺链零回执新增(不回退):stop-receipt 是 v3 单夹接线面,
+    v1/v2 平铺产物与 trajectories/ 面零新增——不单边改 v1 约定。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    recording = _recording(
+        [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+        windows=[_MAIN])
+    result = compile_recording(recording, profile="windows_hisec")
+    assert result.golden.schema != "edr.desktop-golden-trace/v3"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result, artifact_issues=[
+                {"code": "recording_capture_fetch_failed", "sequence": 1,
+                 "evidence": "beforeCapture", "captureId": "CAP-" + "c" * 32}])
+        assert not (out / "trajectories").exists(), (
+            "v1 平铺链不建 trajectories 面(既有约定)")
+        assert not list((artifacts.directory).glob("**/stop-receipt.json")), (
+            "v1 平铺链不落 stop-receipt.json")
+
+
+def test_v3_stop_receipt_carries_persistence_fact_from_result_store():
+    """轮次 27 正例(链级):收集链入参 result 带 resultStore(cli record stop
+    的 target 直返、rerecord_loop 的 dict(stopped) 两通道都带)时,回执如实
+    带 persistence 键且与链上事实逐键一致——持久化事实是 §5 sources 面
+    "停止/持久化/收集回执" 的第三块,落盘不冒充不加工。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from agent.recording.collection import collect_recording_artifacts
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+
+    class _Agent:
+        def call_tool(self, name, arguments=None, timeout=None):
+            raise AssertionError(f"无取证事件的链不应调用 agent: {name}")
+
+    result_store_fact = {"ok": True, "freshSave": True, "collected": False,
+                         "captures": 0}
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts, capture_issues = collect_recording_artifacts(
+            _Agent(), {"ok": True, "sessionId": recording.session_id,
+                       "recording": recording.to_dict(),
+                       "resultStore": result_store_fact},
+            out, "windows_hisec")
+        receipt = json.loads(
+            (out / "trajectories" / "TRJ-0001" / "sources"
+             / recording.session_id / "stop-receipt.json").read_text(
+                encoding="utf-8"))
+        assert receipt["persistence"] == result_store_fact, (
+            "回执 persistence 与链上 resultStore 事实逐键一致")
+        assert capture_issues == []
+        assert artifacts.directory.is_dir()
+
+
+def test_v3_stop_receipt_persistence_reflects_store_failure_not_silence():
+    """轮次 27 正例二:resultStore.ok=False(存储失败是事实不是噪音)时,
+    回执 persistence 如实带失败形状——回执不能把存储失败洗成沉默。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts_mod.write_compilation_artifacts(
+            out, recording, result, artifact_issues=[],
+            persistence={"ok": False, "error": "disk full"})
+        receipt = json.loads(
+            (out / "trajectories" / "TRJ-0001" / "sources"
+             / recording.session_id / "stop-receipt.json").read_text(
+                encoding="utf-8"))
+        assert receipt["persistence"] == {"ok": False, "error": "disk full"}
+
+
+def test_v3_stop_receipt_without_result_store_fact_has_no_persistence_key():
+    """轮次 27 负例:链上无 resultStore 事实(ui_bridge 走 durable
+    read-back,组装 dict 只有 ok/recording/sessionId,该通道事实不可达)时,
+    回执**无 persistence 键**——缺键=事实不在链上,不写 null 占位冒充。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from agent.recording.collection import collect_recording_artifacts
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+
+    class _Agent:
+        def call_tool(self, name, arguments=None, timeout=None):
+            raise AssertionError(f"无取证事件的链不应调用 agent: {name}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        collect_recording_artifacts(
+            _Agent(), {"ok": True, "sessionId": recording.session_id,
+                       "recording": recording.to_dict()},
+            out, "windows_hisec")
+        receipt = json.loads(
+            (out / "trajectories" / "TRJ-0001" / "sources"
+             / recording.session_id / "stop-receipt.json").read_text(
+                encoding="utf-8"))
+        assert "persistence" not in receipt, (
+            "无链上事实不得落 persistence 键(不伪造)")
+        assert receipt["sessionId"] == recording.session_id
+
+
+def test_v3_compilation_lands_revision_views_and_readme_in_trajectory_folder():
+    """§5 收口正例(轮次 28):编译链落单夹时经 write_revision_views 投影
+    `revisions/REV-0001/views/steps.md` 与顶层 `README.md`(§5 宣告面,
+    轮次 3 写入口已建、生产链零调用——本片接线,不新造渲染面)。views 从
+    盘上 trace.v3.json 渲染:模板名携带单夹改写真相(assets/sha256/<hex>.png,
+    与 visual 落盘片一致),README 引用 manifest 与当前修订(夹相对路径,
+    整夹复制后仍可读)。views 落盘后回执/原件/模板面照常(零扰动)。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+
+    recording, result, _cleanup_bytes, captures = _visual_assets_fixture()
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result, captures=captures)
+        traj_root = out / "trajectories" / "TRJ-0001"
+        steps_md = traj_root / "revisions" / "REV-0001" / "views" / "steps.md"
+        readme_md = traj_root / "README.md"
+        assert steps_md.is_file(), "§5 宣告的 views/steps.md 必须经编译链落盘"
+        assert readme_md.is_file(), "§5 宣告的顶层 README 必须经编译链落盘"
+        text = steps_md.read_text(encoding="utf-8")
+        for step_id in result.golden.to_dict()["steps"]:
+            assert step_id in text, step_id
+        # 渲染自盘上真相:visual 声明带单夹相对模板名(轮次 24 改写面),
+        # 平铺名不进 views(整夹复制后仍可定位资源)。
+        assert "assets/sha256/" in text
+        # README 是发现入口的说明面:引用 manifest 与当前修订,夹相对。
+        readme = readme_md.read_text(encoding="utf-8")
+        assert "manifest.json" in readme
+        assert "revisions/REV-0001" in readme
+        # 接线零扰动:既有单夹面(主轨迹/回执/原件/资源)照常落盘。
+        assert (traj_root / "revisions" / "REV-0001" / "trace.v3.json").is_file()
+        assert (traj_root / "sources" / recording.session_id
+                / "recording.json").is_file()
+        assert (traj_root / "sources" / recording.session_id
+                / "stop-receipt.json").is_file()
+        assert artifacts.compilation is result or \
+            artifacts.compilation.golden is not None
+
+
+def test_v1_compilation_keeps_flat_layout_without_views_or_readme():
+    """兼容不回退(§6.2,轮次 28):v1 平铺链零 views/README 新增——
+    views 投影是 v3 单夹接线面,v1 产物不建 trajectories/ 面(既有约定
+    由轮次 20 用例钉住,本用例钉 views/README 措辞面)。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    recording = _recording(
+        [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+        windows=[_MAIN])
+    result = compile_recording(recording)
+    assert result.golden.schema != "edr.desktop-golden-trace/v3"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts_mod.write_compilation_artifacts(out, recording, result)
+        traj_root = out / "trajectories"
+        assert not traj_root.exists(), "v1 平铺链不建 trajectories 面"
+        assert not list(Path(tmp).rglob("steps.md"))
+        assert not list(Path(tmp).rglob("README.md"))
+
+
+# ---- §5 exports/maa/ 投影落盘(D 阶段第二片,轮次 35):转换器已收 v3
+# (轮次 34,schema 门 {v1,v3} 双认),编译链把 to_maa_nodes 产物同步落进
+# 修订夹 exports/maa/——§5 宣告的是修订内投影,平铺 maa 节点表照旧
+# (one fact, two faces)。转换器缺席/失败时如实不落、不留占位(README
+# 模板已宣告"生成前该文件不存在,不预建占位")。
+
+def test_v3_compilation_lands_maa_projection_in_revision_exports():
+    """§5 exports/maa 正例:真实编译链 v3 golden 经 to_maa_nodes(轮次 34
+    已收 v3)产出节点表,随编译落 `revisions/REV-0001/exports/maa/
+    pipeline.json`(§5 宣告名),与平铺 `trace.json` 逐字节一致(one fact,
+    two faces);provenance 声明来源 schema 为 v3;平铺 maa 节点表与
+    compile-report 的 maaExport 投影照旧不回退。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from agent.recording.maa_export import recorder_home
+    if recorder_home() is None:
+        pytest.skip("edr-cloud-recorder 不在本机:导出是环境附加产物")
+
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    assert result.golden.schema == "edr.desktop-golden-trace/v3"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result)
+        rev = out / "trajectories" / "TRJ-0001" / "revisions" / "REV-0001"
+        export_path = rev / "exports" / "maa" / "pipeline.json"
+        flat_path = artifacts.directory / "trace.json"
+        assert export_path.is_file(), \
+            "§5 宣告的 exports/maa/pipeline.json 必须随编译链落盘"
+        assert flat_path.is_file(), "平铺 maa 节点表照旧(one fact, two faces)"
+        assert export_path.read_bytes() == flat_path.read_bytes(), \
+            "修订内投影与平铺面必须逐字节一致(不双算不漂移)"
+        nodes = json.loads(export_path.read_text(encoding="utf-8"))
+        assert nodes["$meta"]["attach"]["provenance"]["sourceSchema"] == \
+            "edr.desktop-golden-trace/v3", "投影声明真实来源 schema"
+        report = json.loads(artifacts.compile_report.read_text())
+        assert report["maaExport"]["written"] is True
+        assert report["maaExport"]["path"] == "trace.json"
+
+
+def test_v3_compilation_leaves_exports_empty_when_converter_absent():
+    """转换器缺席负例:首次编译转换器在位(平铺 trace.json 与 TRJ-0001
+    投影落盘),二次编译 to_maa_nodes 返回 (None, note) 时 exports/maa/
+    如实为空——不落 pipeline.json、不留占位(§5"生成前该文件不存在"),
+    也不以平铺夹残留的上一轮陈旧字节冒充本次投影;compile-report 的
+    maaExport 如实记录 written=False;编译核心产物(主轨迹/source-map/
+    views/README)零扰动(附加产物做不成不影响编译——maa_export 契约)。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from agent.recording import maa_export as maa_export_mod
+
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        # 首次编译:转换器在位,平铺 trace.json 与 TRJ-0001 投影落盘。
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result)
+        original = maa_export_mod.to_maa_nodes
+        maa_export_mod.to_maa_nodes = \
+            lambda golden: (None, "找不到 edr-cloud-recorder(测试注入)")
+        try:
+            # 二次编译(转换器缺席,分配新 TRJ):平铺夹残留上一轮的
+            # trace.json 是陈旧字节,不得以其冒充本次修订的投影落新 TRJ。
+            absent = artifacts_mod.write_compilation_artifacts(
+                out, recording, result)
+        finally:
+            maa_export_mod.to_maa_nodes = original
+        rev = out / "trajectories" / "TRJ-0001" / "revisions" / "REV-0001"
+        assert (rev / "exports" / "maa" / "pipeline.json").is_file(), \
+            "首次编译(转换器在位)投影落盘——场景前提"
+        assert (artifacts.directory / "trace.json").is_file(), \
+            "场景前提:平铺夹确有上一轮的节点表"
+        report = json.loads(absent.compile_report.read_text())
+        assert report["maaExport"]["written"] is False, "缺席如实报告"
+        rev2 = out / "trajectories" / "TRJ-0002" / "revisions" / "REV-0001"
+        assert not (rev2 / "exports" / "maa" / "pipeline.json").exists(), \
+            "转换器缺席时不落投影、不留占位——陈旧平铺字节不冒充本次投影"
+        assert (rev2 / "trace.v3.json").is_file(), "核心产物零扰动"
+        assert (rev2 / "views" / "steps.md").is_file()
+        assert (rev2 / "source-map.json").is_file()
+
+
+def test_v1_compilation_writes_flat_maa_nodes_without_exports_face():
+    """v1 不回退:平铺 maa 节点表照旧(既有 phase0 约定),零 exports/maa
+    面——exports 投影是 v3 单夹接线面,v1 不建 trajectories/(既有约定
+    轮次 20 用例已钉,本用例钉 maa 平铺面在 v1 下照常 + 无修订夹)。
+    夹具用真 v1 形状(无 windows 表):带 windows 表的最小编译产物是 v2,
+    v2 是否收进转换器门是头部"需用户决策",不在本片范围。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from agent.recording.maa_export import recorder_home
+    if recorder_home() is None:
+        pytest.skip("edr-cloud-recorder 不在本机:导出是环境附加产物")
+
+    recording = _recording([_click(1, 100, "CAUSE-1", 100)])
+    result = compile_recording(recording)
+    assert result.golden.schema == "edr.desktop-golden-trace/v1"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result)
+        assert (artifacts.directory / "trace.json").is_file(), \
+            "v1 平铺 maa 节点表保持既有行为"
+        assert not (out / "trajectories").exists(), "v1 不建 trajectories 面"
+
+
+# ---- §5 exports/maa/capabilities.json(D 阶段第三片,轮次 36):投影的
+# 能力声明面——§5:77 宣告"runtime模式、支持/缺口、来源hash"。三项全部派生
+# 自已落盘的 pipeline.json / trace.v3.json 字节:runtime模式与支持/缺口来自
+# 投影自身的 scope 标记键存在性扫描(值无关——转换器只在非原生能力上写
+# actionScope/verification.scope 键,词表只在转换器一处,零第二份定义);
+# 来源hash 取两份落盘字节的 sha256。runtimeId 是实机运行时事实(§6),
+# 缺键=未测量,不伪造。投影未落(转换器缺席/失败)时如实不落、不留占位;
+# 修订不可变 → write-once;畸形投影如实拒绝不阻塞原生入口(§4:附加面)。
+
+def test_v3_compilation_lands_maa_capabilities_in_revision_exports():
+    """§5 capabilities 正例:真实编译链 v3 → 投影落盘后 capabilities.json
+    随同落盘——schema 自述、runtime.mode==pure(夹具单 gui.click→Click 属
+    maa 原生动作、无断言,探针实测无 scope 标记)、supported/gaps 与投影
+    节点逐一对得上、sourceHashes 与两份落盘字节逐字节吻合(能力声明锚定
+    它所描述的字节,不锚定内存对象)。"""
+    import hashlib
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from agent.recording.maa_export import recorder_home
+    if recorder_home() is None:
+        pytest.skip("edr-cloud-recorder 不在本机:导出是环境附加产物")
+
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    assert result.golden.schema == "edr.desktop-golden-trace/v3"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result)
+        rev = out / "trajectories" / "TRJ-0001" / "revisions" / "REV-0001"
+        cap_path = rev / "exports" / "maa" / "capabilities.json"
+        pipeline_path = rev / "exports" / "maa" / "pipeline.json"
+        assert pipeline_path.is_file(), "场景前提:投影已落盘(轮次 35)"
+        assert cap_path.is_file(), \
+            "§5 宣告的 capabilities.json 必须随投影落盘"
+        caps = json.loads(cap_path.read_text(encoding="utf-8"))
+        assert caps["schema"] == "edr.maa-capabilities/v1"
+        assert caps["runtime"]["mode"] == "pure", \
+            "单 gui.click 夹具无 scope 标记 → 纯 MAA(§6 纯/桥接措辞)"
+        assert caps["supported"] == ["step_0001"]
+        assert caps["gaps"] == []
+        assert caps["sourceHashes"]["pipeline"] == "sha256:" + hashlib.sha256(
+            pipeline_path.read_bytes()).hexdigest(), \
+            "来源hash 锚定落盘 pipeline.json 字节"
+        assert caps["sourceHashes"]["trace"] == "sha256:" + hashlib.sha256(
+            (rev / "trace.v3.json").read_bytes()).hexdigest(), \
+            "来源hash 锚定落盘 trace.v3.json 字节"
+
+
+def test_v3_maa_capabilities_declare_bridged_nodes_and_decline_without_facts():
+    """单元级(直调 _persist_maa_capabilities,轮次 25/26 直调模式):
+    (a) 桥接声明——带 scope 标记的节点进 gaps(kinds 标明动作/断言哪面
+    需桥接),无标记节点进 supported,mode=bridged;(b) 投影缺席/畸形/
+    非对象/零节点/主轨迹锚缺席 → 如实不落不留占位(空 pipeline 不得产出
+    "pure" 空声明);(c) write-once——既有文件字节不同预置 → 逐字节不动
+    (修订不可变,轮次 25/26 模式)。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+
+    bridged_pipeline = {
+        "$meta": {"attach": {"provenance": {"sourceSchema": "x"}}},
+        "step_0001": {"attach": {"provenance": {"sourceStepId": "step-0001"}}},
+        "step_0002": {"attach": {
+            "provenance": {"sourceStepId": "step-0002",
+                           "actionScope": "desktop-only"},
+            "verification": {"scope": "desktop-only", "verifiers": []}}},
+        "step_0003": {"attach": {
+            "provenance": {"sourceStepId": "step-0003"},
+            "verification": {"scope": "desktop-only"}}},
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        rev = root / "revisions" / "REV-0001"
+        maa_dir = rev / "exports" / "maa"
+        maa_dir.mkdir(parents=True)
+        (rev / "trace.v3.json").write_text("{}", encoding="utf-8")
+        (maa_dir / "pipeline.json").write_text(
+            json.dumps(bridged_pipeline), encoding="utf-8")
+        artifacts_mod._persist_maa_capabilities(root)
+        cap_path = maa_dir / "capabilities.json"
+        assert cap_path.is_file(), "投影在位时能力声明落盘"
+        caps = json.loads(cap_path.read_text(encoding="utf-8"))
+        assert caps["schema"] == "edr.maa-capabilities/v1"
+        assert caps["runtime"]["mode"] == "bridged", \
+            "任一节点带 scope 标记 → 桥接(§6:明确标注依赖)"
+        assert caps["supported"] == ["step_0001"]
+        assert caps["gaps"] == [
+            {"node": "step_0002", "kinds": ["action", "verification"],
+             "sourceStepId": "step-0002"},
+            {"node": "step_0003", "kinds": ["verification"],
+             "sourceStepId": "step-0003"},
+        ], "gaps 逐节点标明桥接面,kinds 与标记所在键对应"
+        # write-once:字节不同预置 → 逐字节不动(修订不可变)。
+        cap_path.write_text('{"schema": "preset"}', encoding="utf-8")
+        artifacts_mod._persist_maa_capabilities(root)
+        assert cap_path.read_text(encoding="utf-8") == '{"schema": "preset"}'
+
+        # 投影缺席:无 pipeline.json → 不落不留占位。
+        empty_root = root / "empty"
+        empty_rev = empty_root / "revisions" / "REV-0001"
+        (empty_rev / "exports" / "maa").mkdir(parents=True)
+        (empty_rev / "trace.v3.json").write_text("{}", encoding="utf-8")
+        artifacts_mod._persist_maa_capabilities(empty_root)
+        assert not (empty_rev / "exports" / "maa"
+                    / "capabilities.json").exists()
+
+        # 畸形投影(非 JSON / 非对象):如实拒绝,不阻塞原生入口。
+        empty_pipeline = empty_rev / "exports" / "maa" / "pipeline.json"
+        empty_pipeline.write_text("not json", encoding="utf-8")
+        artifacts_mod._persist_maa_capabilities(empty_root)
+        assert not (empty_rev / "exports" / "maa"
+                    / "capabilities.json").exists()
+        empty_pipeline.write_text("[1, 2]", encoding="utf-8")
+        artifacts_mod._persist_maa_capabilities(empty_root)
+        assert not (empty_rev / "exports" / "maa"
+                    / "capabilities.json").exists()
+
+        # 零节点投影:不得产出无据的 "pure" 空声明。
+        (empty_rev / "exports" / "maa" / "pipeline.json").write_text(
+            json.dumps({"$meta": {}}), encoding="utf-8")
+        artifacts_mod._persist_maa_capabilities(empty_root)
+        assert not (empty_rev / "exports" / "maa"
+                    / "capabilities.json").exists()
+
+        # 主轨迹锚缺席:pipeline 在而 trace.v3.json 缺 → 来源hash 无法成立,
+        # 不落(能力声明必须锚定它所描述的字节)。
+        no_trace_root = root / "no-trace"
+        no_trace_rev = no_trace_root / "revisions" / "REV-0001"
+        (no_trace_rev / "exports" / "maa").mkdir(parents=True)
+        (no_trace_rev / "exports" / "maa" / "pipeline.json").write_text(
+            json.dumps(bridged_pipeline), encoding="utf-8")
+        artifacts_mod._persist_maa_capabilities(no_trace_root)
+        assert not (no_trace_rev / "exports" / "maa"
+                    / "capabilities.json").exists()
+
+
+def test_v3_compilation_leaves_capabilities_absent_when_projection_absent():
+    """链级负例(轮次 35 负例镜像):首次编译投影与能力声明全落(场景前提),
+    二次编译转换器缺席 → TRJ-0002 无 pipeline.json 也无 capabilities.json
+    ——陈旧平铺字节不冒充本次投影,能力声明不以缺失的投影为据;核心产物
+    零扰动。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from agent.recording import maa_export as maa_export_mod
+
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            out, recording, result)
+        original = maa_export_mod.to_maa_nodes
+        maa_export_mod.to_maa_nodes = \
+            lambda golden: (None, "找不到 edr-cloud-recorder(测试注入)")
+        try:
+            absent = artifacts_mod.write_compilation_artifacts(
+                out, recording, result)
+        finally:
+            maa_export_mod.to_maa_nodes = original
+        rev1 = out / "trajectories" / "TRJ-0001" / "revisions" / "REV-0001"
+        assert (rev1 / "exports" / "maa" / "pipeline.json").is_file(), \
+            "场景前提:首次编译投影落盘"
+        assert (rev1 / "exports" / "maa" / "capabilities.json").is_file(), \
+            "场景前提:首次编译能力声明落盘"
+        report = json.loads(absent.compile_report.read_text())
+        assert report["maaExport"]["written"] is False, "缺席如实报告"
+        rev2 = out / "trajectories" / "TRJ-0002" / "revisions" / "REV-0001"
+        assert not (rev2 / "exports" / "maa" / "pipeline.json").exists()
+        assert not (rev2 / "exports" / "maa"
+                    / "capabilities.json").exists(), \
+            "投影未落时能力声明不落、不留占位——不冒充"
+        assert (rev2 / "trace.v3.json").is_file(), "核心产物零扰动"
+        assert (rev2 / "views" / "steps.md").is_file()
+        assert (rev2 / "source-map.json").is_file()
+
+
+# ---- §5 E 阶段第一片(轮次 38):整夹搬动验证——"搬动目录后仍可消费"的
+# 端到端契约面(§8:121 E 行出口第三事实)。契约面各件已各有钉死用例
+# (manifest folder-relative 守卫 / assets TRJ 根相对改写 / from_manifest
+# 读侧守卫 / source-map/views/exports 全夹相对),本片把"整夹复制后逐面
+# 可消费"合成一条真实编译链证据。converter 缺席环境(本机无
+# edr-cloud-recorder 时)capabilities/pipeline 面按既有约定 skip,
+# 其余面照常验证。
+
+def test_v3_trajectory_folder_survives_full_folder_move_and_stays_consumable():
+    """E 阶段整夹搬动验证(轮次 38):真实编译链 TRJ-<id> 夹 → shutil.
+    copytree 整夹复制到另一根(模拟搬动,原始保持不动)→ 从新根逐面消费:
+    manifest 发现入口解析、主轨迹过严格门重读、views/README 存在且夹相对、
+    sources/assets/runs 骨架与原件随夹、exports 双文件 sha256 与搬动后
+    字节吻合(capabilities 锚定它所描述的字节)、盘上无旧根绝对路径残留。
+    发现真实缺口(路径绝对/锚错根)即本用例红。"""
+    import hashlib
+    import shutil
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    from agent.recording.maa_export import recorder_home
+    from agent.recording.models import GoldenTrace
+    from agent.recording.trajectory_layout import from_manifest
+
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    assert result.golden.schema == "edr.desktop-golden-trace/v3"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts_mod.write_compilation_artifacts(out, recording, result)
+        traj_root = out / "trajectories" / "TRJ-0001"
+        assert traj_root.is_file() is False and traj_root.is_dir()
+
+        # 整夹复制到另一根(§7"迁移先复制";真实搬动=复制+另行确认,
+        # 本验证片只钉"复制后仍可消费",不删除原夹)。
+        moved_root = Path(tmp) / "moved" / "trajectories" / "TRJ-0001"
+        moved_root.parent.mkdir(parents=True)
+        shutil.copytree(traj_root, moved_root)
+        assert traj_root.is_dir(), "验证片只复制不删原(§7 删除另行确认)"
+
+        # (1) 发现入口:manifest 是唯一入口,from_manifest 从新根解析当前
+        # 修订主轨迹——零猜测零回退(指针 folder-relative 守卫既有用例钉死)。
+        resolved = from_manifest(moved_root)
+        assert resolved == moved_root / "revisions" / "REV-0001" / "trace.v3.json"
+
+        # (2) 主轨迹:新根文件过 from_dict 严格门重读,与搬动前逐字节一致
+        # (复制不加工)。
+        original_bytes = (traj_root / "revisions" / "REV-0001"
+                          / "trace.v3.json").read_bytes()
+        moved_bytes = resolved.read_bytes()
+        assert moved_bytes == original_bytes
+        on_disk = json.loads(moved_bytes.decode("utf-8"))
+        GoldenTrace.from_dict(on_disk)  # 严格门:形状失配在此红
+
+        # (3) 来源映射:随夹落盘,与诊断逐键一致(source-map 是编译链
+        # 无条件派生面,轮次 19/20)。
+        source_map = json.loads(
+            (moved_root / "revisions" / "REV-0001" / "source-map.json")
+            .read_text(encoding="utf-8"))
+        assert source_map["schema"] == "edr.source-map/v1"
+        assert source_map["byStep"] == \
+            result.diagnostics["sourceEvents"]["byStep"]
+
+        # (4) views/README:存在且夹相对——整夹复制后读到的文字不含旧根
+        # 绝对路径(§5"所有资源与报告使用本夹相对路径")。
+        steps_md = (moved_root / "revisions" / "REV-0001" / "views"
+                    / "steps.md").read_text(encoding="utf-8")
+        readme_md = (moved_root / "README.md").read_text(encoding="utf-8")
+        assert str(tmp) not in steps_md, \
+            "steps.md 残留旧根绝对路径=搬动后报告指旧根(§5 夹相对违例)"
+        assert str(tmp) not in readme_md
+        assert "manifest.json" in readme_md
+        assert "revisions/REV-0001" in readme_md
+        for step_id in on_disk["steps"]:
+            assert step_id in steps_md
+
+        # (5) sources/assets/runs/recovery 骨架与原件随夹。
+        assert (moved_root / "sources" / recording.session_id
+                / "recording.json").is_file()
+        assert (moved_root / "sources" / recording.session_id
+                / "stop-receipt.json").is_file()
+        for fixed in ("sources", "assets/sha256", "runs", "recovery"):
+            assert (moved_root / fixed).is_dir(), fixed
+
+        # (6) exports/maa 双文件:投影与能力声明随夹,sourceHashes 锚定的
+        # 字节在新根仍吻合(能力声明描述的就是这两份字节);转换器缺席
+        # 环境按既有约定 skip 本面(其余面照常)。
+        if recorder_home() is None:
+            pytest.skip("edr-cloud-recorder 不在本机:导出是环境附加产物")
+        rev_moved = moved_root / "revisions" / "REV-0001"
+        pipeline = rev_moved / "exports" / "maa" / "pipeline.json"
+        capabilities = rev_moved / "exports" / "maa" / "capabilities.json"
+        assert pipeline.is_file() and capabilities.is_file()
+        assert pipeline.read_bytes() == \
+            (traj_root / "revisions" / "REV-0001" / "exports" / "maa"
+             / "pipeline.json").read_bytes(), "投影随夹逐字节一致"
+        caps = json.loads(capabilities.read_text(encoding="utf-8"))
+        assert caps["sourceHashes"]["trace"] == "sha256:" + hashlib.sha256(
+            resolved.read_bytes()).hexdigest(), \
+            "能力声明锚定的 trace 字节在搬动后仍吻合"
+        assert caps["sourceHashes"]["pipeline"] == "sha256:" + hashlib.sha256(
+            pipeline.read_bytes()).hexdigest(), \
+            "能力声明锚定的 pipeline 字节在搬动后仍吻合"
+
+
+def test_v3_compilation_skips_default_pytest_scaffold_repeat():
+    """减容(§4.2 默认不再重复生成 pytest):v3 编译的 pytest 导出显式
+    UNSUPPORTED,平铺 conftest.py/pytest.ini/test_<name>.py 三件脚手架
+    只服务不存在的 pytest 导出——v3 门内不再默认写;v1 平面照旧
+    (既有 phase0 断言不回退);核心产物与 TRJ 面零扰动。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    recording = _with_timeline(
+        _recording(
+            [_click(1, 100, "CAUSE-1", 100, instance_id="RI-0001")],
+            windows=[_MAIN]), instances=("RI-0001",))
+    result = compile_recording(recording, profile="windows_hisec")
+    assert result.golden.schema == "edr.desktop-golden-trace/v3"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "out"
+        artifacts = artifacts_mod.write_compilation_artifacts(out, recording, result)
+        flat_names = {p.name for p in artifacts.directory.iterdir()}
+        for scaffold in ("conftest.py", "pytest.ini",
+                         "test_" + artifacts.directory.name + ".py"):
+            assert scaffold not in flat_names, (
+                f"v3 编译不再默认写 pytest 脚手架 {scaffold}")
+        # 核心产物与投影面零扰动。
+        assert "recording.json" in flat_names
+        assert "case.json" in flat_names
+        assert "compile-report.json" in flat_names
+        assert (out / "trajectories" / "TRJ-0001" / "revisions" / "REV-0001"
+                / "trace.v3.json").is_file()
+        report = json.loads(artifacts.compile_report.read_text())
+        assert report.get("pytestExport", {}).get("supported") is False
+
+
+def test_v1_compilation_keeps_pytest_scaffold_flat_files():
+    """v1 平面不回退:conftest.py/pytest.ini/test_<name>.py 照旧落盘
+    (phase0 既有断言的同面钉子,减容门只作用于 v3)。"""
+    import tempfile
+    from pathlib import Path
+    from agent.recording import artifacts as artifacts_mod
+    recording = _recording([_click(1, 100, "CAUSE-1", 100)])
+    result = compile_recording(recording)
+    assert result.golden.schema != "edr.desktop-golden-trace/v3"
+    with tempfile.TemporaryDirectory() as tmp:
+        artifacts = artifacts_mod.write_compilation_artifacts(
+            Path(tmp) / "out", recording, result)
+        flat_names = {p.name for p in artifacts.directory.iterdir()}
+        assert "conftest.py" in flat_names
+        assert "pytest.ini" in flat_names
+        assert "test_" + artifacts.directory.name + ".py" in flat_names

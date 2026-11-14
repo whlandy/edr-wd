@@ -160,6 +160,92 @@ def test_mcp_facade_shim_reads_revision():
             binding_token="WB-1")
 
 
+def test_mcp_facade_shim_forwards_effect_surface():
+    """The shim forwards the S4 effect surface (begin_effect_baseline /
+    observe_effect_after_action / bind_increment) to the MCP tools —
+    key-by-key, with run_token injected where the adapter's controlled
+    chain relies on the MCP carrier to supply it.  The MCP carrier must
+    not fabricate baseline tokens locally: they live only in the target
+    process's facade memory and round-trip through tool responses."""
+    responses = {
+        "begin_effect_baseline": json.dumps(
+            {"baseline_token": "EB-1", "candidate_count": 0}),
+        "observe_effect_after_action": json.dumps(
+            {"ok": True, "outcome": "appeared", "native_id": "200"}),
+        "bind_increment": json.dumps(
+            {"binding_token": "WB-2", "revision": 3, "state": "BOUND"}),
+    }
+    transport = _RecordingTransport(responses)
+    tools = MCPServerTools(transport)
+    tools.run_token = "tok-9"
+    facade = tools._binding_facade_holder["facade"]
+
+    doc = facade.begin_effect_baseline(
+        "W2", {"processName": "EDRClient.exe", "titleRegex": "^Log Center$"},
+        binding_token="WB-2")
+    assert doc == {"baseline_token": "EB-1", "candidate_count": 0}
+    name, params = transport.calls[-1]
+    assert name == "begin_effect_baseline"
+    assert params == {
+        "window_id": "W2",
+        "identity": {"processName": "EDRClient.exe",
+                     "titleRegex": "^Log Center$"},
+        "binding_token": "WB-2",
+        "run_token": "tok-9",
+    }
+
+    doc = facade.observe_effect_after_action(
+        "W2", "EB-1", effect={"kind": "appeared"}, binding_token="WB-2")
+    assert doc == {"ok": True, "outcome": "appeared", "native_id": "200"}
+    name, params = transport.calls[-1]
+    assert name == "observe_effect_after_action"
+    assert params == {"window_id": "W2", "baseline_token": "EB-1",
+                      "effect": {"kind": "appeared"},
+                      "binding_token": "WB-2", "run_token": "tok-9"}
+
+    doc = facade.bind_increment(
+        "W2", {"processName": "EDRClient.exe"},
+        native_id="200", run_token="tok-9")
+    assert doc == {"binding_token": "WB-2", "revision": 3, "state": "BOUND"}
+    name, params = transport.calls[-1]
+    assert name == "bind_increment"
+    assert params == {"window_id": "W2",
+                      "identity": {"processName": "EDRClient.exe"},
+                      "native_id": "200", "run_token": "tok-9"}
+
+
+def test_mcp_facade_shim_effect_failures_refuse_like_step_context():
+    """An MCP refusal envelope (ok=False + code) must raise — the adapter's
+    fail-closed handling catches exceptions, not ok=False JSON, so the
+    shim keeps the same contract as step_context.  Business outcomes of
+    the effect diff (timeout/ambiguous: ok=False + outcome, no code) pass
+    through untouched — relabeling them would corrupt the evidence."""
+    responses = {
+        "begin_effect_baseline": json.dumps(
+            {"ok": False, "code": "window_binding_lease_refused"}),
+        "observe_effect_after_action": json.dumps(
+            {"ok": False, "code": "window_effect_baseline_unknown"}),
+        "bind_increment": json.dumps(
+            {"ok": False, "code": "window_binding_shared"}),
+    }
+    tools = MCPServerTools(_RecordingTransport(responses))
+    tools.run_token = "tok-9"
+    facade = tools._binding_facade_holder["facade"]
+    with pytest.raises(ValueError):
+        facade.begin_effect_baseline("W2", {"titleRegex": "^x$"})
+    with pytest.raises(ValueError):
+        facade.observe_effect_after_action(
+            "W2", "EB-x", effect={"kind": "appeared"})
+    with pytest.raises(ValueError):
+        facade.bind_increment("W2", {"titleRegex": "^x$"}, native_id="9")
+
+    responses["observe_effect_after_action"] = json.dumps(
+        {"ok": False, "outcome": "timeout", "appeared": []})
+    doc = facade.observe_effect_after_action(
+        "W2", "EB-1", effect={"kind": "appeared"})
+    assert doc == {"ok": False, "outcome": "timeout", "appeared": []}
+
+
 def test_in_process_carrier_forwards_module():
     """InProcessServerTools forwards attribute access to the server module —
     the same object the in-process tests pass today."""

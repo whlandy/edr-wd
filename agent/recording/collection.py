@@ -118,6 +118,12 @@ def collect_recording_artifacts(
     Returns ``(artifacts, capture_issues)``; callers keep assembling their own
     operator-facing payload.  Raises the same exception classes the CLI
     persisted-error path already handles (KeyError/OSError/ValueError).
+
+    ``result["resultStore"]`` — the target's persistence fact, present on the
+    direct stop-response channels (CLI ``record stop``, rerecord loop) but
+    not on the durable read-back channel the UI bridge uses — flows through
+    as the receipt's optional ``persistence`` key; when absent the key is
+    simply not written (a missing fact is never forged).
     """
     recording = RawRecording.from_dict(result["recording"])
     compilation = compile_recording(recording, profile=profile)
@@ -131,5 +137,6 @@ def collect_recording_artifacts(
         compilation,
         captures=captures,
         artifact_issues=capture_issues,
+        persistence=result.get("resultStore"),
     )
     return artifacts, capture_issues

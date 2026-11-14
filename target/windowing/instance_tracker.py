@@ -374,6 +374,17 @@ class RunInstanceTracker:
                 else:  # hide/show:同实例可见性转换,不换代际。
                     if existing is not None:
                         existing.last_seen_order = self._order
+                    elif kind == "show":
+                        # 菜单/子菜单 HWND 通常没有自己的 CREATE —
+                        # SHOW 事件是本 run 观测到该实例存在的原生证据
+                        # (与未知 native 的 create 同信任模型),不落事实
+                        # 会被绑定门以"未观测"拒绝(子菜单枚举缺口)。
+                        # HIDE 对未知实例仍无意义(无身份可保留),照旧忽略。
+                        fields = {k: event.get(k) for k in _IDENTITY_KEYS}
+                        self._facts[native] = InstanceFact(
+                            native_id=native, generation=1, identity=fields,
+                            identity_changed=None,
+                            last_seen_order=self._order)
         if snapshot is not None:
             for window in snapshot:
                 native = str(window.get("handle"))

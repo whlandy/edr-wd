@@ -34,6 +34,8 @@ import ctypes
 import queue
 import threading
 
+from ctypes import wintypes
+
 __all__ = ["WindowsEventHookSource", "LIFECYCLE_EVENT_IDS",
            "EVENT_OBJECT_CREATE", "EVENT_OBJECT_DESTROY",
            "EVENT_OBJECT_HIDE", "EVENT_OBJECT_SHOW",
@@ -357,9 +359,23 @@ class WindowsEventHookSource:
                 owner = self._user32().GetAncestor(hwnd, 3) or None  # GA_ROOTOWNER
             except Exception:
                 owner = None
+            try:
+                # 轮次 12:pid 在 hook 时点廉价捕获(与 owner edge 同信任
+                # 模型,无 UIA)— SHOW 建立的事实 identity 必须带 pid,
+                # 否则 bind_increment 的 bound_pid 记成 None,后续 reverify
+                # 进程比对恒失配。取不到如实缺省,不伪造。
+                pid = wintypes.DWORD()
+                self._user32().GetWindowThreadProcessId(
+                    hwnd, ctypes.pointer(pid))
+                pid_value = int(pid.value) if pid.value else None
+            except Exception:
+                pid_value = None
+        else:
+            pid_value = None
         self.on_win_event(event, native_id=str(hwnd or ""),
                           id_object=id_object, id_child=id_child,
-                          owner_handle=int(owner) if owner else None)
+                          owner_handle=int(owner) if owner else None,
+                          pid=pid_value)
 
     def _user32(self):
         import ctypes
@@ -371,7 +387,8 @@ class WindowsEventHookSource:
     def on_win_event(self, event_id: int, *, native_id: str,
                      id_object: int = OBJID_WINDOW,
                      id_child: int = 0,
-                     owner_handle: int | None = None) -> None:
+                     owner_handle: int | None = None,
+                     pid: int | None = None) -> None:
         """生命周期事件入口(hook 回调或测试注入)。过滤:仅顶层窗口
         对象(OBJID_WINDOW, idChild=0)进入实例事实 — 控件级
         (OBJID_CLIENT/child!=0)不映射为窗口生命周期。"""
@@ -386,6 +403,8 @@ class WindowsEventHookSource:
             event_row = {"kind": kind, "native_id": native_id}
             if owner_handle:
                 event_row["ownerHandle"] = owner_handle
+            if pid:
+                event_row["pid"] = pid
             self._queue.put_nowait(event_row)
         except queue.Full:
             # 有界队列:溢出 = 事件丢失事实(丢事件可检测性)。

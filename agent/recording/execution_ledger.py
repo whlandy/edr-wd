@@ -24,6 +24,7 @@ unknown 不推进不重试;预写失败(OSError)→ 0 副作用。不做
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import threading
@@ -34,6 +35,7 @@ from typing import Any, Mapping
 from target.windowing import attempt_ledger
 from target.windowing.effect_gate import evaluate_step_result
 from target.windowing.report_view import build_failure_trace
+from agent.execution import StepMaterializationError
 
 
 
@@ -258,7 +260,8 @@ class AttemptLedgerHook:
 
 __all__ = ["record_case_run", "record_case_run_live", "run_id_for",
            "build_run_report", "AttemptLedgerHook", "LedgeredDispatch",
-           "execute_v3_window_stage", "execute_v3_window_stage_real"]
+           "execute_v3_window_stage", "execute_v3_window_stage_real",
+           "new_run_id"]
 
 _run_sequence = threading.Lock()
 _run_counter = 0
@@ -278,6 +281,15 @@ def _next_run_id(case_id: str) -> str:
     旧 run 只读重建,不复用 binding。"""
     import uuid
     return "RUN-" + uuid.uuid4().hex
+
+
+#: 公开别名(轮次 30,§5 runs/ 面):CLI 单夹入口需在构造账本目录
+#: (runs/<runId>)前生成 run 实例 id——跨模块引私名无先例,以公开
+#: 别名一行委托,生成规则(高熵不透明 UUID4)单点不变。注意:账本
+#: 事件内 runId 由受控链取 server 真实 run_id(1129 一致性),与本
+#: 实例 id 是两个如实报告的面。
+def new_run_id() -> str:
+    return _next_run_id("v3-window-stage")
 
 
 def _receipt_dict(step) -> dict | None:
@@ -619,6 +631,11 @@ def build_run_report(history: list, *,
                     "bindingRevision"),
                 "observationRef": state_after_ref.get(
                     "observationRef"),
+                # B-1(轮次 8):窗口效果结果进报告本步 stateAfter
+                # (与账本 stateAfterRef 同份;有才投影,无 effects 步
+                # 零字段变更;旧字段只增不删不改名)。
+                **({"windowEffect": state_after_ref.get("windowEffect")}
+                   if state_after_ref.get("windowEffect") else {}),
             },
             "evidenceRefs": list(event.get("evidenceRefs") or []),
             "previous": previous_ref,
@@ -1166,10 +1183,11 @@ def _authoritative_step_state(server_tools, *, run_token: str,
     revision = context.get("bindingRevision")
     identity = observation_record.get("window_identity") or {}
     if identity.get("session_id") != server_run_id:
+        observed_id = observation_record.get('observation_id')
         raise ValueError(
-            f"{window_id} {phase}: observation {observation_record.get(
-                'observation_id')!r} does not belong to this run "
-            f"({server_run_id!r}); refusing foreign/old-run observation")
+            f"{window_id} {phase}: observation {observed_id!r} does not "
+            f"belong to this run ({server_run_id!r}); refusing "
+            "foreign/old-run observation")
     observation_id = observation_record.get("observation_id")
     return _strict_state_values(
         binding_revision=revision,
@@ -1456,7 +1474,9 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                                  transition_basis="declared_sequence",
                                  observation_ref_provider=None,
                                  lease_seconds=300,
-                                 run_id=None):
+                                 run_id=None,
+                                 visual_resolver=None,
+                                 replay_mode="semantic_only"):
     """**真实 target.server 适配器**(0959 复验切片;受控内部 v3 入口,
     公共门不打开)。
 
@@ -1479,6 +1499,12 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
        租约边界内 focus 后/dispatch 前重验(实例代际/归属/可见/
        前台),经统一 dispatcher 恰一次真实输入。
     finally ``end_product_run``(正常/异常均释放;真实清理结果透传)。
+
+    visual_resolver(可选,SafeVisualResolver):声明控件身份为空的
+    visual-only 动作步的图像解析面 — 复用 legacy 链同一 resolver 语义
+    (红框锁定窗口帧/模板 digest 校验/置信度门槛),解析成功派发真实
+    目录动作 pointer.click_window(A023)。为 None 时该类步 fail-closed
+    诚实拒绝(visual_only_unsupported)。
 
     run_token/binding_token 仅内存传递:不进入返回值、不进入报告、
     不持久账本(账本递归脱敏独立拒绝)。"""
@@ -1514,6 +1540,12 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
     begin_result = None
     run_token_holder = {"token": None}
     hook = None
+    # 回放模式(评审 P1-2):CLI --replay-mode 必须真正约束受控链。
+    # semantic_only 声明纯视觉点击 → 报错(legacy 链同语义);visual_only
+    # 拒绝语义候选回退;semantic_first 维持既有先语义后视觉次序。
+    if replay_mode not in {"semantic_only", "semantic_first", "visual_only"}:
+        raise ValueError(
+            f"replay_mode_invalid: unsupported replay mode {replay_mode!r}")
     # runId 一致性(1129):**以 server 真实 run_id 为账本 runId** —
     # binding/facade/step_context 的 runId 校验与账本事件天然一致,
     # 不以 stage 自建 ID 冒充已验证 server 上下文。
@@ -1599,6 +1631,9 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
         for mapping in sequence_steps:
             step_id = mapping["stepId"]
             window_id = mapping["windowId"]
+            # visual-only 派发载荷按步重置(跨步残留会让语义步重复
+            # 前一步的视觉坐标派发 — 见轮次 15 缺陷)。
+            _visual_dispatch = None
             declared = steps_declared.get(step_id)
             if latched:
                 steps_report.append({"stepId": step_id,
@@ -1663,9 +1698,17 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                 raise
             # 步骤1:绑定聚焦 + 权威锁 + 本窗口新观测(无业务动作)。
             # 观测在预写成功之后;失败可追溯(complete + 拒绝码)。
+            # visual-only 步(注入 resolver 时)同一次观测携带红框
+            # 锁定窗口帧(capture_image=True)— 帧是 SafeVisualResolver
+            # 的解析输入(§5 视觉面:一次权威观测同时承载控件投影与
+            # 图像证据,不二次聚焦)。
+            _step_visual = getattr(
+                getattr(steps_declared.get(step_id), "selector", None),
+                "visual", None) if visual_resolver is not None else None
             observation = json.loads(server.focus_bound_window(
                 window_id, binding_token, run_token,
-                action_id=None, observe=True))
+                action_id=None, observe=True,
+                capture_image=bool(_step_visual)))
             if not (observation or {}).get("ok", False):
                 hook.complete_after_step(
                     step_result=SimpleNamespace(
@@ -1794,6 +1837,135 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
             selector = getattr(declared, "selector", None)
             control_selector = getattr(selector, "control", None) or {}
             wanted_automation_id = control_selector.get("automationId")
+            # 诚实拒绝面(轮次 10)→ 视觉解析实装(轮次 15):动作步
+            # 声明控件身份为空 = visual-only(录制时仅图像定位)。注入
+            # resolver 时实装解析 — 复用 legacy SafeVisualResolver 语义
+            # (本步权威观测内的红框锁定窗口帧/模板 digest 校验/置信度
+            # 门槛),解析成功派发真实目录动作 pointer.click_window
+            # (A023);解析失败照 StepMaterializationError 码 fail-closed
+            # 锁存。无 resolver 时保持轮次 10 诚实拒绝,不静默回退语义
+            # 解析。assertion-only 步无动作派发,不在此门内。
+            if getattr(declared, "action_id", None) and \
+                    not control_selector:
+                _visual = getattr(selector, "visual", None)
+                _visual_dispatch = None
+                if _visual and replay_mode == "semantic_only":
+                    # semantic_only 声明纯视觉点击 → 报错,legacy 链同语义
+                    # (replay_selector_semantic_missing);不静默走视觉。
+                    hook.complete_after_step(
+                        step_result=SimpleNamespace(
+                            step_id=step_id, status=StepStatusValue.BLOCKED),
+                        receipt=None, expectation_results=[],
+                        window_id=window_id, error_payload={
+                            "code": "replay_selector_semantic_missing",
+                            "message": ("this click has only a visual "
+                                        "selector; choose semantic_first "
+                                        "or visual_only replay")})
+                    latched = True
+                    blocked_at = step_id
+                    steps_report.append({"stepId": step_id,
+                                         "outcome": "unknown",
+                                         "reason": "semantic_only but "
+                                                   "visual-only selector"})
+                    break
+                if visual_resolver is not None and _visual:
+                    _resolution = None
+                    _visual_code = "visual_resolution_failed"
+                    _visual_message = ""
+                    # legacy 链同形状投影(mcp_runtime.refresh 的
+                    # active_window/screenshot_bytes 面):
+                    # SafeVisualResolver 的窗口矩形门只认
+                    # active_window.rect,匹配器只认 screenshot_bytes —
+                    # v3 观测 bundle 自带 window_identity.rect 与
+                    # screenshot_b64,补该跳投影,不新增观测往返。
+                    _identity = observation.get("window_identity") or {}
+                    observation = {**observation, "active_window": {
+                        "process_name": _identity.get("process_name"),
+                        "title": _identity.get("title"),
+                        "rect": list(_identity.get("rect") or ())}}
+                    if observation.get("screenshot_b64") is not None:
+                        observation["screenshot_bytes"] = base64.b64decode(
+                            observation["screenshot_b64"])
+                    try:
+                        _resolution = visual_resolver.resolve(
+                            getattr(declared, "action_id"), selector,
+                            observation)
+                    except StepMaterializationError as _exc:
+                        _visual_code = getattr(_exc, "code",
+                                               _visual_code)
+                        _visual_message = str(_exc)
+                    except Exception as _exc:  # noqa: BLE001 — fail-closed
+                        _visual_message = f"{type(_exc).__name__}: {_exc}"
+                    if _resolution is None:
+                        hook.complete_after_step(
+                            step_result=SimpleNamespace(
+                                step_id=step_id,
+                                status=StepStatusValue.BLOCKED),
+                            receipt=None, expectation_results=[],
+                            window_id=window_id, error_payload={
+                                "code": _visual_code,
+                                "message": (_visual_message if
+                                            _visual_message else
+                                            f"visual-only resolution "
+                                            f"refused: {_visual_code}")})
+                        latched = True
+                        blocked_at = step_id
+                        steps_report.append({
+                            "stepId": step_id, "outcome": "unknown",
+                            "reason": "visual-only resolution refused",
+                            "code": _visual_code,
+                            "message": (_visual_message if
+                                        _visual_message else
+                                        f"visual-only resolution "
+                                        f"refused: {_visual_code}")})
+                        break
+                    # 解析成功:窗口相对坐标 + 模板相对点 → 真实 A023
+                    # 派发。绑定租约是本 run 的权威窗口身份 — 不再用
+                    # 模板自带 titleRegex 重解析窗口(防漂移重绑定);
+                    # 归属经 target_ref.expected_process_name(声明身份)
+                    # 交 dispatcher 既有 ownership 门。后续语义候选
+                    # 匹配/drag/scroll 分支被 _visual_dispatch 短路。
+                    _visual_dispatch = {
+                        "action_id": "pointer.click_window",
+                        "args": {"x": int(_resolution.args["x"]),
+                                 "y": int(_resolution.args["y"])},
+                        "target_ref": {
+                            "snapshot_id": observation_id,
+                            "target_id": None,
+                            "fingerprint": None,
+                            "expected_process_name":
+                                window_identities[window_id].get(
+                                    "processName"),
+                            "selector_hint": {
+                                "visual_template":
+                                    str(_visual.get("template"))}},
+                    }
+                else:
+                    hook.complete_after_step(
+                        step_result=SimpleNamespace(
+                            step_id=step_id, status=StepStatusValue.BLOCKED),
+                        receipt=None, expectation_results=[],
+                        window_id=window_id, error_payload={
+                            "code": "visual_only_unsupported",
+                            "message": ("step declares no control identity "
+                                        "(visual-only); visual replay "
+                                        "resolution is not wired into the "
+                                        "controlled v3 chain — use the "
+                                        "legacy replay_mode visual path or "
+                                        "re-record with control identity")})
+                    latched = True
+                    blocked_at = step_id
+                    steps_report.append({
+                        "stepId": step_id, "outcome": "unknown",
+                        "reason": "visual-only step unsupported",
+                        "code": "visual_only_unsupported",
+                        "message": ("step declares no control identity "
+                                    "(visual-only); visual replay "
+                                    "resolution is not wired into the "
+                                    "controlled v3 chain — use the legacy "
+                                    "replay_mode visual path or re-record "
+                                    "with control identity")})
+                    break
 
             def _matches(control) -> bool:
                 # 声明约束逐一比对;声明字段必须与观测投影一致。
@@ -1815,26 +1987,37 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                         return False
                 return bool(control_selector)
 
-            candidates = [control for control in projected_controls.values()
-                          if _matches(control)]
-            menu_click_args = None
-            if control_selector.get("structural") is not None:
-                # Same locator as ordinary golden replay. This projection is
-                # already scoped by the live binding/lease to this window;
-                # do not fall back to the recorded label or screen point.
-                from agent.locator import HybridLocator, LocatorRequest, LocatorError
-                from agent.locator.menu_layout import current_click_args
-                try:
-                    candidates = [c.source for c in HybridLocator().collect_candidates(
-                        LocatorRequest("gui.click", {}, control_selector),
-                        {"observation_id": observation_id,
-                         "controls": list(projected_controls.values())})]
-                    if len(candidates) == 1:
-                        menu_click_args = current_click_args(
-                            candidates[0], list(projected_controls.values()))
-                except (LocatorError, ValueError):
-                    candidates = []
-            if not candidates:
+            # visual-only 解析成功(轮次 15):目标物化由图像解析完成
+            # (_visual_dispatch)— 不走语义候选匹配(声明无控件身份,
+            # 候选恒空);动作参数/归属直接进既有统一 dispatcher 派发
+            # 面(效果基线/receipt/after-state 全链共用)。
+            if _visual_dispatch is not None:
+                target_control = {}
+                wanted_automation_id = None
+                action_id = _visual_dispatch["action_id"]
+                action_args = dict(_visual_dispatch["args"])
+                target_ref = dict(_visual_dispatch["target_ref"])
+            else:
+                candidates = [control for control in projected_controls.values()
+                              if _matches(control)]
+                menu_click_args = None
+                if control_selector.get("structural") is not None:
+                    # Same locator as ordinary golden replay. This projection is
+                    # already scoped by the live binding/lease to this window;
+                    # do not fall back to the recorded label or screen point.
+                    from agent.locator import HybridLocator, LocatorRequest, LocatorError
+                    from agent.locator.menu_layout import current_click_args
+                    try:
+                        candidates = [c.source for c in HybridLocator().collect_candidates(
+                            LocatorRequest("gui.click", {}, control_selector),
+                            {"observation_id": observation_id,
+                             "controls": list(projected_controls.values())})]
+                        if len(candidates) == 1:
+                            menu_click_args = current_click_args(
+                                candidates[0], list(projected_controls.values()))
+                    except (LocatorError, ValueError):
+                        candidates = []
+            if _visual_dispatch is None and not candidates:
                 hook.complete_after_step(
                     step_result=SimpleNamespace(
                         step_id=step_id, status=StepStatusValue.BLOCKED),
@@ -1851,7 +2034,7 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                                      "outcome": "unknown",
                                      "reason": "target not in observation"})
                 break
-            if len(candidates) > 1:
+            if _visual_dispatch is None and len(candidates) > 1:
                 hook.complete_after_step(
                     step_result=SimpleNamespace(
                         step_id=step_id, status=StepStatusValue.BLOCKED),
@@ -1869,15 +2052,16 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                                      "outcome": "unknown",
                                      "reason": "target ambiguous"})
                 break
-            target_control = candidates[0]
-            target_ref = {
-                "snapshot_id": observation_id,
-                "target_id": target_control.get("target_id"),
-                "fingerprint": target_control.get("fingerprint"),
-                "expected_process_name":
-                    window_identities[window_id].get("processName"),
-                "selector_hint": {"automation_id": wanted_automation_id},
-            }
+            if _visual_dispatch is None:
+                target_control = candidates[0]
+                target_ref = {
+                    "snapshot_id": observation_id,
+                    "target_id": target_control.get("target_id"),
+                    "fingerprint": target_control.get("fingerprint"),
+                    "expected_process_name":
+                        window_identities[window_id].get("processName"),
+                    "selector_hint": {"automation_id": wanted_automation_id},
+                }
             # 声明动作语义:action_id 为 None 的步是 assertion-only 步
             # (仅求值声明 verifier,无 GUI 动作)。
             declared_action_id = getattr(declared, "action_id", None)
@@ -1951,44 +2135,47 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                     blocked_at = step_id
                     break
                 continue
-            action_id = declared_action_id
-            action_args = dict(getattr(declared, "args", None) or {})
-            if menu_click_args is not None:
-                for key in ("automation_id", "text", "control_id", "class_name",
-                            "parent_text", "auto_id_contains", "auto_id_suffix", "parent_of"):
-                    action_args.pop(key, None)
-                action_args.update(menu_click_args)
-            action_args.setdefault("expected_process_name",
-                                   window_identities[window_id].get(
-                                       "processName"))
-            # 声明控件身份进真实点击(1316"实际动作参数"复核;gui.click
-            # 的 automation_id 参数)— target_ref/selector_hint 同时
-            # 仍经 dispatcher 既有校验;缺省 automationId 的声明保持
-            # 无控件参数(不伪造控件身份)。
-            if wanted_automation_id:
-                action_args.setdefault("automation_id",
-                                       wanted_automation_id)
-            elif not control_selector.get("structural"):
-                # Weak identity (no automationId): the backend click needs
-                # the resolved control's own identity. Materialize
-                # control_type/text from the RESOLVED projection (the same
-                # observation the target_ref fingerprint pins) — never from
-                # the recorded label alone; the recorded selector already
-                # matched this projection uniquely.
-                resolved_text = target_control.get("text")
-                if resolved_text:
-                    # Text only: the backend's title/text filter resolves the
-                    # deep menu item; pairing control_type here makes the
-                    # strict child_window path miss it (replay round r3:
-                    # text+MenuItem → Control not found, text alone → found).
-                    action_args.setdefault("text", resolved_text)
+            # visual-only 已物化(_visual_dispatch):动作参数/目标
+            # 上面已定 — 跳过声明参数重组与 drag/scroll 专属分支,
+            # 直达统一派发面。
+            if _visual_dispatch is None:
+                action_id = declared_action_id
+                action_args = dict(getattr(declared, "args", None) or {})
+                if menu_click_args is not None:
+                    for key in ("automation_id", "text", "control_id", "class_name",
+                                "parent_text", "auto_id_contains", "auto_id_suffix", "parent_of"):
+                        action_args.pop(key, None)
+                    action_args.update(menu_click_args)
+                action_args.setdefault("expected_process_name",
+                                       window_identities[window_id].get(
+                                           "processName"))
+                # 声明控件身份进真实点击(1316"实际动作参数"复核;gui.click
+                # 的 automation_id 参数)— target_ref/selector_hint 同时
+                # 仍经 dispatcher 既有校验;缺省 automationId 的声明保持
+                # 无控件参数(不伪造控件身份)。
+                if wanted_automation_id:
+                    action_args.setdefault("automation_id",
+                                           wanted_automation_id)
+                elif not control_selector.get("structural"):
+                    # Weak identity (no automationId): the backend click needs
+                    # the resolved control's own identity. Materialize
+                    # control_type/text from the RESOLVED projection (the same
+                    # observation the target_ref fingerprint pins) — never from
+                    # the recorded label alone; the recorded selector already
+                    # matched this projection uniquely.
+                    resolved_text = target_control.get("text")
+                    if resolved_text:
+                        # Text only: the backend's title/text filter resolves the
+                        # deep menu item; pairing control_type here makes the
+                        # strict child_window path miss it (replay round r3:
+                        # text+MenuItem → Control not found, text alone → found).
+                        action_args.setdefault("text", resolved_text)
             # B-4(09§7.2/10 R1):drag 双端语义解析 — selector 与
             # endSelector 在**本次观测**下经既有解析器唯一解析
             # (HybridLocator/resolve_replay_selector;不用录制
             # screen XY 直接回放;模糊端点 0 越权输入拒绝)。
             if action_id == "pointer.drag":
-                from agent.recording.replay import (
-                    resolve_replay_selector, StepMaterializationError)
+                from agent.recording.replay import resolve_replay_selector
                 end_selector = getattr(declared, "end_selector", None)
                 if end_selector is None or not \
                         getattr(end_selector, "control", None):
@@ -2079,9 +2266,8 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                 recorded_y = action_args.get("y")
                 if recorded_x is not None or recorded_y is not None:
                     try:
-                        from agent.recording.replay import (
-                            resolve_replay_selector,
-                            StepMaterializationError)
+                        from agent.recording.replay import \
+                            resolve_replay_selector
                         controls_list = list(projected_controls.values())
                         scroll_resolution = resolve_replay_selector(
                             selector, {"controls": controls_list,
@@ -2291,10 +2477,14 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                                         f"{json.dumps(effect_results, ensure_ascii=False)}")})
                     latched = True
                     blocked_at = step_id
+                    # B-1(轮次 9):ambiguous/拒绝锁存条目效果键名与
+                    # pass/LOST 路径统一(windowEffect);`effects` 保留
+                    # 同份 — 消费方不按 outcome 分支取键。
                     steps_report.append({
                         "stepId": step_id, "outcome": "unknown",
                         "reason": "window effect not satisfied",
-                        "effects": effect_results})
+                        "effects": effect_results,
+                        "windowEffect": effect_results})
                     break
                 # appeared 唯一增量 → 延迟绑定(B-2;origin 策略:
                 # observed_during_flow 的 W 在对应动作后以唯一有效
@@ -2539,7 +2729,11 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                     "bindingRevision": "lost",
                     "observationRef": observation_ref_after,
                     "assertionResultRefs": assertion_refs,
-                    "targetId": target_ref.get("target_id")})
+                    "targetId": target_ref.get("target_id"),
+                    # B-1(轮次 8):LOST 步效果结果同样进步骤摘要
+                    # (absent 常经此路径成立;与账本同份,有才投影)。
+                    **({"windowEffect": effect_results}
+                       if declared_effects else {})})
                 if outcome != "pass":
                     latched = True
                     blocked_at = step_id
@@ -2702,7 +2896,12 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                 "bindingRevision": after_binding_revision,
                 "observationRef": after_observation_ref,
                 "assertionResultRefs": assertion_refs,
-                "targetId": target_ref.get("target_id")})
+                "targetId": target_ref.get("target_id"),
+                # B-1(轮次 8):效果结果进受控链步骤摘要(CLI replay
+                # output steps 本体;与账本 stateAfterRef.windowEffect
+                # 同份;有才投影,无 effects 步零字段变化)。
+                **({"windowEffect": effect_results}
+                   if declared_effects else {})})
             if outcome != "pass":
                 latched = True
                 blocked_at = step_id
@@ -2871,9 +3070,8 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                             continue
                         projected_cleanup = locked_obs.get("controls") or {}
                         wanted = cleanup_control.get("automationId")
-                        from agent.recording.replay import (
-                            resolve_replay_selector,
-                            StepMaterializationError)
+                        from agent.recording.replay import \
+                            resolve_replay_selector
                         try:
                             cleanup_resolution = resolve_replay_selector(
                                 cleanup_selector,
