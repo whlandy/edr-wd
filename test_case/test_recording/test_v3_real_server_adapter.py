@@ -2161,6 +2161,46 @@ def test_effects_appeared_and_absent_true_chain(monkeypatch, tmp_path):
         "效果结果必须进入 attempt 链(可重建)")
 
 
+def test_report_steps_project_window_effect_same_as_ledger(
+        monkeypatch, tmp_path):
+    """B 阶段片(轮次 8):受控链 report.steps[].stateAfter.windowEffect
+    与账本 stateAfterRef.windowEffect 同份(kind/outcome/satisfied 逐键)
+    — 效果评估结果进报告投影,不再只埋账本;无 effects 步零字段变更。"""
+    import target.server as server
+    from agent.recording.execution_ledger import execute_v3_window_stage_real
+    from target.windowing.attempt_ledger import AttemptLedger
+    golden = _compile_effect_golden()
+    backend = _fake_backend_for("a_b_a")
+    _install_fake_os(monkeypatch, backend)
+    result = execute_v3_window_stage_real(
+        golden=golden, ledger=AttemptLedger(tmp_path / "h"),
+        server_tools=server,
+        window_role_map=_A_B_A_ROLE_MAP)
+    assert result["latched"] is False, result["steps"]
+    events = AttemptLedger(tmp_path / "h").rebuild_history(
+        run_id=result["runId"])
+    report_steps = result["report"]["steps"]
+    assert len(report_steps) == len(events) == 3
+    effect_pairs = [
+        (event, entry) for event, entry in zip(events, report_steps)
+        if (event.get("stateAfterRef") or {}).get("windowEffect")]
+    assert effect_pairs, "前置:效果链必须至少一步带 windowEffect"
+    for event, entry in effect_pairs:
+        ledger_effect = event["stateAfterRef"]["windowEffect"]
+        projected = (entry.get("stateAfter") or {}).get("windowEffect")
+        assert projected == ledger_effect, (projected, ledger_effect)
+        for ledger_item, proj_item in zip(ledger_effect, projected):
+            for key in ("kind", "outcome", "satisfied"):
+                assert proj_item[key] == ledger_item[key], key
+    # 无 effects 步:stateAfter 不携带 windowEffect 字段(零字段变更)。
+    no_effect_entries = [
+        entry for event, entry in zip(events, report_steps)
+        if not (event.get("stateAfterRef") or {}).get("windowEffect")]
+    assert no_effect_entries, "前置:链中应存在无 effects 步"
+    for entry in no_effect_entries:
+        assert "windowEffect" not in (entry.get("stateAfter") or {}), entry
+
+
 def test_effects_multiple_increment_refused(monkeypatch, tmp_path):
     """双增量拒绝:appeared 求值时两个新候选 → ambiguous → unknown
     锁存(不挑第一项)。"""
@@ -2198,6 +2238,22 @@ def test_effects_multiple_increment_refused(monkeypatch, tmp_path):
         "declared_window_effect_not_satisfied"
     blob = json.dumps(result["steps"], default=str)
     assert "ambiguous" in blob, blob
+    # B 阶段片(轮次 9):ambiguous 锁存条目效果键名与 pass/LOST 路径
+    # 统一 — 消费方不按 outcome 分支取键;同份共存,`effects` 保留。
+    latched_entries = [s for s in result["steps"]
+                       if s.get("outcome") == "unknown"]
+    assert len(latched_entries) == 1, result["steps"]
+    entry = latched_entries[0]
+    assert entry.get("effects") == entry.get("windowEffect"), entry
+    assert entry["windowEffect"], "锁存步应携带效果结果明细"
+    # B 阶段片(轮次 9):failedStep 投影(report.failedStep = _entry
+    # 产物;cli.py _cmd_replay_v3 原样透传)在失败步如实呈现
+    # windowEffect — 消费方无需进账本即可见拒绝明细。
+    failed_step = result["report"]["failedStep"]
+    assert failed_step and failed_step.get("stepId") == entry["stepId"], (
+        failed_step)
+    assert ((failed_step.get("stateAfter") or {}).get("windowEffect")
+            == entry["windowEffect"]), failed_step
 
 
 def test_effects_partial_failure_blocks(monkeypatch, tmp_path):
@@ -2231,6 +2287,200 @@ def test_effects_partial_failure_blocks(monkeypatch, tmp_path):
     assert events[1]["outcome"] in ("fail", "unknown")
     assert [e["outcome"] for e in events][2:] == [], (
         "效果未全部满足 → 第三步 0 输入")
+    # B 阶段片(轮次 9):锁存条目效果键名统一(与轮次 8 pass/LOST
+    # 投影对称);`effects` 保留,`windowEffect` 同份。
+    latched_entries = [s for s in result["steps"]
+                       if s.get("outcome") != "pass"]
+    assert len(latched_entries) == 1, result["steps"]
+    entry = latched_entries[0]
+    assert entry.get("effects") == entry.get("windowEffect"), entry
+    # 锁存步是 step-0002(absent 失败);其效果明细只含本步效果。
+    assert [e["kind"] for e in entry["windowEffect"]] == ["absent"], entry
+
+
+def test_visual_only_step_honestly_refused_not_target_not_in_observation(
+        monkeypatch, tmp_path):
+    """B 阶段片(轮次 10):v3 受控链对 visual-only 步(声明
+    selector.control 为空 — 录制时仅图像定位、无控件身份)诚实拒绝:
+    专门拒绝码 visual_only_unsupported + message 指向 legacy
+    replay_mode 视觉能力未接入受控链,不冒充 target_not_in_observation
+    (误导诊断);GUI 前 fail-closed 锁存,0 业务输入。legacy 链的
+    semantic/visual 双模(replay.py semantic_first/visual_only)未接入
+    受控链 — 不实装视觉解析(更大片)。"""
+    import dataclasses
+    import target.server as server
+    from agent.recording.execution_ledger import execute_v3_window_stage_real
+    from target.windowing.attempt_ledger import AttemptLedger
+    from agent.recording.models import GoldenTrace
+    golden = _compile_effect_golden()
+    # 最短反例:step-0001 声明控件身份置空(visual-only)。
+    first = dataclasses.replace(
+        golden.steps[0],
+        selector=dataclasses.replace(golden.steps[0].selector, control={}))
+    golden = GoldenTrace.from_dict(dataclasses.replace(
+        golden, steps=(first, *golden.steps[1:])).to_dict())
+    backend = _fake_backend_for("a_b_a")
+    _install_fake_os(monkeypatch, backend)
+    result = execute_v3_window_stage_real(
+        golden=golden, ledger=AttemptLedger(tmp_path / "h"),
+        server_tools=server,
+        window_role_map=_A_B_A_ROLE_MAP)
+    assert result["latched"] is True
+    assert result["dispatchInputs"] == 0, (
+        "visual-only 步声明无控件身份 → GUI 前 0 业务输入")
+    events = AttemptLedger(tmp_path / "h").rebuild_history(
+        run_id=result["runId"])
+    assert events[0]["stateAfterRef"].get("rejectionCode") == \
+        "visual_only_unsupported", events[0]["stateAfterRef"]
+    # 步骤摘要条目携带诚实拒绝码(消费方可诊断,不再冒充
+    # target_not_in_observation);message 指向视觉语义未接入。
+    assert result["steps"][0]["code"] == "visual_only_unsupported", \
+        result["steps"][0]
+    assert "visual" in result["steps"][0].get("message", ""), \
+        result["steps"][0]
+
+
+def test_visual_only_step_resolves_and_dispatches_click_window(monkeypatch,
+                                                              tmp_path):
+    """B 阶段片(轮次 15):受控链对 visual-only 步(声明
+    selector.control 为空、visual 模板齐备)在注入 visual_resolver 时
+    **实装图像解析** — 复用 legacy SafeVisualResolver 语义(模板
+    digest 校验/红框锁定窗口截图/置信度门槛),解析结果派发真实
+    目录动作 pointer.click_window(A023,窗口相对坐标),不是诚实拒绝
+    的终态。GUI 前失败面照旧 fail-closed(模板缺失/低置信度 →
+    StepMaterializationError 码锁存)。无 resolver 时轮次 10 的诚实
+    拒绝语义不变(既有用例钉死)。"""
+    import base64
+    import dataclasses
+    import hashlib
+    import io
+    import target.server as server
+    from PIL import Image, ImageDraw
+    from agent.recording.execution_ledger import execute_v3_window_stage_real
+    from agent.recording.runtime import build_visual_resolver
+    from target.windowing.attempt_ledger import AttemptLedger
+    from agent.recording.models import GoldenTrace
+    golden = _compile_effect_golden()
+    # 最短正例:step-0001 声明控件身份置空 + visual 模板(真实 PNG,
+    # digest 对齐 build_visual_resolver 的 asset_root 校验)。
+    # 唯一匹配构造:噪声模板(红底 + 白色十字)贴在灰底帧的 (0,0),
+    # 全帧唯一起过置信度门槛的区域 — 灰底与模板零重合,不存在
+    # "处处 1.0 → margin 0" 的歧义面(resolver 的 min_margin 门对
+    # 单色帧诚实拒绝,正例必须给唯一匹配)。
+    template = Image.new("RGB", (60, 40), (200, 30, 30))
+    tdraw = ImageDraw.Draw(template)
+    tdraw.line([(30, 5), (30, 35)], fill=(255, 255, 255), width=3)
+    tdraw.line([(10, 20), (50, 20)], fill=(255, 255, 255), width=3)
+    buf = io.BytesIO()
+    template.save(buf, format="PNG")
+    template_bytes = buf.getvalue()
+    (tmp_path / "apply.png").write_bytes(template_bytes)
+    visual = {
+        "template": "apply.png",
+        "elementSha256": "sha256:" +
+            hashlib.sha256(template_bytes).hexdigest(),
+        "redacted": True,
+        "relativePoint": [0.5, 0.5],
+    }
+    first = dataclasses.replace(
+        golden.steps[0],
+        selector=dataclasses.replace(golden.steps[0].selector, control={},
+                                     visual=visual))
+    golden = GoldenTrace.from_dict(dataclasses.replace(
+        golden, steps=(first, *golden.steps[1:])).to_dict())
+    backend = _fake_backend_for("a_b_a")
+    # fake OS 层补红框截图能力:800x600 灰底帧,模板图案贴 (0,0)
+    # (与锁定窗口矩形 0,0-800x600 origin 偏差 ≤32),capture_scope=
+    # window、原点合法 — observation 的 capture_redacted_frame 契约
+    # 全走真实代码。模板像素逐点复制(非 resize),scale=1.0 精确。
+    frame = Image.new("RGB", (800, 600), (90, 90, 90))
+    frame.paste(template, (0, 0))
+    fbuf = io.BytesIO()
+    frame.save(fbuf, format="PNG")
+    frame_bytes = fbuf.getvalue()
+
+    def screenshot(_path=None):
+        return {"ok": True, "capture_scope": "window",
+                "image_b64": base64.b64encode(frame_bytes).decode("ascii"),
+                "origin": [0, 0]}
+
+    backend.screenshot = screenshot
+    backend.recorder_ui_rectangles = lambda: []
+    backend.protected_rectangles = lambda: []
+
+    def click_window_at(x, y, window_title_re=None):
+        backend.dispatch_calls.append({
+            "method": "click_window_at", "x": int(x), "y": int(y),
+            "window_title_re": window_title_re})
+        # 视觉点击的录制语义与 btnApply 语义点击一致(点击主窗口按钮
+        # → Log Center 出现):效果接线挂到 A023 的 OS 工具上,否则
+        # step-0001 的 appeared 效果门 timeout。
+        backend._windows["200"]["visible"] = True
+        return {"ok": True, "method": "mouse.click",
+                "window_relative": {"x": int(x), "y": int(y)}}
+
+    backend.click_window_at = click_window_at
+    _install_fake_os(monkeypatch, backend)
+    result = execute_v3_window_stage_real(
+        golden=golden, ledger=AttemptLedger(tmp_path / "h"),
+        server_tools=server,
+        window_role_map=_A_B_A_ROLE_MAP,
+        visual_resolver=build_visual_resolver(tmp_path),
+        # 评审 P1-2:视觉解析仅 semantic_first 显式启用(默认 semantic_only
+        # 现拒绝纯视觉点击)。
+        replay_mode="semantic_first")
+    assert result["latched"] is False, result["steps"]
+    assert result["steps"][0]["outcome"] == "pass", result["steps"]
+    # 三步全链(visual step-0001 + 语义 step-0002/0003)每步恰一次
+    # 派发;A023 只由 visual 步产生 — 语义步走 gui.click。
+    assert result["dispatchInputs"] == 3, result["steps"]
+    assert [e["outcome"] for e in result["steps"]] == \
+        ["pass", "pass", "pass"], result["steps"]
+    # 实际动作:统一 dispatcher 收到的是 pointer.click_window(A023),
+    # 经 click_window_at 到 OS 层;窗口相对坐标落模板中心(
+    # 相对点 [0.5, 0.5] × 模板 60x40 → 30,20),不是录制 screen XY。
+    # 恰一次 A023(visual 步);其余派发是语义步的 gui.click。
+    click_calls = [c for c in backend.dispatch_calls
+                   if c["method"] == "click_window_at"]
+    assert len(click_calls) == 1, backend.dispatch_calls
+    click = click_calls[0]
+    ledger = AttemptLedger(tmp_path / "h")
+    events = ledger.rebuild_history(run_id=result["runId"])
+    assert events[0]["receiptPayload"].get("action_id") == \
+        "pointer.click_window", events[0]["receiptPayload"]
+    assert [e["receiptPayload"].get("action_id") for e in events[1:]] == \
+        ["gui.click", "gui.click"], \
+        [e["receiptPayload"] for e in events[1:]]
+    assert click["x"] == 30 and click["y"] == 20, click
+
+
+def test_visual_only_step_without_resolver_still_refused(monkeypatch,
+                                                         tmp_path):
+    """轮次 15 的负面对照:未注入 visual_resolver 的受控链对
+    visual-only 步保持轮次 10 的诚实拒绝(visual_only_unsupported,
+    GUI 前 0 输入)— 实装只在 resolver 显式提供时打开,不静默回退
+    语义解析。"""
+    import dataclasses
+    import target.server as server
+    from agent.recording.execution_ledger import execute_v3_window_stage_real
+    from target.windowing.attempt_ledger import AttemptLedger
+    from agent.recording.models import GoldenTrace
+    golden = _compile_effect_golden()
+    first = dataclasses.replace(
+        golden.steps[0],
+        selector=dataclasses.replace(golden.steps[0].selector, control={}))
+    golden = GoldenTrace.from_dict(dataclasses.replace(
+        golden, steps=(first, *golden.steps[1:])).to_dict())
+    backend = _fake_backend_for("a_b_a")
+    _install_fake_os(monkeypatch, backend)
+    result = execute_v3_window_stage_real(
+        golden=golden, ledger=AttemptLedger(tmp_path / "h"),
+        server_tools=server,
+        window_role_map=_A_B_A_ROLE_MAP)
+    assert result["latched"] is True
+    assert result["dispatchInputs"] == 0
+    assert result["steps"][0]["code"] == "visual_only_unsupported", \
+        result["steps"][0]
 
 
 def test_window_effect_pass_business_fail_still_blocks(monkeypatch,

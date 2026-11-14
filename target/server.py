@@ -2810,6 +2810,63 @@ def reverify_bound_window(window_id: str, binding_token: str,
     return json.dumps(result, ensure_ascii=False)
 
 
+@mcp.tool(name="begin_effect_baseline", description="Record the pre-action candidate baseline for a declared window effect inside the active run lease (§7.3: enumeration only — no focus, no activation). Returns an opaque baseline token that lives in this run's facade memory; the diff later reads it back through observe_effect_after_action.")
+@_serialized_product_gui
+def begin_effect_baseline(window_id: str, identity: dict, run_token: str,
+                          binding_token: str | None = None) -> str:
+    try:
+        facade = _binding_facade_for_run(run_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    try:
+        result = facade.begin_effect_baseline(
+            window_id, identity, binding_token=binding_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="observe_effect_after_action", description="Read-only post-action diff against a recorded baseline token (§7.3): exactly-one-new-candidate → appeared reference, same-instance re-show → same_instance_shown, all-bound-gone → absent; zero/many → timeout/ambiguous. Single sample — the caller drives bounded polling.")
+@_serialized_product_gui
+def observe_effect_after_action(window_id: str, baseline_token: str,
+                                run_token: str, effect: dict,
+                                binding_token: str | None = None) -> str:
+    try:
+        facade = _binding_facade_for_run(run_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    try:
+        result = facade.observe_effect_after_action(
+            window_id, baseline_token, effect=effect,
+            binding_token=binding_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
+
+
+@mcp.tool(name="bind_increment", description="Bind the specific native instance the effect diff observed as this run's unique appeared increment (§7.3): the caller passes the diff's native_id; strong-instance evidence is still validated through the run's instance tracker inside the lease.")
+@_serialized_product_gui
+def bind_increment(window_id: str, identity: dict, run_token: str,
+                   native_id: str) -> str:
+    try:
+        facade = _binding_facade_for_run(run_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    try:
+        result = facade.bind_increment(window_id, identity,
+                                       native_id=native_id,
+                                       run_token=run_token)
+    except _WindowBindingRefusal as exc:
+        return json.dumps({"ok": False, "code": exc.code, "error": str(exc)},
+                          ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
+
+
 @mcp.tool(name="focus_bound_window", description="Focus, authoritative-lock and re-verify a bound window in the same lease boundary; a refused verification executes zero actions. With action_id set, dispatches through the unified dispatcher's existing gates (target_ref passed through). With observe=true and no action_id, performs the lock + a fresh observation of THIS window and returns the projected controls for building target_ref values; no action executes.")
 @_serialized_product_gui
 def focus_bound_window(window_id: str, binding_token: str, run_token: str,
@@ -2817,7 +2874,8 @@ def focus_bound_window(window_id: str, binding_token: str, run_token: str,
                        action_args: dict | None = None,
                        request_id: str | None = None,
                        target_ref: dict | None = None,
-                       observe: bool = False, read_only: bool = False) -> str:
+                       observe: bool = False, read_only: bool = False,
+                       capture_image: bool = False) -> str:
     try:
         facade = _binding_facade_for_run(run_token)
     except _WindowBindingRefusal as exc:
@@ -2858,7 +2916,11 @@ def focus_bound_window(window_id: str, binding_token: str, run_token: str,
             # These are PRE-DISPATCH preparation failures: they must report
             # executed=false (review 1908: focus/observation side effects
             # are not a dispatched business action).
-            observation = json.loads(observe_window_bundle(run_token))
+            # 步骤1 权威观测:同一锁内取控件投影 + 可选红框锁定窗口帧
+            # (capture_image — visual-only 步的图像解析证据;帧只进
+            # 观测结果,不落盘不进持久证据)。
+            observation = json.loads(observe_window_bundle(
+                run_token, capture_image=capture_image))
             if not observation.get("ok"):
                 raise _WindowBindingRefusal(
                     "observation_stale",
@@ -2889,7 +2951,8 @@ def focus_bound_window(window_id: str, binding_token: str, run_token: str,
 
         def _observe_only() -> str:
             observed_flag.append(True)
-            observed.update(json.loads(observe_window_bundle(run_token)))
+            observed.update(json.loads(observe_window_bundle(
+                run_token, capture_image=capture_image)))
             return json.dumps({"ok": observed.get("ok") is True})
 
         try:

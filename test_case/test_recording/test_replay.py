@@ -858,8 +858,19 @@ def test_replay_missing_secret_blocks_without_dispatch_or_plaintext(monkeypatch)
 
 
 class _MCPAgent:
+    """Test double for the agent-side MCP session.
+
+    Legacy replay tools are canned; the controlled-chain v3 tools
+    (`_V3_SERVER_TOOLS`) forward to the REAL `target.server` module — the
+    fake OS layer installed by `_v3_cli_env` replaces only OS facts, the
+    server lease/binding/dispatcher chain stays authentic.  Tests that
+    never install the fake OS must not hit the v3 tools (they route away
+    from them), so the forwarding is gated on `_v3_server_tools_enabled`.
+    """
+
     def __init__(self):
         self.calls = []
+        self.v3_server_tools = False
 
     def ensure_ready(self):
         return {"ok": True}
@@ -867,6 +878,9 @@ class _MCPAgent:
     def call_tool(self, name, arguments, timeout=None):
         self.calls.append((name, arguments))
         if name == "recording_status":
+            if self.v3_server_tools:
+                from target import server as _server
+                return __import__("json").loads(_server.recording_status(**arguments))
             return {"ok": False, "code": "recording_session_missing"}
         if name in {"connect", "lock_window", "verify_window_lock"}:
             return {"ok": True}
@@ -887,7 +901,22 @@ class _MCPAgent:
                 action_id=args["action_id"], action_code=args["action_code"],
                 request_id=args["request_id"], result={"ok": True},
             ).to_dict()
+        if self.v3_server_tools and name in _V3_SERVER_TOOLS:
+            # Controlled-chain tools go to the REAL server module (the fake
+            # OS layer is already installed by _v3_cli_env); no mocked logic.
+            from target import server as _server
+            tool = getattr(_server, name)
+            return __import__("json").loads(tool(**arguments))
         raise AssertionError(name)
+
+
+_V3_SERVER_TOOLS = frozenset({
+    "begin_product_run", "register_window_declaration", "bind_entry_window",
+    "focus_bound_window", "execute_action", "end_product_run",
+    "observe_product_windows", "reverify_bound_window",
+    "begin_effect_baseline", "observe_effect_after_action",
+    "bind_increment",
+})
 
 
 def test_mcp_runtime_builds_observation_local_ids_and_dispatches_unified_action():
@@ -1153,6 +1182,521 @@ def test_replay_cli_blocks_an_active_capture_before_connecting(monkeypatch, tmp_
 
     assert output["code"] == "recording_session_active"
     assert agent.calls == [("recording_status", {"heartbeat": False})]
+
+
+def _compile_v3_golden_same_window(tmp_path):
+    """真实 compiler ready v3 产物(连续同窗两步、无 effects/verifiers)
+    → 写盘 JSON → round-trip 回 GoldenTrace(同 CLI load_golden_trace)。"""
+    import dataclasses
+    import runpy
+
+    ns = runpy.run_path("test_case/test_recording/test_golden_v3_window_sequence.py")
+    from agent.recording.compiler import compile_recording
+
+    raw = ns["_with_timeline"](ns["_recording"]([
+        ns["_click"](1, 100, "CAUSE-1", 100, instance_id="RI-0001",
+                     automation_id="btnApply", snapshot_id="CS-0001"),
+        ns["_click"](2, 300, "CAUSE-2", 100, instance_id="RI-0001",
+                     automation_id="btnApply", snapshot_id="CS-0001"),
+    ], windows=[dict(ns["_MAIN"])], snapshots=(
+        ns["_snap"]("CS-0001", 50, 100, "EdrMainWindow",
+                    [{"automationId": "EdrMainWindow",
+                      "controlType": "Window"}]),
+    )), instances=("RI-0001",))
+    result = compile_recording(raw, profile="windows_hisec")
+    assert result.golden.status == "ready", result.golden.status
+    golden = dataclasses.replace(result.golden, steps=tuple(
+        dataclasses.replace(s, verifiers=()) for s in result.golden.steps))
+    path = tmp_path / "golden-v3.json"
+    path.write_text(canonical_json(golden.to_dict()), encoding="utf-8")
+    return path
+
+
+def _v3_cli_env(monkeypatch, tmp_path, agent):
+    """CLI replay 的目标/配置/虚假 OS 层(仅 OS 事实替身;server 链真实)。"""
+    from types import SimpleNamespace
+
+    import target.server as server
+    from target import product_policy
+    from target.action_dispatcher import set_backend_resolver
+    from test_case.test_recording.test_v3_real_server_adapter import _FakeOSBackend
+
+    product_policy.reset_for_tests()
+    server._binding_facade_holder["facade"] = None
+    backend = _FakeOSBackend({
+        "100": {"process_id": 42, "title": "logo1",
+                "root_control_id": "EdrMainWindow",
+                "visible": True, "foreground": True,
+                "extra_controls": [
+                    {"automation_id": "btnApply", "text": "Apply"}]},
+    })
+    monkeypatch.setattr(
+        server, "_backend",
+        product_policy.GuardedBackend(backend, "windows_pywinauto"))
+    monkeypatch.setattr(server, "_backend_kind", "windows_pywinauto")
+    monkeypatch.setattr(
+        server, "_recording_service",
+        SimpleNamespace(status=lambda **kw: {"state": "idle"}))
+    set_backend_resolver(lambda: server._backend)
+
+    class _TargetConfig:
+        def __init__(self, _path=None):
+            pass
+
+        def get_target_app_profile(self, name):
+            assert name == "win-dev"
+            return "windows_hisec"
+
+    monkeypatch.setattr(cli, "_target_agent", lambda *_args: agent)
+    monkeypatch.setattr(cli, "TargetConfig", _TargetConfig)
+    agent.v3_server_tools = True
+    return backend
+
+
+def test_replay_cli_routes_v3_golden_to_controlled_chain(monkeypatch, tmp_path, capsys):
+    """B 阶段片(设计 §6 步骤2):golden 带 windowSequence 时 CLI replay
+    路由到 execute_v3_window_stage_real 受控链;v1 路径不回退。
+
+    链路真实性:server 工具链全真实(begin/声明/绑定/聚焦/派发/end),
+    仅 OS 事实层是替身;role map 经 derive_role_map 从 golden 身份 +
+    已装产品角色推导(不硬编码)。断言受控链报告形状(受控字段)与
+    每步恰一次真实派发,不沿用 v1 的 evaluation/case_result 投影。"""
+    import json as _json
+    from unittest.mock import patch as _patch
+
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    path = _compile_v3_golden_same_window(tmp_path)
+    trace_root = tmp_path / "traces"
+
+    # 入口替换但链路原样受控:精确钉住 CLI → execute_v3_window_stage_real
+    # (经 v3_transport 载体),受控链内部零 mock。
+    from agent.recording import execution_ledger
+    real_adapter = execution_ledger.execute_v3_window_stage_real
+    adapter_calls = []
+
+    def _spying_adapter(**kwargs):
+        adapter_calls.append({
+            "server_tools": type(kwargs["server_tools"]).__name__,
+            "window_role_map": dict(kwargs["window_role_map"]),
+            "ledger_root": str(kwargs["ledger"].root),
+        })
+        return real_adapter(**kwargs)
+
+    with _patch.object(execution_ledger, "execute_v3_window_stage_real",
+                       side_effect=_spying_adapter):
+        exit_code = cli.main(["--target", "win-dev", "replay", str(path),
+                              "--trace-root", str(trace_root)])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0, output
+    assert len(adapter_calls) == 1
+    wiring = adapter_calls[0]
+    # 受控链载体与授权映射(derive_role_map 产物,不硬编码)。
+    assert wiring["server_tools"] == "MCPServerTools"
+    assert wiring["window_role_map"] == {"W1": "main"}
+    # ledger 落在 CLI trace_root 下的受控账本。
+    assert wiring["ledger_root"] == str(trace_root / "v3-attempts")
+    # 受控链真实跑完两步:每步恰一次派发、previous 链持久。
+    assert output["runId"]
+    assert [s["outcome"] for s in output["steps"]] == ["pass", "pass"]
+    assert output["steps"][0]["transitionId"] == "first_bind"
+    assert output["steps"][1]["previousStepId"] == "step-0001"
+    # 受控链真实跑完两步:每步恰一次真实派发(统一 dispatcher 在
+    # focus_bound_window(action_id=...) 内)、previous 链持久。
+    dispatches = [c for c in agent.calls if c[0] == "focus_bound_window"
+                  and c[1].get("action_id")]
+    assert len(dispatches) == 2
+    assert all(d[1]["action_id"] == "gui.click" for d in dispatches)
+    # token 仅内存:不进报告。
+    assert "run_token" not in _json.dumps(output)
+    # 账本事件真实落盘在 trace_root 下(重启可重建边界)。
+    assert list((trace_root / "v3-attempts").glob("EVT-*.json"))
+
+
+def test_replay_cli_v1_golden_keeps_legacy_path(monkeypatch, tmp_path, capsys):
+    """v1 golden(无 windowSequence)不回退:仍走 build_replay_runtime +
+    replay_golden_trace,不受 v3 路由影响。"""
+    agent = _MCPAgent()
+    monkeypatch.setattr(cli, "_target_agent", lambda *_args: agent)
+    golden = _golden(RecordedStep("step-0001", "gui.click", {}, _selector()),
+                     digest=catalog_digest())
+    golden = replace(golden, catalog={
+        "version": CATALOG_VERSION, "digest": catalog_digest()})
+    path = tmp_path / "golden-trace.json"
+    path.write_text(canonical_json(golden.to_dict()), encoding="utf-8")
+
+    from unittest.mock import patch as _patch
+    build_calls = []
+    real_build = cli.build_replay_runtime
+
+    def _spy_build(*a, **kw):
+        build_calls.append(kw)
+        return real_build(*a, **kw)
+
+    with _patch.object(cli, "build_replay_runtime",
+                       side_effect=_spy_build):
+        exit_code = cli.main(["--target", "win-dev", "replay", str(path),
+                              "--confirm-action", "gui.click",
+                              "--trace-root", str(tmp_path / "traces")])
+    output = __import__("json").loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert len(build_calls) == 1, "v1 golden must keep the legacy runtime path"
+    assert output["evaluation"]["taskSuccess"] is True
+
+
+def test_replay_cli_refuses_v3_role_derivation_failure_before_target_gui(monkeypatch, tmp_path, capsys):
+    """golden 身份无法唯一映射到已装产品角色 → CLI 层 fail-closed
+    (RoleDerivationError),零 target GUI 调用(仅 recording_status 探测)。"""
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    path = _compile_v3_golden_same_window(tmp_path)
+    # 篡改 title 到无角色匹配的值(selector 与 identity 同步改,仍通过
+    # load 的一致性校验;仅角色派生无解),走真实 load 路径。
+    import json as _json
+    doc = _json.loads(path.read_text(encoding="utf-8"))
+    doc["windowSequence"]["windows"][0]["identity"]["titleRegex"] = \
+        "^Totally-Unknown-Title$"
+    for step in doc["steps"].values():
+        if isinstance(step, dict) and (step.get("selector") or {}).get("window"):
+            step["selector"]["window"]["titleRegex"] = \
+                "^Totally-Unknown-Title$"
+    # entryWindow 与首 selector 步严格一致(§5.1 一致性门),同步改。
+    if doc.get("entryWindow"):
+        doc["entryWindow"]["titleRegex"] = "^Totally-Unknown-Title$"
+    path.write_text(canonical_json(doc), encoding="utf-8")
+
+    exit_code = cli.main(["--target", "win-dev", "replay", str(path),
+                          "--trace-root", str(tmp_path / "traces")])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert output["code"] == "v3_role_derivation_failed"
+    assert not [c for c in agent.calls if c[0] in {
+        "begin_product_run", "register_window_declaration",
+        "bind_entry_window", "execute_action"}]
+
+
+def test_library_gate_still_refuses_direct_replay_of_v3():
+    """守卫:CLI 拆门只在 CLI 层;replay_golden_trace 直调 v3 仍拒绝
+    (设计 §6 步骤2:库级门保留语义)。"""
+    import dataclasses
+
+    from agent.recording.models import WindowSequence
+    from agent.recording.replay import _refuse_v3_execution
+
+    golden = dataclasses.replace(
+        _golden(RecordedStep("step-0001", "gui.click", {}, _selector())),
+        schema="edr.desktop-golden-trace/v3",
+        window_sequence=WindowSequence(
+            "edr.window-sequence/v1",
+            ({"id": "W1", "identity": dict(_selector().window),
+              "origin": "already_open"},),
+            ({"stepId": "step-0001", "windowId": "W1"},)))
+    runtime, _, _ = _runtime([{
+        "process_name": "EDRClient.exe", "window_title": "EDRClient",
+        "automation_id": "btnApply", "control_type": "Button",
+        "text": "应用", "fingerprint": "sha256:current"}])
+    from target.recording.models import RecordingModelError
+    with pytest.raises(RecordingModelError) as excinfo:
+        from agent.recording.replay import replay_golden_trace
+        replay_golden_trace(runtime, golden)
+    assert excinfo.value.code == "window_sequence_execution_unsupported"
+    # golden_to_test_case 同门。
+    from agent.recording.replay import golden_to_test_case
+    with pytest.raises(RecordingModelError):
+        golden_to_test_case(golden)
+
+
+def test_replay_cli_v3_effects_surface_over_mcp_carrier(monkeypatch, tmp_path, capsys):
+    """B 阶段片(轮次 7):带 effects 的跨窗口 A→B→A golden 经 CLI replay
+    在 MCP 载体下跑通——begin_effect_baseline / observe_effect_after_action
+    / bind_increment 经 server 工具往返,不再 AttributeError fail-closed。
+
+    链路真实性:server 工具链全真实(含轮次 7 新增的三个 S4 效果工具,
+    走 _binding_facade_for_run 同门),仅 OS 事实层是替身;OS 层接动作
+    效果(click btnApply → Log Center 出现;click logRow → 关闭),让
+    appeared/absent 对真实差分求值。"""
+    import json as _json
+
+    agent = _MCPAgent()
+    backend = _v3_cli_env(monkeypatch, tmp_path, agent)
+    # W2(Log Center)OS 事实:初始不可见,与
+    # test_v3_real_server_adapter._fake_backend_for("a_b_a") 同形状;
+    # W1 同时声明 btnApply/btnBack(第三步点击目标)。
+    backend._windows["100"]["extra_controls"].append(
+        {"automation_id": "btnBack", "text": "Apply"})
+    backend._windows["200"] = {
+        "process_id": 42, "title": "Log Center",
+        "root_control_id": "LogCenterWindow",
+        "visible": False, "foreground": True,
+        "process_name": "EDRClient.exe",
+        "extra_controls": [
+            {"automation_id": "logRow", "text": "Apply"}]}
+    # A→B→A 动作效果接线(录制语义:点 btnApply 出现 Log Center,
+    # 点 logRow 关闭)——与 test_v3_real_server_adapter._fake_backend_for
+    # 同一事实形状。
+    original_click = backend.click
+
+    def click_with_effect(**kwargs):
+        out = original_click(**kwargs)
+        if kwargs.get("automation_id") == "btnApply":
+            backend._windows["200"]["visible"] = True
+        elif kwargs.get("automation_id") == "logRow":
+            backend._windows["200"]["visible"] = False
+        return out
+
+    backend.click = click_with_effect
+
+    # 真实 compiler ready 产物:动作后出现(W2 appeared)+ 关闭
+    # (W2 absent)显式断言 → effects 携带于 steps(与 adapter 测试
+    # _compile_effect_golden 同一构造)。
+    import dataclasses
+    import runpy
+
+    from agent.recording.compiler import compile_recording
+    from agent.recording.models import GoldenTrace
+
+    ns = runpy.run_path(
+        "test_case/test_recording/test_golden_v3_window_sequence.py")
+    raw = ns["_cross_window_events"]()
+    evs = list(raw.events)
+    evs[1] = dataclasses.replace(evs[1], assertion={
+        "type": "window_open",
+        "expected": {"exists": True, "title": "Log Center",
+                     "processName": "EDRClient.exe"}})
+    evs[3] = dataclasses.replace(evs[3], assertion={
+        "type": "window_open",
+        "expected": {"exists": False, "title": "Log Center",
+                     "processName": "EDRClient.exe"}})
+    raw = dataclasses.replace(raw, events=evs)
+    result = compile_recording(raw, profile="windows_hisec")
+    assert result.golden.status == "ready"
+    golden = GoldenTrace.from_dict(result.golden.to_dict())
+    sequence = golden.window_sequence.to_dict()
+    assert [s.get("effects") for s in sequence["steps"] if s.get("effects")], (
+        "前置:编译产物必须带 effects,否则本用例测不到效果面")
+    path = tmp_path / "golden-v3-effects.json"
+    path.write_text(canonical_json(golden.to_dict()), encoding="utf-8")
+
+    trace_root = tmp_path / "traces"
+    exit_code = cli.main(["--target", "win-dev", "replay", str(path),
+                          "--trace-root", str(trace_root)])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0, output
+    assert output["latched"] is False
+    assert [s["outcome"] for s in output["steps"]] == ["pass", "pass", "pass"]
+    # 效果面真实经 MCP 工具往返:_MCPAgent 记录到三类效果工具调用,
+    # 且 effect 工具在真实 server 门(_binding_facade_for_run)下被接受
+    # (若 shim 缺方法/服务端缺工具,这里要么 AttributeError 要么空记录)。
+    effect_calls = {name for name, _ in agent.calls if name in {
+        "begin_effect_baseline", "observe_effect_after_action",
+        "bind_increment"}}
+    assert effect_calls == {
+        "begin_effect_baseline", "observe_effect_after_action",
+        "bind_increment"}, agent.calls
+    # appeared 唯一增量 → 延迟绑定经 bind_increment 真实发生。
+    bind_calls = [a for n, a in agent.calls if n == "bind_increment"]
+    assert bind_calls and bind_calls[0].get("native_id") == "200"
+    assert bind_calls[0].get("window_id") == "W2"
+    # 轮次 8:效果评估结果进 CLI 报告——output steps 带各自声明的
+    # windowEffect(appeared/absent satisfied=true;编译产物里
+    # appeared 在 step-0001、absent 在 step-0002、step-0003 无)。
+    step_effects = {s["stepId"]: s.get("windowEffect") for s in
+                    output["steps"]}
+    assert step_effects["step-0001"] and \
+        step_effects["step-0001"][0]["kind"] == "appeared" and \
+        step_effects["step-0001"][0]["satisfied"] is True, step_effects
+    assert step_effects["step-0002"] and \
+        step_effects["step-0002"][0]["kind"] == "absent" and \
+        step_effects["step-0002"][0]["satisfied"] is True, step_effects
+    assert "windowEffect" not in output["steps"][2], step_effects
+
+
+def test_replay_cli_v3_visual_only_golden_resolves_over_mcp_carrier(
+        monkeypatch, tmp_path, capsys):
+    """B 阶段片(轮次 16):visual-only golden 经 CLI replay 在 MCP 载体下
+    走 A023 派发 — CLI 面为声明含 visual selector 的 golden 构造
+    visual_resolver(asset_root = golden 文件父目录,v1 路径同款约定),
+    经 execute_v3_window_stage_real 注入受控链;无 visual 步的 golden 不
+    构造 resolver(既有 round 6/7 CLI 用例继续绿 = 零行为变化背书)。
+    OS 假层照 adapter 正例 test_visual_only_step_resolves_and_dispatches_
+    click_window 的夹具形状(真实 PNG 模板 digest 对齐 + 灰底帧唯一
+    匹配 + click_window_at/screenshot 假层)。"""
+    import base64
+    import dataclasses
+    import hashlib
+    import io
+    import json as _json
+    from unittest.mock import patch as _patch
+
+    from PIL import Image, ImageDraw
+
+    from agent.recording import execution_ledger
+    from agent.recording.models import GoldenTrace
+    from target.windowing.attempt_ledger import AttemptLedger
+    from test_case.test_recording.test_v3_real_server_adapter import (
+        _compile_effect_golden)
+
+    agent = _MCPAgent()
+    backend = _v3_cli_env(monkeypatch, tmp_path, agent)
+    # W2(Log Center)OS 事实 + A→B→A 语义效果接线(与既有 effects CLI
+    # 用例同形状);step-0003 btnBack 无效果声明无需接线。
+    backend._windows["100"]["extra_controls"].append(
+        {"automation_id": "btnBack", "text": "Apply"})
+    backend._windows["200"] = {
+        "process_id": 42, "title": "Log Center",
+        "root_control_id": "LogCenterWindow",
+        "visible": False, "foreground": True,
+        "process_name": "EDRClient.exe",
+        "extra_controls": [
+            {"automation_id": "logRow", "text": "Apply"}]}
+    original_click = backend.click
+
+    def click_with_effect(**kwargs):
+        out = original_click(**kwargs)
+        if kwargs.get("automation_id") == "logRow":
+            backend._windows["200"]["visible"] = False
+        return out
+
+    backend.click = click_with_effect
+    # step-0001 现在是 visual-only 步:appeared 效果挂 A023 的 OS 工具
+    # (语义点击不再发生,backend.click 的 btnApply 分支不会触发)。
+    def click_window_at(x, y, window_title_re=None):
+        backend.dispatch_calls.append({
+            "method": "click_window_at", "x": int(x), "y": int(y),
+            "window_title_re": window_title_re})
+        backend._windows["200"]["visible"] = True
+        return {"ok": True, "method": "mouse.click",
+                "window_relative": {"x": int(x), "y": int(y)}}
+
+    backend.click_window_at = click_window_at
+    # 红框锁定窗口帧假层(照 adapter 正例):800x600 灰底,噪声模板
+    # (红底白十字)贴 (0,0) — 全帧唯一过置信度门槛的匹配区。
+    template = Image.new("RGB", (60, 40), (200, 30, 30))
+    tdraw = ImageDraw.Draw(template)
+    tdraw.line([(30, 5), (30, 35)], fill=(255, 255, 255), width=3)
+    tdraw.line([(10, 20), (50, 20)], fill=(255, 255, 255), width=3)
+    buf = io.BytesIO()
+    template.save(buf, format="PNG")
+    template_bytes = buf.getvalue()
+    frame = Image.new("RGB", (800, 600), (90, 90, 90))
+    frame.paste(template, (0, 0))
+    fbuf = io.BytesIO()
+    frame.save(fbuf, format="PNG")
+    frame_bytes = fbuf.getvalue()
+
+    def screenshot(_path=None):
+        return {"ok": True, "capture_scope": "window",
+                "image_b64": base64.b64encode(frame_bytes).decode("ascii"),
+                "origin": [0, 0]}
+
+    backend.screenshot = screenshot
+    backend.recorder_ui_rectangles = lambda: []
+    backend.protected_rectangles = lambda: []
+
+    # 真实 compiler ready golden:step-0001 控件身份置空 + visual 模板
+    # (digest 对齐),照 adapter 正例的替换形状。模板与 golden 同目录 —
+    # CLI asset_root 约定 = golden 文件父目录,本用例同时钉住该接线。
+    golden = _compile_effect_golden()
+    visual = {
+        "template": "apply.png",
+        "elementSha256": "sha256:" +
+            hashlib.sha256(template_bytes).hexdigest(),
+        "redacted": True,
+        "relativePoint": [0.5, 0.5],
+    }
+    first = dataclasses.replace(
+        golden.steps[0],
+        selector=dataclasses.replace(golden.steps[0].selector, control={},
+                                     visual=visual))
+    golden = GoldenTrace.from_dict(dataclasses.replace(
+        golden, steps=(first, *golden.steps[1:])).to_dict())
+    path = tmp_path / "golden-v3-visual.json"
+    path.write_text(canonical_json(golden.to_dict()), encoding="utf-8")
+    (tmp_path / "apply.png").write_bytes(template_bytes)
+
+    trace_root = tmp_path / "traces"
+    # 入口替换但链路原样受控:钉住 CLI → execute_v3_window_stage_real
+    # 的 visual_resolver 注入(受控链内部零 mock)。
+    real_adapter = execution_ledger.execute_v3_window_stage_real
+    adapter_calls = []
+
+    def _spying_adapter(**kwargs):
+        adapter_calls.append(
+            {"visual_resolver": kwargs.get("visual_resolver")})
+        return real_adapter(**kwargs)
+
+    with _patch.object(execution_ledger, "execute_v3_window_stage_real",
+                       side_effect=_spying_adapter):
+        exit_code = cli.main(["--target", "win-dev", "replay", str(path),
+                              "--trace-root", str(trace_root),
+                              "--replay-mode", "semantic_first"])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0, output
+    assert len(adapter_calls) == 1
+    # CLI 面接线:声明含 visual selector → resolver 非空注入受控链。
+    assert adapter_calls[0]["visual_resolver"] is not None, (
+        "CLI 必须为 visual-only golden 构造 visual_resolver")
+    # 三步全链(visual step-0001 + 语义 step-0002/0003)在 MCP 载体下
+    # 全 pass;每步恰一次派发。
+    assert output["latched"] is False, output["steps"]
+    assert [s["outcome"] for s in output["steps"]] == \
+        ["pass", "pass", "pass"], output["steps"]
+    assert output["dispatchInputs"] == 3, output["steps"]
+    # 实际动作:A023 恰一次(visual 步,窗口相对坐标落模板中心
+    # relativePoint [0.5,0.5] × 60x40 → 30,20);语义步走 gui.click。
+    click_calls = [c for c in backend.dispatch_calls
+                   if c["method"] == "click_window_at"]
+    assert len(click_calls) == 1, backend.dispatch_calls
+    assert click_calls[0]["x"] == 30 and click_calls[0]["y"] == 20, \
+        click_calls[0]
+    events = AttemptLedger(trace_root / "v3-attempts").rebuild_history(
+        run_id=output["runId"])
+    assert events[0]["receiptPayload"].get("action_id") == \
+        "pointer.click_window", events[0]["receiptPayload"]
+    assert [e["receiptPayload"].get("action_id") for e in events[1:]] == \
+        ["gui.click", "gui.click"], \
+        [e["receiptPayload"] for e in events[1:]]
+
+
+def test_replay_cli_v3_golden_without_visual_gets_no_resolver(
+        monkeypatch, tmp_path, capsys):
+    """轮次 16 条件面钉死:无 visual 步的 golden 经 CLI replay 不构造
+    visual_resolver(零行为变化承诺的负面对照——无条件构造会改变既有
+    无 visual 流的接线面,模板目录缺省时的行为差异必须不发生)。"""
+    import json as _json
+    from unittest.mock import patch as _patch
+
+    from agent.recording import execution_ledger
+
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    path = _compile_v3_golden_same_window(tmp_path)
+    trace_root = tmp_path / "traces"
+    real_adapter = execution_ledger.execute_v3_window_stage_real
+    adapter_calls = []
+
+    def _spying_adapter(**kwargs):
+        adapter_calls.append(
+            {"visual_resolver": kwargs.get("visual_resolver")})
+        return real_adapter(**kwargs)
+
+    with _patch.object(execution_ledger, "execute_v3_window_stage_real",
+                       side_effect=_spying_adapter):
+        exit_code = cli.main(["--target", "win-dev", "replay", str(path),
+                              "--trace-root", str(trace_root)])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0, output
+    assert len(adapter_calls) == 1
+    assert adapter_calls[0]["visual_resolver"] is None, (
+        "无 visual 步的 golden 不应构造 visual_resolver")
+    assert [s["outcome"] for s in output["steps"]] == ["pass", "pass"], \
+        output["steps"]
 
 
 def _drag_selectors():
@@ -1499,6 +2043,73 @@ def test_an_observation_reporting_no_ancestry_cannot_satisfy_a_recorded_chain():
 
     assert calls == []
     assert result.case_result.step_results[0].error["code"] == "replay_target_not_found"
+
+
+_EVIDENCE_ANCESTRY = [
+    {"controlType": "Table"},
+    {"automationId": "EdrMainWindow.baseWidget.pageWidget.scanPage.VirusScanWindow"
+     ".scanDetailWidget.tablePage", "controlType": "Group"},
+    {"automationId": "EdrMainWindow.baseWidget.pageWidget.scanPage.VirusScanWindow"
+     ".scanDetailWidget", "controlType": "Custom"},
+    {"automationId": "EdrMainWindow.baseWidget.pageWidget.scanPage.VirusScanWindow",
+     "controlType": "Group"},
+    {"automationId": "EdrMainWindow.baseWidget.pageWidget.scanPage", "controlType": "Group"},
+    {"automationId": "EdrMainWindow.baseWidget.pageWidget", "controlType": "Custom"},
+]
+
+
+def _evidence_details_rows(ancestry):
+    rows = []
+    for index in range(6):
+        rows.append({
+            "process_name": "EDRClient.exe", "window_title": "logo1",
+            "control_type": "DataItem", "text": "Details", "ancestry": ancestry,
+            "rect": [1056, 403 + index * 40, 1118, 443 + index * 40],
+        })
+    return rows
+
+
+def _evidence_selector():
+    return ReplaySelector(
+        window={"processName": "EDRClient.exe", "rootAutomationId": "EdrMainWindow"},
+        control={"controlType": "DataItem", "name": "Details",
+                 "ancestry": _EVIDENCE_ANCESTRY},
+    )
+
+
+def test_evidence_shape_now_resolves_to_honest_weak_identity_ambiguity():
+    """2026-10-28 evidence (candidate_count=0) is closed: with the ancestry
+    threading now emitted by dump_tree, the recorded weak-identity cell
+    resolves to six honest candidates and is refused as ambiguous, with the
+    missing-stable-id remediation — never a silent pick."""
+    runtime, _, calls = _runtime(_evidence_details_rows(_EVIDENCE_ANCESTRY))
+    step = RecordedStep("step-0001", "gui.click", {}, _evidence_selector())
+
+    result = replay_golden_trace(runtime, _golden(step))
+
+    assert calls == []
+    error = result.case_result.step_results[0].error
+    assert error["code"] == "replay_target_ambiguous"
+    details = error.get("details") or {}
+    assert details.get("candidate_count") == 6
+    remediation = details.get("remediation")
+    assert isinstance(remediation, str) and "缺少稳定自动化ID" in remediation
+    assert not any(banned in remediation for banned in ("x=", "y=", "点击坐标"))
+
+
+def test_evidence_shape_with_empty_observed_ancestry_still_fails_closed_not_found():
+    """The historical 2026-10-27 observation shape (controls carrying no
+    ancestry at all) must keep failing as not_found with zero candidates —
+    the gap the evidence recorded — rather than pretending the chain matched."""
+    runtime, _, calls = _runtime(_evidence_details_rows([]))
+    step = RecordedStep("step-0001", "gui.click", {}, _evidence_selector())
+
+    result = replay_golden_trace(runtime, _golden(step))
+
+    assert calls == []
+    error = result.case_result.step_results[0].error
+    assert error["code"] == "replay_target_not_found"
+    assert (error.get("details") or {}).get("candidate_count") == 0
 
 
 # ── a recorded flow spans several windows ────────────────────────────────────
@@ -2161,3 +2772,748 @@ def test_failure_after_completed_trace_neither_double_terminates_nor_masks(tmp_p
                 if event.event_type in (EventType.TRACE_COMPLETED, EventType.TRACE_ABORTED)]
     assert len(terminal) == 1, "the completed trace must keep its single terminal event"
     assert events[-1].event_type is EventType.TRACE_COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# 轮次 23(设计 §6 步骤2 + §5):CLI replay v3 的 golden 加载面接单夹
+# manifest 发现 — 用户传 trajectories/TRJ-<id> 夹时读 manifest →
+# currentRevision → trace.v3.json;v1/v2 平铺路径入口逐字不动(两入口
+# 并存)。发现失败如实报错,不猜文件名、不回退平铺。
+# ---------------------------------------------------------------------------
+
+
+def test_replay_cli_v3_golden_via_trajectory_folder_manifest_discovery(
+        monkeypatch, tmp_path, capsys):
+    """§5 单夹发现入口第一片:replay 传 TRJ 夹 → manifest.json →
+    currentRevision → trace.v3.json 加载 golden,照常路由受控链。
+    平铺入口(同夹函数)用例逐字未动,本用例只钉发现面。"""
+    import json as _json
+    from agent.recording.trajectory_layout import TrajectoryLayout
+
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    golden_path = _compile_v3_golden_same_window(tmp_path)
+    # 真实生产写链:同 golden 经 TrajectoryLayout 落 §5 单夹(照 record
+    # compile 链 _write_v3_trajectory 的实际形状)。
+    record_dir = tmp_path / "record"
+    layout = TrajectoryLayout.create(record_dir, "log-center-export")
+    layout.write_revision_trace(
+        "REV-0001", _json.loads(golden_path.read_text(encoding="utf-8")))
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay",
+                          str(layout.root),
+                          "--trace-root", str(trace_root)])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0, output
+    # 受控链真实跑完两步:发现入口与平铺入口在同一受控链汇合。
+    assert output["runId"]
+    assert [s["outcome"] for s in output["steps"]] == ["pass", "pass"]
+    dispatches = [c for c in agent.calls if c[0] == "focus_bound_window"
+                  and c[1].get("action_id")]
+    assert len(dispatches) == 2
+
+
+def test_replay_cli_v3_trajectory_folder_without_manifest_fails_honestly(
+        monkeypatch, tmp_path, capsys):
+    """发现失败如实报错:夹内无 manifest.json → golden_trace_invalid(
+    不猜文件名、不回退平铺路径、不静默成功)。"""
+    import json as _json
+
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    empty = tmp_path / "record" / "trajectories" / "TRJ-0001"
+    empty.mkdir(parents=True)
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay", str(empty),
+                          "--trace-root", str(trace_root)])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert output["ok"] is False
+    assert output["code"] == "golden_trace_invalid"
+    assert "manifest" in output["error"]
+    # 未触碰目标:零派发。
+    assert not [c for c in agent.calls if c[0] == "focus_bound_window"
+                and c[1].get("action_id")]
+
+
+def test_replay_cli_v3_trajectory_folder_pointer_without_trace_fails_closed(
+        monkeypatch, tmp_path, capsys):
+    """发布≠就绪的发现面语义:manifest 指针指向无 trace 的修订 →
+    golden_trace_invalid(fail-closed,不冒充单夹自足)。"""
+    import json as _json
+    from agent.recording.trajectory_layout import TrajectoryLayout
+
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    golden_path = _compile_v3_golden_same_window(tmp_path)
+    record_dir = tmp_path / "record"
+    layout = TrajectoryLayout.create(record_dir, "log-center-export")
+    # 只写 REV-0002 的 trace,指针移到 REV-0003(无 trace)。
+    (layout.root / "revisions" / "REV-0002").mkdir()
+    layout.write_revision_trace(
+        "REV-0002", _json.loads(golden_path.read_text(encoding="utf-8")))
+    (layout.root / "revisions" / "REV-0003").mkdir()
+    layout.publish_revision("REV-0002")
+    manifest_path = layout.root / "manifest.json"
+    manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["currentRevision"] = "revisions/REV-0003"
+    manifest_path.write_text(_json.dumps(manifest), encoding="utf-8")
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay", str(layout.root),
+                          "--trace-root", str(trace_root)])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert output["ok"] is False
+    assert output["code"] == "golden_trace_invalid"
+    assert not [c for c in agent.calls if c[0] == "focus_bound_window"
+                and c[1].get("action_id")]
+
+
+def test_replay_cli_v3_visual_golden_via_folder_resolves_and_dispatches(
+        monkeypatch, tmp_path, capsys):
+    """轮次 24 读侧正例(改写轮次 23 钉子):单夹发现入口 + 声明 visual 的
+    golden,模板经 §5 assets/sha256/ 落单夹后,resolver 从 **TRJ 根**解析
+    (asset_root=TRJ 根,非 REV 夹——落盘模板名已是 TRJ 根相对路径)→ A023
+    派发全绿。钉住单夹自足:整夹复制后仍可定位资源,不再因模板留平铺夹
+    而 fail-closed。"""
+    import base64
+    import dataclasses
+    import hashlib
+    import io
+    import json as _json
+    from PIL import Image, ImageDraw
+    from agent.recording.models import GoldenTrace
+    from agent.recording.trajectory_layout import TrajectoryLayout
+    from test_case.test_recording.test_v3_real_server_adapter import (
+        _compile_effect_golden)
+
+    agent = _MCPAgent()
+    backend = _v3_cli_env(monkeypatch, tmp_path, agent)
+    # W2(Log Center)OS 事实 + A→B→A 语义效果接线(照 round-16 正例形状)。
+    backend._windows["100"]["extra_controls"].append(
+        {"automation_id": "btnBack", "text": "Apply"})
+    backend._windows["200"] = {
+        "process_id": 42, "title": "Log Center",
+        "root_control_id": "LogCenterWindow",
+        "visible": False, "foreground": True,
+        "process_name": "EDRClient.exe",
+        "extra_controls": [
+            {"automation_id": "logRow", "text": "Apply"}]}
+    original_click = backend.click
+
+    def click_with_effect(**kwargs):
+        out = original_click(**kwargs)
+        if kwargs.get("automation_id") == "logRow":
+            backend._windows["200"]["visible"] = False
+        return out
+
+    backend.click = click_with_effect
+
+    def click_window_at(x, y, window_title_re=None):
+        backend.dispatch_calls.append({
+            "method": "click_window_at", "x": int(x), "y": int(y),
+            "window_title_re": window_title_re})
+        backend._windows["200"]["visible"] = True
+        return {"ok": True, "method": "mouse.click",
+                "window_relative": {"x": int(x), "y": int(y)}}
+
+    backend.click_window_at = click_window_at
+
+    # visual-only 模板(红底白十字,60x40)——digest 对齐一个真实 PNG。
+    template = Image.new("RGB", (60, 40), (200, 30, 30))
+    tdraw = ImageDraw.Draw(template)
+    tdraw.line([(30, 5), (30, 35)], fill=(255, 255, 255), width=3)
+    tdraw.line([(10, 20), (50, 20)], fill=(255, 255, 255), width=3)
+    buf = io.BytesIO()
+    template.save(buf, format="PNG")
+    template_bytes = buf.getvalue()
+    digest_hex = hashlib.sha256(template_bytes).hexdigest()
+
+    golden = _compile_effect_golden()
+    visual = {
+        "template": f"assets/sha256/{digest_hex}.png",
+        "elementSha256": "sha256:" + digest_hex,
+        "redacted": True,
+        "relativePoint": [0.5, 0.5],
+    }
+    first = dataclasses.replace(
+        golden.steps[0],
+        selector=dataclasses.replace(golden.steps[0].selector, control={},
+                                     visual=visual))
+    golden = GoldenTrace.from_dict(dataclasses.replace(
+        golden, steps=(first, *golden.steps[1:])).to_dict())
+    # golden 经生产写链落 §5 单夹;模板落单夹 assets/sha256/<hex>.png
+    # (整夹自足——resolver 从 TRJ 根即可解析)。
+    record_dir = tmp_path / "record"
+    layout = TrajectoryLayout.create(record_dir, "log-center-export")
+    (layout.root / "assets" / "sha256").mkdir(parents=True, exist_ok=True)
+    (layout.root / "assets" / "sha256" / f"{digest_hex}.png").write_bytes(
+        template_bytes)
+    layout.write_revision_trace(
+        "REV-0001", _json.loads(canonical_json(golden.to_dict())))
+
+    # 观测假层(照 round-16 正例):灰底 + 唯一匹配帧,让 focus 权威观测
+    # 成功、解析走图像匹配 → A023。
+    frame = Image.new("RGB", (800, 600), (90, 90, 90))
+    frame.paste(template, (0, 0))
+    fbuf = io.BytesIO()
+    frame.save(fbuf, format="PNG")
+    frame_bytes = fbuf.getvalue()
+
+    def screenshot(_path=None):
+        return {"ok": True, "capture_scope": "window",
+                "image_b64": base64.b64encode(frame_bytes).decode("ascii"),
+                "origin": [0, 0]}
+
+    backend.screenshot = screenshot
+    backend.recorder_ui_rectangles = lambda: []
+    backend.protected_rectangles = lambda: []
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay", str(layout.root),
+                          "--trace-root", str(trace_root),
+                          "--replay-mode", "semantic_first"])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0, output
+    # 三步全链(visual step-0001 + 语义 step-0002/0003)全 pass、各派发一次。
+    assert output["latched"] is False, output["steps"]
+    assert [s["outcome"] for s in output["steps"]] == \
+        ["pass", "pass", "pass"], output["steps"]
+    assert output["dispatchInputs"] == 3, output["steps"]
+    # A023 恰一次(visual 步),窗口相对坐标 = 模板中心 relativePoint[0.5,0.5]
+    # × 60x40 → 30,20。
+    click_calls = [c for c in backend.dispatch_calls
+                   if c["method"] == "click_window_at"]
+    assert len(click_calls) == 1, backend.dispatch_calls
+    assert click_calls[0]["x"] == 30 and click_calls[0]["y"] == 20, \
+        click_calls[0]
+
+
+def test_replay_cli_v3_visual_golden_via_folder_missing_template_fails_closed(
+        monkeypatch, tmp_path, capsys):
+    """轮次 24 读侧负例:单夹发现入口 + 声明 visual(模板名指向
+    assets/sha256/<hex>.png)但**单夹内该模板文件缺失** → resolver 从
+    TRJ 根找落空 → fail-closed visual_template_integrity_failed 锁存,零
+    派发。不静默回退语义解析、不冒充单夹自足(模板必须真在单夹内)。"""
+    import base64
+    import dataclasses
+    import hashlib
+    import io
+    import json as _json
+    from PIL import Image, ImageDraw
+    from agent.recording.models import GoldenTrace
+    from agent.recording.trajectory_layout import TrajectoryLayout
+    from test_case.test_recording.test_v3_real_server_adapter import (
+        _compile_effect_golden)
+
+    agent = _MCPAgent()
+    backend = _v3_cli_env(monkeypatch, tmp_path, agent)
+
+    template = Image.new("RGB", (60, 40), (200, 30, 30))
+    tdraw = ImageDraw.Draw(template)
+    tdraw.line([(30, 5), (30, 35)], fill=(255, 255, 255), width=3)
+    tdraw.line([(10, 20), (50, 20)], fill=(255, 255, 255), width=3)
+    buf = io.BytesIO()
+    template.save(buf, format="PNG")
+    template_bytes = buf.getvalue()
+    digest_hex = hashlib.sha256(template_bytes).hexdigest()
+
+    golden = _compile_effect_golden()
+    visual = {
+        "template": f"assets/sha256/{digest_hex}.png",
+        "elementSha256": "sha256:" + digest_hex,
+        "redacted": True,
+        "relativePoint": [0.5, 0.5],
+    }
+    first = dataclasses.replace(
+        golden.steps[0],
+        selector=dataclasses.replace(golden.steps[0].selector, control={},
+                                     visual=visual))
+    golden = GoldenTrace.from_dict(dataclasses.replace(
+        golden, steps=(first, *golden.steps[1:])).to_dict())
+    # 落单夹 trace,但**不写** assets/sha256/<hex>.png:声明在、文件缺失。
+    record_dir = tmp_path / "record"
+    layout = TrajectoryLayout.create(record_dir, "log-center-export")
+    layout.write_revision_trace(
+        "REV-0001", _json.loads(canonical_json(golden.to_dict())))
+    assert not (layout.root / "assets" / "sha256" /
+                f"{digest_hex}.png").exists()
+
+    frame = Image.new("RGB", (800, 600), (90, 90, 90))
+    frame.paste(template, (0, 0))
+    fbuf = io.BytesIO()
+    frame.save(fbuf, format="PNG")
+    frame_bytes = fbuf.getvalue()
+
+    def screenshot(_path=None):
+        return {"ok": True, "capture_scope": "window",
+                "image_b64": base64.b64encode(frame_bytes).decode("ascii"),
+                "origin": [0, 0]}
+
+    backend.screenshot = screenshot
+    backend.recorder_ui_rectangles = lambda: []
+    backend.protected_rectangles = lambda: []
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay", str(layout.root),
+                          "--trace-root", str(trace_root),
+                          "--replay-mode", "semantic_first"])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert output["ok"] is False
+    # 受控链锁存在 visual 步:fail-closed 码族(模板完整性门),不冒充单夹
+    # 自足、不静默回退语义解析。
+    assert output["blockedAt"] == "step-0001"
+    assert output["latched"] is True
+    assert output["steps"][0]["code"] == "visual_template_integrity_failed"
+    # 零真实派发(fail-closed 在解析门前)。
+    assert not [c for c in agent.calls if c[0] == "focus_bound_window"
+                and c[1].get("action_id")]
+
+
+# ---------------------------------------------------------------------------
+# 轮次 30(设计 §5 runs/ 面):CLI replay 单夹入口的受控执行账本入
+# TRJ-<id>/runs/RUN-<id>/ — §5 "runs/: 每次执行账本"的最小落盘接线。
+# 单夹入口:run 实例 id 由 CLI 生成(execution_ledger 公开别名 new_run_id),
+# ledger root = TRJ 根/runs/<run实例id>(per-run 目录,受控链零改动)。
+# 账本事件内 runId 保持 server 真实 run_id(1129 一致性,被适配器用例
+# test_authoritative_state_run_id_matches_server_run 钉死)——目录名与事件
+# runId 是两个如实报告的面(stdout ledgerRoot + runId/serverRunId),不为
+# 接线破坏一致性契约。平铺入口:trace_root/v3-attempts 逐字不动(两入口
+# 并存纪律)。
+# ---------------------------------------------------------------------------
+
+
+def test_replay_cli_v3_folder_entry_lands_attempt_ledger_in_trajectory_runs(
+        monkeypatch, tmp_path, capsys):
+    """单夹入口:replay 后账本事件落 TRJ 根/runs/RUN-<实例id>/EVT-*.json
+    (目录名 RUN-<hex32>,§5 形状);事件内 runId == serverRunId(1129
+    一致性不破坏);AttemptLedger(该目录).rebuild_history(serverRunId)
+    可从盘上事件重建本次 run。"""
+    import json as _json
+    from agent.recording.trajectory_layout import TrajectoryLayout
+    from target.windowing.attempt_ledger import AttemptLedger
+
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    golden_path = _compile_v3_golden_same_window(tmp_path)
+    record_dir = tmp_path / "record"
+    layout = TrajectoryLayout.create(record_dir, "log-center-export")
+    layout.write_revision_trace(
+        "REV-0001", _json.loads(golden_path.read_text(encoding="utf-8")))
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay",
+                          str(layout.root),
+                          "--trace-root", str(trace_root)])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0, output
+    assert [s["outcome"] for s in output["steps"]] == ["pass", "pass"]
+    # 受控链 runId 一致性(1129):输出 runId == serverRunId(server
+    # begin_product_run 的真实 run),不以 stage 自建 ID 冒充。
+    run_id = output["runId"]
+    assert run_id and run_id == output["serverRunId"]
+    # stdout 诚实反映实际落点:单夹入口 ledgerRoot = TRJ 根/runs/<RUN-*>,
+    # 不再是指定的 trace_root/v3-attempts。
+    ledger_root = output["ledgerRoot"]
+    assert ledger_root.startswith(str(layout.root / "runs" / "RUN-"))
+    run_dir = layout.root / "runs"
+    run_dirs = [p for p in run_dir.iterdir() if p.is_dir()]
+    assert len(run_dirs) == 1, "one replay lands exactly one run directory"
+    assert str(run_dirs[0]) == ledger_root
+    event_files = list(run_dirs[0].glob("EVT-*.json"))
+    assert event_files, "attempt events must persist under the run directory"
+    # 事件内 runId 是 server 真实 run:rebuild_history 按它可重建本次 run。
+    history = AttemptLedger(run_dirs[0]).rebuild_history(run_id=run_id)
+    assert history, "rebuild_history must reconstruct the run from disk"
+    for event_file in event_files:
+        assert _json.loads(event_file.read_text(encoding="utf-8"))["runId"] \
+            == run_id
+    # 账本不进指定 trace_root 的平铺受控面(单夹入口不两落)。
+    assert not (trace_root / "v3-attempts").exists()
+    # §5 "新的执行 attempt 仍有独立记录":同夹第二次 replay 落第二个
+    # 独立 run 目录(实例 id 唯一,不覆盖第一次)。
+    exit_code = cli.main(["--target", "win-dev", "replay",
+                          str(layout.root),
+                          "--trace-root", str(trace_root)])
+    output2 = _json.loads(capsys.readouterr().out)
+    assert exit_code == 0, output2
+    assert output2["ledgerRoot"] != ledger_root, \
+        "a new execution attempt gets its own run directory"
+    run_dirs = [p for p in run_dir.iterdir() if p.is_dir()]
+    assert sorted(p.name for p in run_dirs) == sorted([
+        Path(ledger_root).name, Path(output2["ledgerRoot"]).name])
+    assert list(Path(output2["ledgerRoot"]).glob("EVT-*.json")), \
+        "second run directory carries its own events"
+
+
+def test_replay_cli_v3_flat_entry_keeps_flat_ledger_root(
+        monkeypatch, tmp_path, capsys):
+    """平铺入口不回退、不进任何 TRJ 夹:ledger 仍落
+    trace_root/v3-attempts(run_id 缺省自生成、runId 字段与事件落点
+    解耦,平铺现状逐字不动)。"""
+    import json as _json
+
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    path = _compile_v3_golden_same_window(tmp_path)
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay", str(path),
+                          "--trace-root", str(trace_root)])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0, output
+    assert output["ledgerRoot"] == str(trace_root / "v3-attempts")
+    event_files = list((trace_root / "v3-attempts").glob("EVT-*.json"))
+    assert event_files, "flat entry keeps the existing ledger landing"
+    assert list((tmp_path / "record" / "trajectories").glob("TRJ-*")) == [], \
+        "flat entry must not create any trajectory folder"
+
+
+# ---------------------------------------------------------------------------
+# 轮次 31(设计 §5 runs/ 面第二片):单夹入口受控执行 summary/report 落盘 —
+# §5 "runs/: 每次执行账本、summary 与报告"剩余两个落盘点。summary.json =
+# 受控链顶层 result 字段子集(ok/runId/serverRunId/outcome/latched/blockedAt/
+# dispatchInputs/observations/steps 计数),与 stdout 投影同源同值;report.json
+# = build_run_report 整份产物(受控链 result["report"],含 failedStep/steps
+# 全条目)。两文件落 ledgerRoot(RUN 实例目录),write-once 原子(§7 报告审计
+# 件不覆盖);blocked/begin-refused 零副作用路径同样落盘(诚实报告失败 run);
+# 无 run 目录(账本未构造,如 role 推导在账本构造前失败)不落。平铺入口零
+# 变化:runs/ 面是 §5 单夹宣告,平铺 ledgerRoot 不新增文件。
+# ---------------------------------------------------------------------------
+
+
+def test_replay_cli_v3_folder_entry_lands_summary_and_report_in_run_dir(
+        monkeypatch, tmp_path, capsys):
+    """pass run:summary.json(受控链顶层字段子集,与 stdout 逐键一致)+
+    report.json(build_run_report 整份,含 steps 全条目)落 RUN 目录。"""
+    import json as _json
+    from agent.recording.trajectory_layout import TrajectoryLayout
+
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    golden_path = _compile_v3_golden_same_window(tmp_path)
+    record_dir = tmp_path / "record"
+    layout = TrajectoryLayout.create(record_dir, "log-center-export")
+    layout.write_revision_trace(
+        "REV-0001", _json.loads(golden_path.read_text(encoding="utf-8")))
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay", str(layout.root),
+                          "--trace-root", str(trace_root),
+                          "--replay-mode", "semantic_first"])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0, output
+    assert [s["outcome"] for s in output["steps"]] == ["pass", "pass"]
+    run_dir = Path(output["ledgerRoot"])
+    assert run_dir.is_dir()
+    # summary.json:受控链顶层 result 字段子集,与 stdout 同源同值。
+    summary = _json.loads((run_dir / "summary.json").read_text(
+        encoding="utf-8"))
+    assert summary["ok"] == output["ok"] is True
+    assert summary["runId"] == output["runId"] == output["serverRunId"]
+    assert summary["outcome"] == "pass"
+    assert summary["latched"] is False
+    assert summary["blockedAt"] is None
+    assert summary["dispatchInputs"] == output["dispatchInputs"] == 2
+    assert summary["observations"] == output["observations"]
+    assert summary["stepCount"] == len(output["steps"]) == 2
+    assert summary["ledgerRoot"] == str(run_dir)
+    # report.json:build_run_report 整份产物(受控链 report 键原样)。
+    report = _json.loads((run_dir / "report.json").read_text(
+        encoding="utf-8"))
+    assert report["outcome"] == "pass"
+    assert report["failedStep"] is None
+    assert [s["stepId"] for s in report["steps"]] == \
+        ["step-0001", "step-0002"]
+    assert report["steps"][0]["outcome"] == "pass"
+
+
+def test_replay_cli_v3_folder_entry_begin_refused_still_lands_honest_summary(
+        monkeypatch, tmp_path, capsys):
+    """begin-refused(租约冲突)零副作用路径同样落盘:summary 如实报
+    blocked/runId null,report 如实 blocked——不只在 pass 时落。"""
+    import json as _json
+    from agent.recording.trajectory_layout import TrajectoryLayout
+    from target import product_policy
+
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    # 预置 active run 占用租约 → 本次 begin_product_run 冲突拒绝。
+    from target.product_profiles import get_capability
+    product_policy.begin_product_run(
+        "windows_hisec",
+        get_capability("windows_hisec", "windows_pywinauto").digest,
+        lease_seconds=300, backend_kind="windows_pywinauto")
+    golden_path = _compile_v3_golden_same_window(tmp_path)
+    record_dir = tmp_path / "record"
+    layout = TrajectoryLayout.create(record_dir, "log-center-export")
+    layout.write_revision_trace(
+        "REV-0001", _json.loads(golden_path.read_text(encoding="utf-8")))
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay", str(layout.root),
+                          "--trace-root", str(trace_root)])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert output["ok"] is False
+    assert output["latched"] is True
+    assert output["steps"][0]["reason"] == "begin refused"
+    # 零真实派发。
+    assert not [c for c in agent.calls if c[0] == "focus_bound_window"
+                and c[1].get("action_id")]
+    # 失败 run 仍诚实落盘(目录沿用 stdout ledgerRoot)。
+    run_dir = Path(output["ledgerRoot"])
+    assert run_dir.is_dir()
+    summary = _json.loads((run_dir / "summary.json").read_text(
+        encoding="utf-8"))
+    assert summary["ok"] is False
+    assert summary["runId"] is None
+    assert summary["serverRunId"] is None
+    assert summary["outcome"] == "blocked"
+    assert summary["latched"] is True
+    report = _json.loads((run_dir / "report.json").read_text(
+        encoding="utf-8"))
+    assert report["outcome"] == "blocked"
+    assert report["steps"] == []
+    # 账本事件面:begin 拒绝无 hook(受控链在构造 hook 前早退),RUN
+    # 目录内零 EVT-*.json——落盘的是 summary/report 两个报告面。
+    assert list(run_dir.glob("EVT-*.json")) == []
+
+
+def test_replay_cli_v3_role_derivation_failure_lands_nothing_in_trajectory(
+        monkeypatch, tmp_path, capsys):
+    """role 推导在账本构造前失败 → 无 run 目录 → 不落 summary/report
+    (无 run 目录不落;stdout 照旧 v3_role_derivation_failed)。"""
+    import json as _json
+    from agent.recording.trajectory_layout import TrajectoryLayout
+
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    golden_path = _compile_v3_golden_same_window(tmp_path)
+    # 篡改 title 到无角色匹配的值(与既有 role-derivation 用例同法:
+    # selector/identity/entryWindow 同步改,仍通过 load 一致性校验,
+    # 仅角色派生无解),走真实 load 路径。
+    import json as _json
+    record_dir = tmp_path / "record"
+    layout = TrajectoryLayout.create(record_dir, "log-center-export")
+    doc = _json.loads(golden_path.read_text(encoding="utf-8"))
+    doc["windowSequence"]["windows"][0]["identity"]["titleRegex"] = \
+        "^Totally-Unknown-Title$"
+    for step in doc["steps"].values():
+        if isinstance(step, dict) and (step.get("selector") or {}).get("window"):
+            step["selector"]["window"]["titleRegex"] = \
+                "^Totally-Unknown-Title$"
+    if doc.get("entryWindow"):
+        doc["entryWindow"]["titleRegex"] = "^Totally-Unknown-Title$"
+    layout.write_revision_trace("REV-0001", doc)
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay", str(layout.root),
+                          "--trace-root", str(trace_root)])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert output["ok"] is False
+    assert output["code"] == "v3_role_derivation_failed"
+    # 无 run 目录(账本从未构造)→ 无 summary/report 落点:runs/ 下
+    # 零 RUN-* 目录、零报告文件(不预建占位)。
+    runs_dir = layout.root / "runs"
+    assert not list(runs_dir.glob("RUN-*"))
+    assert not (runs_dir / "summary.json").exists()
+    assert not (runs_dir / "report.json").exists()
+
+
+def test_replay_cli_v3_run_summary_report_write_once(
+        monkeypatch, tmp_path):
+    """write-once 直调反例(同夹二写经公开链不可达——RUN 目录恒新):
+    已有 summary.json/report.json 字节不同预置 → 落盘函数不覆盖、
+    字节保持。"""
+    from agent.cli import _persist_run_summary_report
+
+    run_dir = tmp_path / "RUN-a"
+    run_dir.mkdir(parents=True)
+    summary_path = run_dir / "summary.json"
+    report_path = run_dir / "report.json"
+    summary_path.write_bytes(b'{"existing": "summary"}\n')
+    report_path.write_bytes(b'{"existing": "report"}\n')
+
+    _persist_run_summary_report(
+        run_dir, {"ok": True, "runId": "R", "serverRunId": "R",
+                  "steps": [], "latched": False, "blockedAt": None,
+                  "dispatchInputs": 0, "observations": 0,
+                  "report": {"outcome": "pass", "failedStep": None,
+                             "steps": []}},
+        ledger_root_str=str(run_dir))
+
+    assert summary_path.read_bytes() == b'{"existing": "summary"}\n'
+    assert report_path.read_bytes() == b'{"existing": "report"}\n'
+
+
+def test_replay_cli_v3_flat_entry_adds_no_summary_or_report_files(
+        monkeypatch, tmp_path, capsys):
+    """平铺入口零新增:§5 runs/ 面是单夹宣告——trace_root/v3-attempts
+    内不落 summary.json/report.json(两入口并存纪律不回退)。"""
+    import json as _json
+
+    agent = _MCPAgent()
+    _v3_cli_env(monkeypatch, tmp_path, agent)
+    path = _compile_v3_golden_same_window(tmp_path)
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay", str(path),
+                          "--trace-root", str(trace_root)])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0, output
+    assert output["ledgerRoot"] == str(trace_root / "v3-attempts")
+    flat = trace_root / "v3-attempts"
+    assert list(flat.glob("EVT-*.json")), "flat ledger events unchanged"
+    assert not (flat / "summary.json").exists()
+    assert not (flat / "report.json").exists()
+
+
+def test_replay_cli_v3_folder_move_with_old_root_unreachable_stays_consumable(
+        monkeypatch, tmp_path, capsys):
+    """收尾包①反例(轮次 38 链级验证的执行面收口):整夹复制后**旧目录
+    不可访问**(record_dir 整体改名移走,旧路径不存在)→ CLI 从新根经
+    manifest 发现入口完整回放——visual 模板从新夹 assets/sha256/ 解析、
+    A023 派发全绿、summary/report 落新夹 runs/。钉住"不能只验证路径
+    解析 helper":消费走真实 CLI 链,旧根消失后任何对旧路径的依赖都会
+    在此红。"""
+    import base64
+    import hashlib
+    import io
+    import json as _json
+    import shutil
+    from PIL import Image, ImageDraw
+    from agent.recording.models import GoldenTrace
+    from agent.recording.trajectory_layout import TrajectoryLayout
+    from test_case.test_recording.test_v3_real_server_adapter import (
+        _compile_effect_golden)
+
+    agent = _MCPAgent()
+    backend = _v3_cli_env(monkeypatch, tmp_path, agent)
+    backend._windows["100"]["extra_controls"].append(
+        {"automation_id": "btnBack", "text": "Apply"})
+    backend._windows["200"] = {
+        "process_id": 42, "title": "Log Center",
+        "root_control_id": "LogCenterWindow",
+        "visible": False, "foreground": True,
+        "process_name": "EDRClient.exe",
+        "extra_controls": [
+            {"automation_id": "logRow", "text": "Apply"}]}
+    original_click = backend.click
+
+    def click_with_effect(**kwargs):
+        out = original_click(**kwargs)
+        if kwargs.get("automation_id") == "logRow":
+            backend._windows["200"]["visible"] = False
+        return out
+
+    backend.click = click_with_effect
+
+    def click_window_at(x, y, window_title_re=None):
+        backend.dispatch_calls.append({
+            "method": "click_window_at", "x": int(x), "y": int(y),
+            "window_title_re": window_title_re})
+        backend._windows["200"]["visible"] = True
+        return {"ok": True, "method": "mouse.click",
+                "window_relative": {"x": int(x), "y": int(y)}}
+
+    backend.click_window_at = click_window_at
+
+    # visual-only 模板(红底白十字,60x40,digest 对齐真实 PNG)。
+    template = Image.new("RGB", (60, 40), (200, 30, 30))
+    tdraw = ImageDraw.Draw(template)
+    tdraw.line([(30, 5), (30, 35)], fill=(255, 255, 255), width=3)
+    tdraw.line([(10, 20), (50, 20)], fill=(255, 255, 255), width=3)
+    buf = io.BytesIO()
+    template.save(buf, format="PNG")
+    template_bytes = buf.getvalue()
+    digest_hex = hashlib.sha256(template_bytes).hexdigest()
+
+    golden = _compile_effect_golden()
+    visual = {
+        "template": f"assets/sha256/{digest_hex}.png",
+        "elementSha256": "sha256:" + digest_hex,
+        "redacted": True,
+        "relativePoint": [0.5, 0.5],
+    }
+    first = replace(
+        golden.steps[0],
+        selector=replace(golden.steps[0].selector, control={},
+                         visual=visual))
+    golden = GoldenTrace.from_dict(replace(
+        golden, steps=(first, *golden.steps[1:])).to_dict())
+    # 生产写链落 §5 单夹 + 模板落单夹(整夹自足)。
+    record_dir = tmp_path / "record"
+    layout = TrajectoryLayout.create(record_dir, "log-center-export")
+    (layout.root / "assets" / "sha256").mkdir(parents=True, exist_ok=True)
+    (layout.root / "assets" / "sha256" / f"{digest_hex}.png").write_bytes(
+        template_bytes)
+    layout.write_revision_trace(
+        "REV-0001", _json.loads(canonical_json(golden.to_dict())))
+
+    # 整夹复制到新根,然后旧目录整体改名移走(旧路径不可访问)。
+    moved_record = tmp_path / "moved-record"
+    moved_record.mkdir()
+    shutil.copytree(layout.root, moved_record / layout.trajectory_id)
+    old_path = layout.root
+    record_dir.rename(tmp_path / "record-gone")
+    assert not old_path.exists(), "场景前提:旧目录已不可访问"
+
+    # 观测假层(照 round-16 正例):灰底 + 唯一匹配帧。
+    frame = Image.new("RGB", (800, 600), (90, 90, 90))
+    frame.paste(template, (0, 0))
+    fbuf = io.BytesIO()
+    frame.save(fbuf, format="PNG")
+    frame_bytes = fbuf.getvalue()
+
+    def screenshot(_path=None):
+        return {"ok": True, "capture_scope": "window",
+                "image_b64": base64.b64encode(frame_bytes).decode("ascii"),
+                "origin": [0, 0]}
+
+    backend.screenshot = screenshot
+    backend.recorder_ui_rectangles = lambda: []
+    backend.protected_rectangles = lambda: []
+    trace_root = tmp_path / "traces"
+
+    exit_code = cli.main(["--target", "win-dev", "replay",
+                          str(moved_record / layout.trajectory_id),
+                          "--trace-root", str(trace_root),
+                          "--replay-mode", "semantic_first"])
+    output = _json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0, output
+    assert output["latched"] is False, output["steps"]
+    assert [s["outcome"] for s in output["steps"]] == \
+        ["pass", "pass", "pass"], output["steps"]
+    assert output["dispatchInputs"] == 3, output["steps"]
+    # visual 模板从新夹解析(旧根不可访问仍唯一匹配派发)。
+    click_calls = [c for c in backend.dispatch_calls
+                   if c["method"] == "click_window_at"]
+    assert len(click_calls) == 1, backend.dispatch_calls
+    assert click_calls[0]["x"] == 30 and click_calls[0]["y"] == 20
+    # summary/report 落新夹 runs/(执行面落点也随新夹)。
+    run_dir = Path(output["ledgerRoot"])
+    assert run_dir.is_dir()
+    assert run_dir.relative_to(moved_record / layout.trajectory_id) \
+        .parts[0] == "runs"
+    summary = _json.loads((run_dir / "summary.json").read_text(
+        encoding="utf-8"))
+    assert summary["ok"] is True and summary["outcome"] == "pass"
+    assert (run_dir / "report.json").is_file()

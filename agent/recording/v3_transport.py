@@ -45,7 +45,8 @@ _TOOL_POSITIONAL: dict[str, list[str]] = {
     "register_window_declaration": ["declarations_json", "run_token"],
     "focus_bound_window": ["window_id", "binding_token", "run_token",
                            "action_id", "action_args", "request_id",
-                           "target_ref", "observe"],
+                           "target_ref", "observe", "read_only",
+                           "capture_image"],
 }
 
 #: Keys the adapter passes as None on purpose; the MCP carrier must still
@@ -57,12 +58,30 @@ _NONE_PASSTHROUGH = frozenset({
 
 
 class _BindingFacadeShim:
-    """Read-only binding-facade stand-in: `step_context` resolves the
+    """Binding-facade stand-in over MCP tools.  `step_context` resolves the
     authoritative revision through MCP `reverify_bound_window` (run
-    consistency is guaranteed by the MCP run_token)."""
+    consistency is guaranteed by the MCP run_token); the S4 effect surface
+    (`begin_effect_baseline` / `observe_effect_after_action` /
+    `bind_increment`) forwards to the server tools of the same names —
+    baseline tokens live only in the target process's facade memory, so
+    they must round-trip through tool responses, never be fabricated
+    locally.  Every refusal envelope (ok=False) raises ValueError, the
+    same contract the adapter's fail-closed handling expects."""
 
     def __init__(self, tools: "MCPServerTools"):
         self._tools = tools
+
+    def _call_checked(self, name: str, params: dict) -> dict:
+        raw = self._tools.call(name, params)
+        doc = json.loads(raw)
+        if doc.get("ok") is False and "code" in doc:
+            # Server-tool refusal envelope (carries "code").  Business
+            # outcomes of observe_effect_after_action — timeout/ambiguous —
+            # carry "outcome", not "code", and must reach the adapter's
+            # outcome handling intact (raising here would relabel a
+            # deadline timeout as "error" and corrupt the evidence).
+            raise ValueError(f"{name} refused: {raw[:200]}")
+        return doc
 
     def step_context(self, *, run_id: str, step_id: str, attempt_id: str,
                      window_id: str, binding_token: str) -> dict:
@@ -74,6 +93,28 @@ class _BindingFacadeShim:
         if not doc.get("binding_token"):
             raise ValueError(f"{window_id}: reverify refused: {raw[:200]}")
         return {"bindingRevision": doc.get("revision")}
+
+    def begin_effect_baseline(self, window_id: str, identity: Mapping,
+                              *, binding_token: str | None = None) -> dict:
+        return self._call_checked("begin_effect_baseline", {
+            "window_id": window_id, "identity": identity,
+            "binding_token": binding_token,
+            "run_token": self._tools.run_token})
+
+    def observe_effect_after_action(self, window_id: str,
+                                    baseline_token: str, *, effect: Mapping,
+                                    binding_token: str | None = None) -> dict:
+        return self._call_checked("observe_effect_after_action", {
+            "window_id": window_id, "baseline_token": baseline_token,
+            "effect": effect, "binding_token": binding_token,
+            "run_token": self._tools.run_token})
+
+    def bind_increment(self, window_id: str, identity: Mapping, *,
+                       native_id: str, run_token: str | None = None) -> dict:
+        return self._call_checked("bind_increment", {
+            "window_id": window_id, "identity": identity,
+            "native_id": native_id,
+            "run_token": run_token or self._tools.run_token})
 
 
 class MCPServerTools:

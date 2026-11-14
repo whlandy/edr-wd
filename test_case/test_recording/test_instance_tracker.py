@@ -2061,3 +2061,463 @@ def test_post_exception_survives_double_stop(monkeypatch):
         product_policy.reset_for_tests()
         server._binding_facade_holder["facade"] = None
         server._binding_facade_holder["tracker"] = None
+
+
+# ---- A 阶段片(轮次 11):SHOW 证据接入实例事实 ----
+
+def test_show_event_creates_fact_for_unknown_native(lease):
+    """子菜单窗口枚举缺口的最短反例(tracker 级):真实菜单/子菜单
+    HWND 通常没有自己的 EVENT_OBJECT_CREATE — 只有 SHOW(带 owner
+    edge)。事件流里未知 native 的 show 事实不得被静默丢弃:SHOW 即
+    本 run 观测到该实例存在的证据(与未知 native 的 create 同信任
+    模型),必须建立事实供绑定门消费;HIDE 已知实例的现有语义
+    (连续性,换代际数 0)不变。"""
+    source = instance_tracker.LifecycleEventStream(events=[
+        {"kind": "show", "native_id": "300", "pid": 42,
+         "root_control_id": "MenuRoot", "class_name": "FakeWnd"},
+    ], healthy=True)
+    tracker = instance_tracker.RunInstanceTracker(
+        event_source=source, run_token=lease.run_token)
+    tracker.start()
+    try:
+        tracker.observe()
+        fact = tracker._facts.get("300")
+        assert fact is not None, (
+            "未知 native 的 SHOW 事件必须建立事实(当前被静默丢弃)")
+        assert tracker.instance_alive("300") is True
+        assert tracker.instance_generation("300") == 1
+        # 同实例 HIDE/SHOW 连续性:不换代际。
+        source._events.extend([
+            {"kind": "hide", "native_id": "300"},
+            {"kind": "show", "native_id": "300"},
+        ])
+        tracker.observe()
+        assert tracker.instance_alive("300") is True
+        assert tracker.instance_generation("300") == 1
+    finally:
+        tracker.stop()
+
+
+def test_production_hook_show_event_reaches_tracker(monkeypatch):
+    """生产源链(WindowsEventHookSource.on_win_event → tracker):SHOW
+    事件(event=EVENT_OBJECT_SHOW, 顶层 OBJID_WINDOW)经生产源进入
+    跟踪事实 — 接线缺口的最短生产形状反例(mock Win32,无真窗口)。"""
+    import target.server as server
+    from target.automation import instance_events as events
+    from test_case.test_recording.test_window_binding_server_wiring import (
+        _FakeOSBackend, _real_begin,
+    )
+    from target.action_dispatcher import set_backend_resolver
+    product_policy.reset_for_tests()
+    server._binding_facade_holder["facade"] = None
+    server._binding_facade_holder["tracker"] = None
+    stop_event = threading.Event()
+
+    class ShowOnlyUser32:
+        def SetWinEventHook(self, *a):
+            return 77
+
+        def UnhookWinEvent(self, h):
+            return True
+
+        def GetMessageW(self, lpmsg, *a):
+            assert lpmsg is not None
+            stop_event.wait()
+            return 0
+
+        def PostThreadMessageW(self, *a):
+            stop_event.set()
+            return True
+
+    monkeypatch.setattr(events, "_user32", ShowOnlyUser32(), raising=False)
+    monkeypatch.setattr(events, "_threading_start",
+                        lambda target=None, args=None, daemon=False:
+                        _th_daemon(target, args or {}),
+                        raising=False)
+    # 主窗口在基线;子菜单(300)不在枚举里(Qt 弹出前)。
+    backend = _FakeOSBackend(
+        {"100": {"process_id": 42, "title": "logo1",
+                 "root_control_id": "MainRoot"}},
+        capability={"supported": False, "coverage": "strong",
+                    "generation": 2})
+    backend.lifecycle_event_stream = (
+        lambda: WindowsPywinautoBackend.lifecycle_event_stream(backend))
+    backend.window_sequence_capability = lambda: {
+        "decided_by": "instance-tracker",
+        "note": "capability decided by this run's instance tracker"}
+    run = _real_begin(server, monkeypatch,
+                      product_policy.GuardedBackend(backend,
+                                                    "windows_pywinauto"))
+    try:
+        tracker = server._binding_facade_holder.get("tracker")
+        assert tracker is not None
+        tracker.observe()
+        # 生产源注入子菜单 SHOW(无 CREATE 前情;带 owner edge)。
+        source = tracker._event_source
+        source.on_win_event(
+            events.EVENT_OBJECT_SHOW, native_id="300",
+            owner_handle=100)
+        tracker.observe()
+        assert tracker.instance_alive("300") is True, (
+            "生产源 SHOW 事件必须进入跟踪事实(子菜单枚举缺口)")
+        assert tracker.instance_generation("300") == 1
+    finally:
+        stop_event.set()
+        try:
+            product_policy.end_product_run(run["run_token"])
+        except ValueError:
+            pass
+        product_policy.reset_for_tests()
+        server._binding_facade_holder["facade"] = None
+        server._binding_facade_holder["tracker"] = None
+
+
+def test_show_only_submenu_window_binds(monkeypatch):
+    """绑定验收(A 阶段片,step-0004 形状):子菜单窗口只有 SHOW 证据
+    (无 CREATE 前情、枚举清单可见)时,bind_entry_window 不得再以
+    window_binding_not_found 拒绝 — 修复前本用例红(拒绝),修复后
+    事实存在 → 绑定成功。身份/归属/活性门全部照走(不放宽)。"""
+    import target.server as server
+    from target.automation import instance_events as events
+    from test_case.test_recording.test_window_binding_server_wiring import (
+        _FakeOSBackend, _real_begin,
+    )
+    from target.action_dispatcher import set_backend_resolver
+    product_policy.reset_for_tests()
+    server._binding_facade_holder["facade"] = None
+    server._binding_facade_holder["tracker"] = None
+    stop_event = threading.Event()
+
+    class ShowUser32:
+        def SetWinEventHook(self, *a):
+            return 77
+
+        def UnhookWinEvent(self, h):
+            return True
+
+        def GetMessageW(self, lpmsg, *a):
+            assert lpmsg is not None
+            stop_event.wait()
+            return 0
+
+        def PostThreadMessageW(self, *a):
+            stop_event.set()
+            return True
+
+    monkeypatch.setattr(events, "_user32", ShowUser32(), raising=False)
+    monkeypatch.setattr(events, "_threading_start",
+                        lambda target=None, args=None, daemon=False:
+                        _th_daemon(target, args or {}),
+                        raising=False)
+    # 主窗口(基线)+ 子菜单(300:已在清单可见,但跟踪事实此前只有
+    # SHOW — 无 CREATE)。
+    backend = _FakeOSBackend(
+        {"100": {"process_id": 42, "title": "logo1",
+                 "root_control_id": "MainRoot"},
+         "300": {"process_id": 42, "title": "EDRClient",
+                 "root_control_id": "EdrMainWindow"}},
+        capability={"supported": False, "coverage": "strong",
+                    "generation": 2})
+    backend.lifecycle_event_stream = (
+        lambda: WindowsPywinautoBackend.lifecycle_event_stream(backend))
+    backend.window_sequence_capability = lambda: {
+        "decided_by": "instance-tracker",
+        "note": "capability decided by this run's instance tracker"}
+    run = _real_begin(server, monkeypatch,
+                      product_policy.GuardedBackend(backend,
+                                                    "windows_pywinauto"))
+    try:
+        facade = server._binding_facade_holder.get("facade")
+        tracker = server._binding_facade_holder.get("tracker")
+        tracker.observe()
+        source = tracker._event_source
+        # 子菜单只经 SHOW 进入(真实菜单形状:无 CREATE 事件)。
+        source.on_win_event(
+            events.EVENT_OBJECT_SHOW, native_id="300", owner_handle=100)
+        # 子菜单声明必须在注册面(product domain)内 — dialog role
+        # (main/dialog,动态标题)按 titleRegex 匹配。
+        server.register_window_declaration(json.dumps({
+            "submenu": {"processName": "EDRClient.exe",
+                        "titleRegex": "^EDRClient$"},
+        }), run["run_token"])
+        bound = json.loads(server.bind_entry_window(
+            "submenu", {"processName": "EDRClient.exe",
+                        "titleRegex": "^EDRClient$"},
+            run["run_token"]))
+        assert bound.get("binding_token"), (
+            f"SHOW-only 子菜单窗口必须可绑定(修复前 window_binding_not_found),"
+            f"实际 {bound}")
+        assert bound.get("bound_native_id") == "300"
+    finally:
+        stop_event.set()
+        try:
+            product_policy.end_product_run(run["run_token"])
+        except ValueError:
+            pass
+        product_policy.reset_for_tests()
+        server._binding_facade_holder["facade"] = None
+        server._binding_facade_holder["tracker"] = None
+
+
+# ---- A 阶段片(轮次 12):SHOW 证据消费点收口 — 生产 hook 事件行带 pid ----
+
+def test_production_hook_show_event_carries_pid(monkeypatch):
+    """生产 raw 回调(_on_win_event_raw)必须捕获窗口 pid:SHOW 建立的
+    事实 identity 全 None 时,bind_increment 消费者(binding.py 读
+    fact.identity["pid"])会把 bound_pid 记成 None,后续 reverify 进程
+    比对恒失配 → 强实例链失效。GetWindowThreadProcessId 与 owner edge
+    同类(廉价 Win32 回调内查询,无 UIA);取不到 pid 时如实缺省,不伪造。"""
+    stop_event = threading.Event()
+
+    class PidUser32:
+        def __init__(self):
+            self.pid_queries: list[int] = []
+
+        def SetWinEventHook(self, *a):
+            return 77
+
+        def UnhookWinEvent(self, h):
+            return True
+
+        def GetMessageW(self, lpmsg, *a):
+            assert lpmsg is not None
+            stop_event.wait()
+            return 0
+
+        def PostThreadMessageW(self, *a):
+            stop_event.set()
+            return True
+
+        def GetAncestor(self, hwnd, flag):
+            return 100
+
+        def GetWindowThreadProcessId(self, hwnd, out_pid):
+            # 真实形状:hwnd 原样查询;out_pid 是 LPDWORD(索引写回共享
+            # 缓冲 — 纯 Python mock 下 .value 赋值不写回 byref/pointer)。
+            self.pid_queries.append(int(hwnd))
+            out_pid[0] = 42
+            return 1
+
+    user32 = PidUser32()
+    # raw 回调经 self._user32() 方法(类方法,每次 fresh WinDLL);
+    # 测试替换类方法返回 mock(模块级 _user32 接缝只服务 _worker)。
+    monkeypatch.setattr(events.WindowsEventHookSource, "_user32",
+                        lambda self: user32, raising=False)
+    monkeypatch.setattr(events, "_threading_start",
+                        lambda target=None, args=None, daemon=False:
+                        _th_daemon(target, args or {}), raising=False)
+    source = events.WindowsEventHookSource()
+    source.start()
+    try:
+        # 真实 raw 回调形状:SHOW,hwnd=300,GA_ROOTOWNER=100(owner)。
+        source._on_win_event_raw(
+            hook=None, event=events.EVENT_OBJECT_SHOW, hwnd=300,
+            id_object=events.OBJID_WINDOW, id_child=0,
+            thread_id=0, time_ms=0)
+        batch = source.drain_events()
+        show_rows = [e for e in batch if e.get("kind") == "show"]
+        assert show_rows, f"SHOW 事件必须入队,实际 {batch}"
+        assert show_rows[0].get("pid") == 42, (
+            "生产 SHOW 事件行必须携带 pid(bind_increment 的身份消费面)")
+        assert show_rows[0].get("ownerHandle") == 100
+        assert user32.pid_queries == [300], (
+            "pid 查询必须发生在 raw 回调内(hook 时点,无 UIA)")
+    finally:
+        stop_event.set()
+        source.stop()
+
+
+def test_show_fact_pid_feeds_bind_increment_and_reverify(monkeypatch):
+    """消费链验收(tracker→bind_increment→reverify):SHOW-only 实例经
+    生产源(无基线条目)进入事实后,bind_increment 绑定的 bound_pid 必须
+    来自事实 identity(非 None),且下一步 reverify 进程比对通过 —
+    修复前 identity 全 None → bound_pid=None → reverify 恒失配虚假
+    window_binding_lost。inventory 活性/归属/声明身份门照走不放宽。"""
+    import target.server as server
+    from target.automation import instance_events as events
+    from test_case.test_recording.test_window_binding_server_wiring import (
+        _FakeOSBackend, _real_begin,
+    )
+    product_policy.reset_for_tests()
+    server._binding_facade_holder["facade"] = None
+    server._binding_facade_holder["tracker"] = None
+    stop_event = threading.Event()
+
+    class PidUser32:
+        def SetWinEventHook(self, *a):
+            return 77
+
+        def UnhookWinEvent(self, h):
+            return True
+
+        def GetMessageW(self, lpmsg, *a):
+            assert lpmsg is not None
+            stop_event.wait()
+            return 0
+
+        def PostThreadMessageW(self, *a):
+            stop_event.set()
+            return True
+
+        def GetWindowThreadProcessId(self, hwnd, out_pid):
+            out_pid[0] = 42
+            return 1
+
+    pid_user32 = PidUser32()
+    # 两个接缝同源:模块级 mock 服务 owner worker(_get_user32 缓存),
+    # 类方法 mock 服务 raw 回调(self._user32() 每次 fresh WinDLL)。
+    monkeypatch.setattr(events, "_user32", pid_user32, raising=False)
+    monkeypatch.setattr(events.WindowsEventHookSource, "_user32",
+                        lambda self: pid_user32, raising=False)
+    monkeypatch.setattr(events, "_threading_start",
+                        lambda target=None, args=None, daemon=False:
+                        _th_daemon(target, args or {}), raising=False)
+    # 既有窗口基线只有主窗口(100);子菜单(300)仅经 SHOW 进入 —
+    # 与真实菜单形状一致(枚举在弹出前发生,弹出后清单可见)。
+    backend = _FakeOSBackend(
+        {"100": {"process_id": 42, "title": "logo1",
+                 "root_control_id": "MainRoot"}},
+        capability={"supported": False, "coverage": "strong",
+                    "generation": 2})
+    backend.lifecycle_event_stream = (
+        lambda: WindowsPywinautoBackend.lifecycle_event_stream(backend))
+    backend.window_sequence_capability = lambda: {
+        "decided_by": "instance-tracker",
+        "note": "capability decided by this run's instance tracker"}
+    run = _real_begin(server, monkeypatch,
+                      product_policy.GuardedBackend(backend,
+                                                    "windows_pywinauto"))
+    try:
+        facade = server._binding_facade_holder.get("facade")
+        tracker = server._binding_facade_holder.get("tracker")
+        tracker.observe()  # 消费基线(initial_observed:100)
+        source = tracker._event_source
+        # 子菜单只经生产 raw 回调 SHOW 进入(hook 捕获 pid=42)。
+        source._on_win_event_raw(
+            hook=None, event=events.EVENT_OBJECT_SHOW, hwnd=300,
+            id_object=events.OBJID_WINDOW, id_child=0,
+            thread_id=0, time_ms=0)
+        # 弹出后清单可见(真实形状:枚举发生在弹出后)。
+        backend._windows["300"] = {"process_id": 42, "title": "EDRClient",
+                                   "root_control_id": "EdrMainWindow"}
+        tracker.observe()
+        fact = tracker._facts.get("300")
+        assert fact is not None, "前置:SHOW 必须建立事实"
+        assert (fact.identity or {}).get("pid") == 42, (
+            "事实 identity 必须带 pid(修复前全 None)")
+        server.register_window_declaration(json.dumps({
+            "submenu": {"processName": "EDRClient.exe",
+                        "titleRegex": "^EDRClient$"},
+        }), run["run_token"])
+        bound = facade.bind_increment(
+            "submenu", {"processName": "EDRClient.exe",
+                        "titleRegex": "^EDRClient$"},
+            native_id="300", run_token=run["run_token"])
+        assert bound.get("binding_token"), bound
+        # 下一步 reverify:bound_pid 非空才能通过进程比对(修复前
+        # bound_pid=None → window_binding_lost 虚假失败)。
+        binding = facade._bindings.get("submenu")
+        assert binding is not None and binding.bound_pid == 42, (
+            f"bind_increment 必须从事实 identity 取 pid,实际 "
+            f"{getattr(binding, 'bound_pid', None)}")
+        rev = facade.reverify("submenu", bound["binding_token"])
+        assert rev.get("state") == "BOUND", rev
+    finally:
+        stop_event.set()
+        try:
+            product_policy.end_product_run(run["run_token"])
+        except ValueError:
+            pass
+        product_policy.reset_for_tests()
+        server._binding_facade_holder["facade"] = None
+        server._binding_facade_holder["tracker"] = None
+
+
+def test_deferred_bind_no_structural_multi_candidate_refused(monkeypatch):
+    """受控链 deferred 绑定(execution_ledger.py:1614-1635 消费面)行为
+    钉死(A 阶段片第二面):SHOW-only 窗口 + golden 声明无 structural
+    控件选择器时,bind_entry_window(control_selector=None)走普通唯一性
+    门 — 清单两个同名候选必须如实 window_binding_ambiguous 拒绝(不得
+    挑最新/猜);单候选通过面由 test_show_only_submenu_window_binds 覆盖。"""
+    import target.server as server
+    from target.automation import instance_events as events
+    from test_case.test_recording.test_window_binding_server_wiring import (
+        _FakeOSBackend, _real_begin,
+    )
+    product_policy.reset_for_tests()
+    server._binding_facade_holder["facade"] = None
+    server._binding_facade_holder["tracker"] = None
+    stop_event = threading.Event()
+
+    class ShowUser32:
+        def SetWinEventHook(self, *a):
+            return 77
+
+        def UnhookWinEvent(self, h):
+            return True
+
+        def GetMessageW(self, lpmsg, *a):
+            assert lpmsg is not None
+            stop_event.wait()
+            return 0
+
+        def PostThreadMessageW(self, *a):
+            stop_event.set()
+            return True
+
+    monkeypatch.setattr(events, "_user32", ShowUser32(), raising=False)
+    monkeypatch.setattr(events, "_threading_start",
+                        lambda target=None, args=None, daemon=False:
+                        _th_daemon(target, args or {}), raising=False)
+    backend = _FakeOSBackend(
+        {"100": {"process_id": 42, "title": "logo1",
+                 "root_control_id": "MainRoot"}},
+        capability={"supported": False, "coverage": "strong",
+                    "generation": 2})
+    backend.lifecycle_event_stream = (
+        lambda: WindowsPywinautoBackend.lifecycle_event_stream(backend))
+    backend.window_sequence_capability = lambda: {
+        "decided_by": "instance-tracker",
+        "note": "capability decided by this run's instance tracker"}
+    run = _real_begin(server, monkeypatch,
+                      product_policy.GuardedBackend(backend,
+                                                    "windows_pywinauto"))
+    try:
+        tracker = server._binding_facade_holder.get("tracker")
+        tracker.observe()
+        source = tracker._event_source
+        # 两个同名子菜单只经 SHOW 进入(真实形状:同声明两个弹出实例)。
+        source.on_win_event(events.EVENT_OBJECT_SHOW, native_id="300",
+                            owner_handle=100)
+        source.on_win_event(events.EVENT_OBJECT_SHOW, native_id="301",
+                            owner_handle=100)
+        backend._windows["300"] = {"process_id": 42, "title": "EDRClient",
+                                   "root_control_id": "EdrMainWindow"}
+        backend._windows["301"] = {"process_id": 42, "title": "EDRClient",
+                                   "root_control_id": "EdrMainWindow"}
+        tracker.observe()
+        server.register_window_declaration(json.dumps({
+            "submenu": {"processName": "EDRClient.exe",
+                        "titleRegex": "^EDRClient$"},
+        }), run["run_token"])
+        # deferred 分支同形调用:无 structural 声明 → control_selector=None
+        # → 普通唯一性门 — 两个同名候选必须拒绝,不得猜。
+        bound = json.loads(server.bind_entry_window(
+            "submenu", {"processName": "EDRClient.exe",
+                        "titleRegex": "^EDRClient$"},
+            run["run_token"]))
+        assert bound.get("ok") is False and \
+            bound.get("code") == "window_binding_ambiguous", (
+            "无 structural 声明的多同名 SHOW-only 候选必须如实拒绝,"
+            f"实际 {bound}")
+        assert server._binding_facade_holder.get("facade")._bindings.get(
+            "submenu") is None, "拒绝后不得留下 binding"
+    finally:
+        stop_event.set()
+        try:
+            product_policy.end_product_run(run["run_token"])
+        except ValueError:
+            pass
+        product_policy.reset_for_tests()
+        server._binding_facade_holder["facade"] = None
+        server._binding_facade_holder["tracker"] = None

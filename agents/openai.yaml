@@ -1,7 +1,7 @@
 interface:
-  display_name: "EDR-WD"
+  display_name: "edr-gui-automation (edr-ga)"
   short_description: "Configure, operate, trace, and test EDR automation"
-  default_prompt: "Use $edr-wd to configure, operate, automate, trace, report, or test an EDR-WD Windows/macOS target workflow."
+  default_prompt: "Use $edr-gui-automation to configure, operate, automate, trace, report, or test a Windows/macOS target workflow; edr-ga is the short invocation."
 
 policy:
   allow_implicit_invocation: true
