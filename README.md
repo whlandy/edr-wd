@@ -1,6 +1,9 @@
 # edr-gui-automation (edr-ga)
 
-**简称：`edr-ga`；原名：EDR-WD。** Skill 使用 `$edr-ga`，命令行使用
+**简称：`edr-ga`；原名：EDR-WD。** Skill 正式名为 `edr-gui-automation`，
+使用 `$edr-gui-automation` 或快捷入口 `$edr-ga`（Claude Code 对应
+`/edr-gui-automation`、`/edr-ga`）。项目内两个入口都引用根目录 `SKILL.md`。
+命令行使用
 `edr-ga` 或 `edr-gui-automation`。Git 仓库仍为
 [`edr-wd`](https://github.com/whlandy/edr-wd)，本地目录无需改名。
 旧 `edr-wd` 命令继续兼容；现有 `EDR_WD_*` 环境变量、配置路径及轨迹 schema 不变。
