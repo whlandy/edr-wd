@@ -787,6 +787,55 @@ def test_migration_allocates_next_id_and_never_overwrites_target(tmp_path):
     assert (existing.root / "manifest.json").read_bytes() == guard
 
 
+def test_migration_rewrite_keeps_internal_references_consistent(tmp_path):
+    """冲突改写(TRJ-0001→TRJ-0002)后的内部引用一致性(用户指定核对
+    范围,不扩项):
+
+    - manifest.trajectoryId = 目录身份 = TRJ-0002;
+    - from_manifest 从目标夹仍解析到当前修订主轨迹(发现契约不破);
+    - 机器承载文件(trace/source-map/views/exports/sources)逐字节保真
+      且不内嵌任何 TRJ id → 改写后不存在"悬空旧 id"指向;
+    - 旧 id 唯一可能残留在 write-once 的 README.md 人读标题
+      (目录级一次性产物,不参与 manifest 发现/指针链)——如实记录该
+      边界,不静默改写历史视图。
+    """
+    import json as _json
+    from agent.recording.trajectory_layout import (
+        TrajectoryLayout, execute_migration, from_manifest)
+    src = _migration_source(tmp_path)
+    target_record = tmp_path / "target"
+    existing = TrajectoryLayout.create(target_record, "occupied")
+    (existing.root / "revisions" / "REV-0001" / "trace.v3.json").write_text(
+        "{}", encoding="utf-8")
+    report = execute_migration(src, target_record)
+    assert report["published"] is True
+    dst = target_record / "trajectories" / report["targetTrajectoryId"]
+    # 1) manifest = 目录身份。
+    manifest = _json.loads((dst / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["trajectoryId"] == dst.name == report["targetTrajectoryId"]
+    # 2) 发现契约:从改写后夹仍可定位主轨迹。
+    assert from_manifest(dst).name == "trace.v3.json"
+    # 3) 机器承载文件:源夹本就无 TRJ id(探针已核),改写后仍零旧 id。
+    machine_files = [
+        "revisions/REV-0001/trace.v3.json",
+        "revisions/REV-0001/source-map.json",
+        "revisions/REV-0001/views/steps.md",
+        "revisions/REV-0001/exports/maa/pipeline.json",
+        "revisions/REV-0001/exports/maa/capabilities.json",
+    ]
+    for rel in machine_files:
+        text = (dst / rel).read_text(encoding="utf-8")
+        assert "TRJ-0001" not in text and "TRJ-0002" not in text, rel
+    # 4) 旧 id 残留面仅 README 人读标题(write-once,如实标注边界)。
+    for f in dst.rglob("*"):
+        if f.is_file() and f != dst / "README.md":
+            assert "TRJ-0001" not in f.read_text(encoding="utf-8"), \
+                f.relative_to(dst)
+    readme = (dst / "README.md").read_text(encoding="utf-8")
+    assert "TRJ-0001" in readme, (
+        "README 标题保留源身份是已知 write-once 边界 — 若消失说明契约变了")
+
+
 def test_migration_verify_failure_publishes_nothing(tmp_path):
     """校验失败不发布半成品(§7,修复后契约):复制进暂存区后篡改暂存
     trace 再触发校验 → published=False、verifiedFiles=0;失败证据保留在

@@ -1,8 +1,23 @@
 # 统一 v3 轨迹实施进度
 
-权威：[统一v3轨迹设计](../../doc/unified-v3-trajectory-design.md)。实施分支：`mcp_auto_v3.0`。定时任务：`unified-v3-trajectory-impl`（:13/:33/:53）。
+权威：[统一v3轨迹设计](../../doc/unified-v3-trajectory-design.md)。
+**分支实况更正（2026-11-15）**：评审轮 P1 修复 `abad9f6` 已在 `hermes-remote`（并推到 `origin/hermes-remote`），**不在** `mcp_auto_v3.0`；本轮增量提交 （hermes-remote 顶端 fix(recording) 提交, 未推） 亦在 `hermes-remote`（未推）。账本此处不再以 mcp_auto_v3.0 为实施分支表述。
+定时任务：`unified-v3-trajectory-impl`（:13/:33/:53）——**已停用**（用户指示停止定时延伸；`list_scheduled_tasks` 确认 `enabled: false`，lastRun 2026-11-12 后未再运行）。
 
-## 评审修复（2026-11-10，待回归确认后提交推送）
+## 本轮（2026-11-15）：补齐 replay-mode 三模式契约 + 行为级测试
+
+用户指令：本轮不验收/不推送/不设计 §8 新阶段，只补齐 replay-mode。已完成：
+
+1. **visual_only 仅视觉定位**：动作步缺视觉条件或 resolver → GUI 前拒绝 `visual_only_unsupported`，**禁止语义派发**（纯语义步也走此拒绝，不再落语义候选）。
+2. **semantic_first 语义优先 + 条件回退**：语义候选为空且步带视觉条件与 resolver → 回退视觉解析（A023 `pointer.click_window`）；**>1 候选的歧义拒绝保持不变**（视觉不得掩盖真歧义）。
+3. **semantic_only 保持禁视觉派发**：语义身份步即便带视觉条件仍走语义（resolver 0 调用）。
+4. 修复重构残留：补回 `selector`/`control_selector`/`wanted_automation_id` 绑定、`_resolve_visual` 闭包 `nonlocal latched/blocked_at/observation` 传播。
+5. **行为级三模式测试**（`test_v3_replay_mode.py` 新增 6 用例，断言 resolver 调用次数 + 业务派发方法/次数）——既有 4 测确实不代表三模式覆盖，已补矩阵。
+6. **迁移身份改写仅核对必要内部引用一致性（不扩项）**：探针证实 TRJ id 只承载于 `manifest.json` 与 write-once `README.md` 标题；trace.v3/source-map/views/exports/sources 均不内嵌 id → 冲突改写无悬空旧 id，`from_manifest` 仍可定位主轨迹。新增 `test_migration_rewrite_keeps_internal_references_consistent` 固化该边界。
+
+**最终门槛（3.10，`.venv/bin/python`）**：recording 库 **2105 passed / 1 skipped / 1 deselected，exit 0**（较基线 2098 多 7 = 本轮新增 6+1）；`compileall` 干净；`git diff --check` 干净。提交 （hermes-remote 顶端 fix(recording) 提交, 未推）（hermes-remote，未推）。等待独立复验。
+
+## 评审修复（2026-11-10，abad9f6 已入 hermes-remote）
 
 外审共 4 项，全部在头处理——评审指出的缺陷已修复：
 
@@ -13,10 +28,10 @@
 
 ## 下一轮任务（最新在顶部）
 
-**居中待回归 + 提交**：
-- 3.10 录制库全绿后,在 `mcp_auto_v3.0` 提交评审修复(暂不推,用户说推才推)。
-- 提交范围：`agent/{cli,recording/{artifacts,collection,execution_ledger,trajectory_layout,v3_transport}}.py`、`target/{server.py,windowing/instance_tracker.py,automation/instance_events.py}`、`test_case/test_recording/{test_v3_replay_mode,test_trajectory_layout,test_replay,test_v3_real_server_adapter,test_v3_transport,test_recover_cli,test_golden_v3_window_sequence,test_instance_tracker}.py`、`docs/architecture/{13,14}*.md`、`docs/todo/unified-v3-progress.md`。
-- 未跟踪文件(实机原件/复现脚本/hash 清单)保持不入库 —— 外审已提示提交前需逐项确认是否适合公开,不自动 add。下次循环起继续按设计 §8 推进（先 B 阶段唯一 v3 消费链剩余、再 C 单夹布局三用途投影）。
+**已交付，等待独立复验（2026-11-15）**：本轮 replay-mode 三模式契约补齐 + 行为级测试 + 迁移引用一致性核对，已在 `hermes-remote` 提交 （hermes-remote 顶端 fix(recording) 提交, 未推）（未推）。定时任务停用。
+- **不在本轮做**（用户指令）：不验收、不推送、不设计 §8 新阶段、不拆/reset/回滚 abad9f6。
+- 分支待用户确认：abad9f6 与本轮提交均落在 `hermes-remote`（账本此前误记为 `mcp_auto_v3.0`）。是否回迁/另开实施分支、是否推送，待用户明确后再动 —— 本轮不擅自挪分支。
+- 未跟踪文件(实机原件/复现脚本/hash 清单)保持不入库 —— 外审已提示提交前需逐项确认是否适合公开,不自动 add。
 
 ## 阶段状态
 

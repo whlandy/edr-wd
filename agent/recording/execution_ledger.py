@@ -1828,144 +1828,207 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                     "stepId": step_id, "outcome": "unknown",
                     "reason": "before state unknown"})
                 break
-            # 步骤2:声明 selector.control 的全部约束(automationId/
-            # identifier/controlType/name/fingerprint)解析到本窗口新
-            # 观测 → 候选集;**唯一候选才 dispatch**,多候选 0 业务输入
-            # 拒绝(1059 缺口2:不挑第一项/最近;复用既有精确解析
-            # 唯一性语义 — 与 binding._resolve_unique 同门)。
-            declared = steps_declared.get(step_id)
+            # 步骤2:声明 selector.control/visual 与回放模式共同决定定位策略:
+            #   - visual_only:动作步**必须**走视觉定位;缺视觉条件或
+            #     resolver → 拒绝(禁止语义派发)。
+            #   - semantic_first:语义优先;语义候选为空时若步带视觉条件
+            #     与 resolver → 回退视觉(评审 P1-2 行为契约)。
+            #   - semantic_only:禁视觉派发(纯视觉步拒绝)。
+            # 复用 legacy SafeVisualResolver(红框锁定窗口帧/模板 digest
+            # 校验/置信度门槛),成功派发真实目录动作 pointer.click_window
+            # (A023);失败照 StepMaterializationError 码 fail-closed 锁存。
+            # assertion-only 步无动作派发,不在此门内。
+            # (action_id/action_args/target_ref 由下方统一派发段按
+            # _visual_dispatch 是否为空分派 — 视觉派发不经语义候选)。
             selector = getattr(declared, "selector", None)
             control_selector = getattr(selector, "control", None) or {}
             wanted_automation_id = control_selector.get("automationId")
-            # 诚实拒绝面(轮次 10)→ 视觉解析实装(轮次 15):动作步
-            # 声明控件身份为空 = visual-only(录制时仅图像定位)。注入
-            # resolver 时实装解析 — 复用 legacy SafeVisualResolver 语义
-            # (本步权威观测内的红框锁定窗口帧/模板 digest 校验/置信度
-            # 门槛),解析成功派发真实目录动作 pointer.click_window
-            # (A023);解析失败照 StepMaterializationError 码 fail-closed
-            # 锁存。无 resolver 时保持轮次 10 诚实拒绝,不静默回退语义
-            # 解析。assertion-only 步无动作派发,不在此门内。
-            if getattr(declared, "action_id", None) and \
-                    not control_selector:
-                _visual = getattr(selector, "visual", None)
+            _visual = getattr(selector, "visual", None) \
+                if selector is not None else None
+
+            def _resolve_visual():
+                """尝试视觉解析:成功设置 _visual_dispatch 返回 True;
+                失败/缺前置 → 锁存 break 返回 False。"""
+                nonlocal latched, blocked_at, observation
                 _visual_dispatch = None
-                if _visual and replay_mode == "semantic_only":
-                    # semantic_only 声明纯视觉点击 → 报错,legacy 链同语义
-                    # (replay_selector_semantic_missing);不静默走视觉。
+                if visual_resolver is None or not _visual:
+                    return False
+                _resolution = None
+                _visual_code = "visual_resolution_failed"
+                _visual_message = ""
+                _identity = observation.get("window_identity") or {}
+                observation = {**observation, "active_window": {
+                    "process_name": _identity.get("process_name"),
+                    "title": _identity.get("title"),
+                    "rect": list(_identity.get("rect") or ())}}
+                if observation.get("screenshot_b64") is not None:
+                    observation["screenshot_bytes"] = base64.b64decode(
+                        observation["screenshot_b64"])
+                try:
+                    _resolution = visual_resolver.resolve(
+                        getattr(declared, "action_id"), selector,
+                        observation)
+                except StepMaterializationError as _exc:
+                    _visual_code = getattr(_exc, "code",
+                                           _visual_code)
+                    _visual_message = str(_exc)
+                except Exception as _exc:  # noqa: BLE001 — fail-closed
+                    _visual_message = f"{type(_exc).__name__}: {_exc}"
+                if _resolution is None:
                     hook.complete_after_step(
                         step_result=SimpleNamespace(
-                            step_id=step_id, status=StepStatusValue.BLOCKED),
+                            step_id=step_id,
+                            status=StepStatusValue.BLOCKED),
                         receipt=None, expectation_results=[],
                         window_id=window_id, error_payload={
-                            "code": "replay_selector_semantic_missing",
-                            "message": ("this click has only a visual "
-                                        "selector; choose semantic_first "
-                                        "or visual_only replay")})
+                            "code": _visual_code,
+                            "message": (_visual_message if
+                                        _visual_message else
+                                        f"visual-only resolution "
+                                        f"refused: {_visual_code}")})
                     latched = True
                     blocked_at = step_id
-                    steps_report.append({"stepId": step_id,
-                                         "outcome": "unknown",
-                                         "reason": "semantic_only but "
-                                                   "visual-only selector"})
-                    break
-                if visual_resolver is not None and _visual:
-                    _resolution = None
-                    _visual_code = "visual_resolution_failed"
-                    _visual_message = ""
-                    # legacy 链同形状投影(mcp_runtime.refresh 的
-                    # active_window/screenshot_bytes 面):
-                    # SafeVisualResolver 的窗口矩形门只认
-                    # active_window.rect,匹配器只认 screenshot_bytes —
-                    # v3 观测 bundle 自带 window_identity.rect 与
-                    # screenshot_b64,补该跳投影,不新增观测往返。
-                    _identity = observation.get("window_identity") or {}
-                    observation = {**observation, "active_window": {
-                        "process_name": _identity.get("process_name"),
-                        "title": _identity.get("title"),
-                        "rect": list(_identity.get("rect") or ())}}
-                    if observation.get("screenshot_b64") is not None:
-                        observation["screenshot_bytes"] = base64.b64decode(
-                            observation["screenshot_b64"])
-                    try:
-                        _resolution = visual_resolver.resolve(
-                            getattr(declared, "action_id"), selector,
-                            observation)
-                    except StepMaterializationError as _exc:
-                        _visual_code = getattr(_exc, "code",
-                                               _visual_code)
-                        _visual_message = str(_exc)
-                    except Exception as _exc:  # noqa: BLE001 — fail-closed
-                        _visual_message = f"{type(_exc).__name__}: {_exc}"
-                    if _resolution is None:
+                    steps_report.append({
+                        "stepId": step_id, "outcome": "unknown",
+                        "reason": "visual-only resolution refused",
+                        "code": _visual_code,
+                        "message": (_visual_message if
+                                    _visual_message else
+                                    f"visual-only resolution "
+                                    f"refused: {_visual_code}")})
+                    return False
+                _visual_dispatch = {
+                    "action_id": "pointer.click_window",
+                    "args": {"x": int(_resolution.args["x"]),
+                             "y": int(_resolution.args["y"])},
+                    "target_ref": {
+                        "snapshot_id": observation_id,
+                        "target_id": None,
+                        "fingerprint": None,
+                        "expected_process_name":
+                            window_identities[window_id].get(
+                                "processName"),
+                        "selector_hint": {
+                            "visual_template":
+                                str(_visual.get("template"))}},
+                }
+                step_visual_dispatch[0] = _visual_dispatch
+                return True
+
+            step_visual_dispatch = [_visual_dispatch]
+            visual_refused = False
+            if getattr(declared, "action_id", None):
+                if replay_mode == "visual_only":
+                    # 视觉专用:必须走视觉,禁止语义派发。
+                    if not _visual or visual_resolver is None:
                         hook.complete_after_step(
                             step_result=SimpleNamespace(
                                 step_id=step_id,
                                 status=StepStatusValue.BLOCKED),
                             receipt=None, expectation_results=[],
                             window_id=window_id, error_payload={
-                                "code": _visual_code,
-                                "message": (_visual_message if
-                                            _visual_message else
-                                            f"visual-only resolution "
-                                            f"refused: {_visual_code}")})
+                                "code": "visual_only_unsupported",
+                                "message": ("visual_only replay requires a "
+                                            "visual selector and resolver; "
+                                            "semantic dispatch is "
+                                            "forbidden in this mode")})
                         latched = True
                         blocked_at = step_id
                         steps_report.append({
                             "stepId": step_id, "outcome": "unknown",
-                            "reason": "visual-only resolution refused",
-                            "code": _visual_code,
-                            "message": (_visual_message if
-                                        _visual_message else
-                                        f"visual-only resolution "
-                                        f"refused: {_visual_code}")})
-                        break
-                    # 解析成功:窗口相对坐标 + 模板相对点 → 真实 A023
-                    # 派发。绑定租约是本 run 的权威窗口身份 — 不再用
-                    # 模板自带 titleRegex 重解析窗口(防漂移重绑定);
-                    # 归属经 target_ref.expected_process_name(声明身份)
-                    # 交 dispatcher 既有 ownership 门。后续语义候选
-                    # 匹配/drag/scroll 分支被 _visual_dispatch 短路。
-                    _visual_dispatch = {
-                        "action_id": "pointer.click_window",
-                        "args": {"x": int(_resolution.args["x"]),
-                                 "y": int(_resolution.args["y"])},
-                        "target_ref": {
-                            "snapshot_id": observation_id,
-                            "target_id": None,
-                            "fingerprint": None,
-                            "expected_process_name":
-                                window_identities[window_id].get(
-                                    "processName"),
-                            "selector_hint": {
-                                "visual_template":
-                                    str(_visual.get("template"))}},
-                    }
-                else:
-                    hook.complete_after_step(
-                        step_result=SimpleNamespace(
-                            step_id=step_id, status=StepStatusValue.BLOCKED),
-                        receipt=None, expectation_results=[],
-                        window_id=window_id, error_payload={
+                            "reason": "visual_only without visual "
+                                      "condition",
                             "code": "visual_only_unsupported",
-                            "message": ("step declares no control identity "
-                                        "(visual-only); visual replay "
-                                        "resolution is not wired into the "
-                                        "controlled v3 chain — use the "
-                                        "legacy replay_mode visual path or "
-                                        "re-record with control identity")})
-                    latched = True
-                    blocked_at = step_id
-                    steps_report.append({
-                        "stepId": step_id, "outcome": "unknown",
-                        "reason": "visual-only step unsupported",
-                        "code": "visual_only_unsupported",
-                        "message": ("step declares no control identity "
-                                    "(visual-only); visual replay "
-                                    "resolution is not wired into the "
-                                    "controlled v3 chain — use the legacy "
-                                    "replay_mode visual path or re-record "
-                                    "with control identity")})
+                            "message": ("visual_only replay requires a "
+                                        "visual selector and resolver; "
+                                        "semantic dispatch is forbidden "
+                                        "in this mode")})
+                        visual_refused = True
+                    elif not _resolve_visual():
+                        visual_refused = True
+                elif not control_selector:
+                    # 无语义身份:
+                    #  - semantic_only:纯视觉步拒绝
+                    #    (replay_selector_semantic_missing,legacy 链
+                    #     同语义);无身份无视觉 = 轮次 10 诚实拒绝
+                    #    (visual_only_unsupported,不冒充
+                    #     target_not_in_observation)。
+                    #  - semantic_first:走视觉;无视觉条件或 resolver
+                    #    → 拒绝。
+                    if replay_mode == "semantic_only" and not _visual:
+                        hook.complete_after_step(
+                            step_result=SimpleNamespace(
+                                step_id=step_id,
+                                status=StepStatusValue.BLOCKED),
+                            receipt=None, expectation_results=[],
+                            window_id=window_id, error_payload={
+                                "code": "visual_only_unsupported",
+                                "message": ("step declares no control "
+                                            "identity and no visual "
+                                            "selector; there is nothing "
+                                            "to replay with — re-record "
+                                            "with control identity")})
+                        latched = True
+                        blocked_at = step_id
+                        steps_report.append({
+                            "stepId": step_id, "outcome": "unknown",
+                            "reason": "visual-only step unsupported",
+                            "code": "visual_only_unsupported",
+                            "message": ("step declares no control "
+                                        "identity and no visual "
+                                        "selector; there is nothing "
+                                        "to replay with — re-record "
+                                        "with control identity")})
+                        visual_refused = True
+                    elif replay_mode == "semantic_only":
+                        # semantic_only 纯视觉步 → 拒绝(不静默走视觉)。
+                        hook.complete_after_step(
+                            step_result=SimpleNamespace(
+                                step_id=step_id,
+                                status=StepStatusValue.BLOCKED),
+                            receipt=None, expectation_results=[],
+                            window_id=window_id, error_payload={
+                                "code": "replay_selector_semantic_missing",
+                                "message": ("this click has only a visual "
+                                            "selector; choose semantic_first "
+                                            "or visual_only replay")})
+                        latched = True
+                        blocked_at = step_id
+                        steps_report.append({"stepId": step_id,
+                                             "outcome": "unknown",
+                                             "reason": "semantic_only but "
+                                                       "visual-only "
+                                                       "selector"})
+                        visual_refused = True
+                    elif replay_mode == "semantic_first":
+                        # semantic_first 无语义身份 → 走视觉(无视觉条件
+                        # 或 resolver 则拒绝)。
+                        if not _visual or visual_resolver is None:
+                            hook.complete_after_step(
+                                step_result=SimpleNamespace(
+                                    step_id=step_id,
+                                    status=StepStatusValue.BLOCKED),
+                                receipt=None, expectation_results=[],
+                                window_id=window_id, error_payload={
+                                    "code": "visual_only_unsupported",
+                                    "message": ("step declares no control "
+                                                "identity and no visual "
+                                                "selector")})
+                            latched = True
+                            blocked_at = step_id
+                            steps_report.append({
+                                "stepId": step_id, "outcome": "unknown",
+                                "reason": "visual-only step unsupported",
+                                "code": "visual_only_unsupported",
+                                "message": ("step declares no control "
+                                            "identity and no visual "
+                                            "selector")})
+                            visual_refused = True
+                        elif not _resolve_visual():
+                            visual_refused = True
+                if visual_refused:
                     break
+            _visual_dispatch = step_visual_dispatch[0]
 
             def _matches(control) -> bool:
                 # 声明约束逐一比对;声明字段必须与观测投影一致。
@@ -2017,6 +2080,24 @@ def execute_v3_window_stage_real(*, golden, ledger, server_tools,
                                 candidates[0], list(projected_controls.values()))
                     except (LocatorError, ValueError):
                         candidates = []
+            if _visual_dispatch is None and not candidates:
+                # semantic_first 视觉回退:语义候选为空且步带视觉条件与
+                # resolver → 回退视觉解析(评审 P1-2:语义优先、条件回退)。
+                # 回退失败照 _resolve_visual 锁存 break;成功则把外层
+                # _visual_dispatch 置上,跳过下方两个语义拒绝面。
+                if (replay_mode == "semantic_first" and _visual
+                        and visual_resolver is not None):
+                    if _resolve_visual():
+                        _visual_dispatch = step_visual_dispatch[0]
+                        # 回退成功:按视觉分支补齐动作语义(跳过下方语义
+                        # target 解析,直接用解析出的窗口相对坐标)。
+                        target_control = {}
+                        wanted_automation_id = None
+                        action_id = _visual_dispatch["action_id"]
+                        action_args = dict(_visual_dispatch["args"])
+                        target_ref = dict(_visual_dispatch["target_ref"])
+                    else:
+                        break
             if _visual_dispatch is None and not candidates:
                 hook.complete_after_step(
                     step_result=SimpleNamespace(
