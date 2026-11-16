@@ -158,6 +158,7 @@ def _collect_one(agent, session_id: str, output_root, profile, timeout, log,
         "status": artifacts.compilation.golden.status,
         "issues": compiled_issues,
         "captureIssues": capture_issues,
+        "caseMemory": getattr(artifacts, "case_memory", None),
     }
 
 
@@ -187,4 +188,5 @@ def _collect(agent, session_id: str, output_root, profile, timeout, log) -> dict
         "status": artifacts.compilation.golden.status,
         "issues": compiled_issues,
         "captureIssues": capture_issues,
+        "caseMemory": getattr(artifacts, "case_memory", None),
     }

@@ -661,6 +661,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target", help="Target name (defaults to default_target)")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    memory = sub.add_parser("memory", help="Local trajectory evidence lookup; never dispatches GUI actions")
+    memory.add_argument("--record-root", default="recordings")
+    memories = memory.add_subparsers(dest="memory_action", required=True)
+    ingest = memories.add_parser("import", help="Register explicit persisted artifacts; no source changes")
+    ingest.add_argument("--raw", required=True)
+    ingest.add_argument("--trace", required=True)
+    ingest.add_argument("--report", required=True)
+    ingest.add_argument("--dry-run", action="store_true")
+    search = memories.add_parser("search")
+    search.add_argument("query", nargs="?", default="")
+    search.add_argument("--similar-to")
+    search.add_argument("--limit", type=int, default=5)
+    compare = memories.add_parser("compare")
+    compare.add_argument("left")
+    compare.add_argument("right")
+    memories.add_parser("rebuild", help="Rebuild SQLite from verified local case receipts")
+
     config = sub.add_parser("config", help="Create, inspect, validate, or edit target config")
     add_config_arguments(config, include_config_path=False)
 
@@ -950,6 +967,7 @@ def _cmd_record(
         "directory": str(artifacts.directory),
         "issues": compiled_issues,
         "captureIssues": capture_issues,
+        "caseMemory": getattr(artifacts, "case_memory", None),
     }
     if artifacts.trajectory_root is not None:
         # 评审 P1-3: v3 主轨迹在单夹布局,不在 directory — 报告两者,
@@ -1138,6 +1156,9 @@ def _cmd_replay_v3(args, agent, golden, replay_profile,
             and ledger_root.parent.parent.name.startswith("TRJ-"):
         _persist_run_summary_report(
             ledger.root, result, ledger_root_str=str(ledger.root))
+        memory_result = _remember_v3_run(asset_root, golden, ledger.root)
+    else:
+        memory_result = {"status": "not_applicable", "reason": "flat_v3_run"}
     return _print_result({
         "ok": result.get("latched") is False and bool(report.get("outcome") == "pass"),
         "runId": result.get("runId"),
@@ -1152,7 +1173,30 @@ def _cmd_replay_v3(args, agent, golden, replay_profile,
         "end": result.get("end"),
         "failedStep": report.get("failedStep"),
         "ledgerRoot": str(ledger_root),
+        "caseMemory": memory_result,
     })
+
+
+def _remember_v3_run(trajectory_root, golden, ledger_root):
+    """Observe persisted output only; this hook has no GUI or repair authority."""
+    if os.environ.get("EDR_GA_CASE_MEMORY", "1") == "0":
+        return {"status": "disabled"}
+    from agent.recording.case_memory import CaseMemory
+    import sqlite3
+    try:
+        # Match actual trace bytes to the registered revision; never guess
+        # another revision because the manifest pointer moved during a run.
+        memory = CaseMemory(trajectory_root.parent.parent)
+        candidates = sorted((trajectory_root / "revisions").glob("*/trace.v3.json"))
+        matched = [p for p in candidates if json.loads(p.read_text()) == golden.to_dict()]
+        if len(matched) != 1:
+            return {"status": "error", "code": "case_memory_revision_ambiguous"}
+        entry = memory.record_run(trace_path=matched[0], summary_path=ledger_root / "summary.json")
+        # Suggestions remain evidence references, not recovered actions.
+        entry["references"] = memory.search(similar_to=entry["caseId"], limit=3)
+        return entry
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+        return {"status": "error", "code": "case_memory_run_index_failed"}
 
 
 def _v3_capability(profile_id: str):
@@ -1572,6 +1616,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.command == "memory":
+        from agent.recording.case_memory import CaseMemory
+        import sqlite3
+        memory = CaseMemory(args.record_root)
+        try:
+            if args.memory_action == "import":
+                method = memory.preview if args.dry_run else memory.register
+                result = method(raw_path=args.raw, trace_path=args.trace, report_path=args.report)
+            elif args.memory_action == "search":
+                result = {"cases": memory.search(args.query, limit=args.limit, similar_to=args.similar_to)}
+            elif args.memory_action == "compare":
+                result = memory.compare(args.left, args.right)
+            else:
+                result = memory.rebuild()
+            return _print_result({"ok": True, **result})
+        except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+            return _print_result({"ok": False, "code": "case_memory_operation_failed"})
+
     if args.command == "config":
         return run_config_command(args)
     if args.command == "products":
@@ -1604,6 +1666,7 @@ def main(argv: list[str] | None = None) -> int:
             "status": result.golden.status,
             "directory": str(artifacts.directory),
             "issues": [issue.to_dict() for issue in result.issues],
+            "caseMemory": getattr(artifacts, "case_memory", None),
         }
         if artifacts.trajectory_root is not None:
             payload["trajectoryRoot"] = str(artifacts.trajectory_root)

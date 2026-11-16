@@ -55,3 +55,6 @@ target/scripts/macos/click_security_center
 
 # Recording outputs: captures of a live target desktop, not source.
 recordings/
+
+# Local trajectory memory contains private evidence and rebuildable indexes.
+case-memory/

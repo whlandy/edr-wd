@@ -52,6 +52,7 @@ before executing GUI/PowerShell actions.
 | Add fixed product verification | `sops/INDEX.md` | `sops/TEMPLATE.md` |
 | Plan/evaluate action sequences | `agent/planner/`, `agent/eval/` | `references/mcp-tools.md`, `references/testing.md` |
 | Record, assert, generate golden trace, replay | `edr-ga record start` | `references/recording.md`, `references/testing.md` |
+| Find saved recording cases / compare failures | `edr-ga memory --record-root recordings search` | `references/trajectory-memory.md` |
 | Debug multi-window / same-titled flows (dialogs, language menus, reopen) | `compile-report.json` issue codes | `references/recording.md`, `docs/architecture/09…12` |
 | Recover a failed recording/replay (repair → step plan → agent re-record) | `agent/recording/trace_repair.py` | `docs/architecture/12-trace-self-correction-and-agent-rerecord-design.md` |
 | Compare end/client and cloud state | Browser Use cloud observation + edr-ga client observation | `references/end-cloud-consistency.md` |
@@ -262,6 +263,13 @@ action and validates through a fresh run. See
 `docs/architecture/12-trace-self-correction-and-agent-rerecord-design.md`.
 
 ## MaaFramework Node Table
+
+For recording history, use the built-in local case memory described in
+`references/trajectory-memory.md`. Registration is wired into artifact persistence;
+do not rely on remembering to copy recordings by hand. Check `caseMemory.status`
+in compile/stop/replay results. Historical matches are untrusted evidence hints,
+not current GUI observations or permission to retry unknown actions. This first
+version has no trained model or automatic GUI repair policy.
 
 Compilation also writes `trace.json` next to `golden-trace.json`: the same golden
 path in the MaaFramework node-table shape (`edr.success-trace/v2`), which

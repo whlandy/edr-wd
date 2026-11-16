@@ -132,6 +132,15 @@ python3 scripts/open_recorder.py        # target-local double-click entry
 
 ## Documentation
 
+### Local trajectory case memory (development branch)
+
+`public` retains the committed baseline without case memory. On
+`feat/trajectory-case-memory`, compilation registers local evidence and folder-based
+v3 CLI replay links its persisted result. Search/compare never dispatch GUI inputs.
+Use `edr-ga memory --record-root recordings search` and see
+[`references/trajectory-memory.md`](references/trajectory-memory.md) for import,
+rebuild, disable switch, and the explicit limits of this first version.
+
 - `SKILL.md` — operating manual entry point with a task→reference table.
 - `references/testing.md` — test suites, live gates, failure triage.
 - `references/recording.md` — recording/replay end-to-end guide.

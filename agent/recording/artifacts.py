@@ -53,6 +53,7 @@ class RecordingArtifacts:
     #: directory holds the main trace.
     trajectory_root: Path | None = None
     trace_v3_path: Path | None = None
+    case_memory: Mapping[str, object] | None = None
 
 
 def _atomic_text(path: Path, content: str) -> None:
@@ -637,4 +638,10 @@ def write_compilation_artifacts(
         _atomic_text(artifacts.generated_test, render_pytest(recording.name))
         _atomic_text(artifacts.conftest, render_conftest())
         _atomic_text(artifacts.pytest_ini, render_pytest_ini())
+    from .case_memory import register_artifacts
+    artifacts = replace(artifacts, case_memory=register_artifacts(
+        Path(output_root).expanduser().resolve(), artifacts))
+    if artifacts.case_memory.get("status") == "error":
+        import logging
+        logging.getLogger(__name__).warning("case_memory_index_failed: source artifacts retained")
     return artifacts

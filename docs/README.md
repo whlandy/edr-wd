@@ -46,6 +46,10 @@ Configuration assets:
 
 ## In-Progress Architecture
 
+- [`../doc/trajectory-case-memory-design.md`](../doc/trajectory-case-memory-design.md):
+  trajectory case memory and bounded learning design; current local MVP usage
+  and limits are in [`../references/trajectory-memory.md`](../references/trajectory-memory.md).
+
 - [`architecture/04-product-adapter-window-hybrid-locator-design.md`](architecture/04-product-adapter-window-hybrid-locator-design.md):
   product adapters, window identity/lifecycle, hybrid localization, and intent-driven PC GUI execution (implementation and acceptance tracker).
 
